@@ -305,6 +305,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     private var continuation: CheckedContinuation<Void, Never>?
     private var generation = 0
+    private var pending = 0
 
     private override init() {
         super.init()
@@ -328,9 +329,21 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
 
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             continuation = cont
-            let utterance = AVSpeechUtterance(string: text)
-            utterance.voice = AVSpeechSynthesisVoice(language: AVSpeechSynthesisVoice.currentLanguageCode())
-            synthesizer.speak(utterance)
+            // One utterance per sentence, with a small breath between them, sounds like a person reading, not a machine.
+            let sentences = Self.sentences(of: Self.speakable(text))
+            pending = max(sentences.count, 1)
+            let voice = Self.bestVoice()
+            for (i, sentence) in sentences.enumerated() {
+                let utterance = AVSpeechUtterance(string: sentence)
+                utterance.voice = voice
+                utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.94          // a touch slower than the default
+                utterance.pitchMultiplier = 1.03
+                utterance.volume = 1
+                utterance.preUtteranceDelay = i == 0 ? 0.08 : 0
+                utterance.postUtteranceDelay = Self.pause(after: sentence)
+                synthesizer.speak(utterance)
+            }
+            if sentences.isEmpty { pending = 0; resolve() }
 
             // Never hang the conversation if the delegate callback doesn't arrive.
             let words = max(text.split(separator: " ").count, 1)
@@ -354,10 +367,71 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.resolve() }
+        Task { @MainActor in
+            self.pending -= 1
+            if self.pending <= 0 { self.pending = 0; self.resolve() }       // only after the last sentence
+        }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.resolve() }
+        Task { @MainActor in self.pending = 0; self.resolve() }
+    }
+
+    // MARK: Sounding like a person
+
+    /// The most natural voice installed for the language: Premium, then Enhanced, then a good standard one. The default
+    /// "compact" voice is the one that sounds robotic. Download Premium or Enhanced voices in
+    /// Settings > Accessibility > Spoken Content > Voices.
+    static func bestVoice() -> AVSpeechSynthesisVoice? {
+        let language = AVSpeechSynthesisVoice.currentLanguageCode()
+        let prefix = String(language.prefix(2))
+        let candidates = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix(prefix) }
+        let liked = ["ava", "zoe", "evan", "nathan", "samantha", "allison", "susan", "tom", "serena", "daniel", "karen", "moira", "rishi", "veena"]
+        func score(_ v: AVSpeechSynthesisVoice) -> Int {
+            var n = 0
+            switch v.quality {
+            case .premium: n += 300
+            case .enhanced: n += 200
+            default: n += 0
+            }
+            if v.language == language { n += 40 }
+            if let i = liked.firstIndex(where: { v.name.lowercased().contains($0) }) { n += 30 - i }
+            if v.name.lowercased().contains("eloquence") || v.identifier.lowercased().contains("eloquence") { n -= 500 }   // the novelty voices
+            if v.identifier.lowercased().contains("speech.synthesis.voice") { n -= 100 }                                  // old robot voices
+            return n
+        }
+        return candidates.max { score($0) < score($1) } ?? AVSpeechSynthesisVoice(language: language)
+    }
+
+    /// Writes the reply the way it is said: no emoji, no brackets, no symbols read out loud.
+    nonisolated static func speakable(_ text: String) -> String {
+        var t = text
+        t = t.replacingOccurrences(of: "\\([^)]*\\)", with: "", options: .regularExpression)       // "(Me)", "(2 days late)"
+        t = String(t.unicodeScalars.filter { !($0.properties.isEmojiPresentation || $0.value == 0xFE0F) })
+        for (a, b) in [(" — ", ", "), (" – ", ", "), ("—", ", "), (" & ", " and "), ("•", ","), ("·", ","), (";", ","), ("…", "."),
+                       ("+", " plus "), ("%", " percent"), ("/", " or "), ("“", ""), ("”", ""), ("\"", "")] {
+            t = t.replacingOccurrences(of: a, with: b)
+        }
+        t = t.replacingOccurrences(of: "\\bTasks: ", with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        t = t.replacingOccurrences(of: " ,", with: ",").replacingOccurrences(of: ",,", with: ",")
+        t = t.replacingOccurrences(of: " .", with: ".").replacingOccurrences(of: " ?", with: "?").replacingOccurrences(of: " !", with: "!")
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func sentences(of text: String) -> [String] {
+        var out: [String] = []
+        text.enumerateSubstrings(in: text.startIndex..., options: [.bySentences, .substringNotRequired]) { _, range, _, _ in
+            let s = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !s.isEmpty { out.append(s) }
+        }
+        return out.isEmpty && !text.isEmpty ? [text] : out
+    }
+
+    /// A question hangs a little longer than a statement, like a person waiting for an answer.
+    nonisolated static func pause(after sentence: String) -> TimeInterval {
+        if sentence.hasSuffix("?") { return 0.22 }
+        if sentence.hasSuffix("!") { return 0.18 }
+        return 0.16
     }
 }

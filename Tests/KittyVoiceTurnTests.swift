@@ -348,4 +348,12 @@ final class KittyVoiceTurnTests: XCTestCase {
         let r = await m.decide(utterance: "ask the maid to clean the floor every Monday", final: true)
         if case .wait = r { XCTFail("a final turn must not end in silence") }
     }
+
+    /// Spoken replies are cleaned up for the ear: no brackets, emoji or "Tasks:" labels, one breath per sentence.
+    func testRepliesAreWrittenForTheEar() {
+        let said = Speaker.speakable("You have 2 open personal tasks. Tasks: Call the dentist (Me), Renew passport (Me). 🙂")
+        XCTAssertEqual(said, "You have 2 open personal tasks. Call the dentist, Renew passport.")
+        XCTAssertEqual(Speaker.sentences(of: said).count, 2)
+        XCTAssertGreaterThan(Speaker.pause(after: "What should I clean?"), Speaker.pause(after: "Okay."))
+    }
 }
