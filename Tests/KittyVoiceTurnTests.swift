@@ -330,4 +330,22 @@ final class KittyVoiceTurnTests: XCTestCase {
         XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean the", silence: 4, lastActed: ""), .nudge)
         XCTAssertEqual(VoiceTurnManager.dropTrailingFiller("buy milk and"), "buy milk")
     }
+
+    /// Regression: "I want my maid to clean the floor weekly" came back wait=true with a routine, and nothing happened.
+    func testWaitWithARoutineIsNotDropped() {
+        let d = AgentDecisionValue(wait: true, action: "create_routine", title: "Clean the floor", category: "", dueDate: "", dueTime: "",
+                                   priority: "", assignee: "maid", frequency: "weekly", notes: "", playbookName: "", playbookSteps: [],
+                                   clarifyingQuestion: "", spokenResponse: "", moreTasks: [])
+        XCTAssertTrue(TaskValidator.waitIsContradicted(d, utterance: "i want my maid to clean the floor weekly"))
+    }
+
+    /// When you have stopped, a model "wait" gets an answer from the rule-based path instead of silence.
+    func testFinalTurnNeverEndsInSilence() async {
+        let engine = ScriptedEngine([AgentDecisionValue(wait: true, action: "wait", title: "", category: "", dueDate: "", dueTime: "", priority: "",
+                                         assignee: "", frequency: "", notes: "", playbookName: "", playbookSteps: [], clarifyingQuestion: "",
+                                         spokenResponse: "", moreTasks: [])])
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] })
+        let r = await m.decide(utterance: "ask the maid to clean the floor every Monday", final: true)
+        if case .wait = r { XCTFail("a final turn must not end in silence") }
+    }
 }

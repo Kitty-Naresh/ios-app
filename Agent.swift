@@ -2925,7 +2925,7 @@ enum TaskValidator {
     static func waitIsContradicted(_ d: AgentDecisionValue, utterance: String) -> Bool {
         guard LocalSemanticPrechecker.check(utterance) == .mayBeComplete else { return false }
         switch d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
-        case "create_task":  return isActionable(TaskPlanner.tidyTitle(d.title, removingDay: false))
+        case "create_task", "create_routine":  return isActionable(TaskPlanner.tidyTitle(d.title, removingDay: false))
         case "create_playbook", "playbook", "teach_playbook": return !d.playbookSteps.isEmpty
         case "view_tasks": return true                                  // "show me personal tasks" is a whole request
         case "complete_task", "delete_task": return !d.title.trimmingCharacters(in: .whitespaces).isEmpty
@@ -3312,9 +3312,10 @@ final class VoiceTurnManager {
     // MARK: One turn
 
     /// One model call at most for one likely-complete turn. The answer is validated before anything can be saved.
-    func decide(utterance: String, now: Date = Date()) async -> TurnResult {
+    /// `final` means the user has stopped (a long silence, or they typed it): a "wait" is no longer an answer.
+    func decide(utterance: String, now: Date = Date(), final: Bool = false) async -> TurnResult {
         lastTrace = TurnTrace(utterance: utterance)
-        let result = await route(utterance: utterance, now: now)
+        let result = await route(utterance: utterance, now: now, final: final)
             state.record(result)
         switch result {
         case .question, .proposal: state.markProcessed(utterance)
@@ -3333,7 +3334,7 @@ final class VoiceTurnManager {
         }
     }
 
-    private func route(utterance: String, now: Date) async -> TurnResult {
+    private func route(utterance: String, now: Date, final: Bool) async -> TurnResult {
         let delta = state.delta(for: utterance)
         lastTrace.delta = delta
         let ctx = context(now: now)
@@ -3413,6 +3414,11 @@ final class VoiceTurnManager {
         Breadcrumb.log("decision: \(decision.action) wait=\(decision.wait)")
             let validated = TaskValidator.validate(decision, utterance: utterance, context: ctx)
             lastTrace.validation = "\(validated)"
+            if case .wait = validated, final {
+                // The user has stopped and the model still says "wait": the rule-based path answers instead of silence.
+                lastTrace.route = "wait-overridden"
+                return await TaskAgent.propose(utterance)
+            }
             return await singleResult(validated, decision: decision, utterance: utterance, ctx: ctx)
         }
 

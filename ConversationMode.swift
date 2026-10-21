@@ -278,7 +278,9 @@ final class VoiceConversation: ObservableObject {
             // Nothing to ask. If there was real content before a trailing "and" or "the", act on that. Never just drop it.
             let trimmed = VoiceTurnManager.dropTrailingFiller(raw)
             if trimmed.split(separator: " ").count >= 2, VoiceTurnManager.norm(trimmed) != VoiceTurnManager.norm(processedText) {
-                beginProcessing(text: trimmed)
+                beginProcessing(text: trimmed, final: true)
+            } else if trimmed.split(separator: " ").count >= 3 {
+                beginProcessing(text: trimmed, final: true)          // the model already said "wait" and you stopped: answer anyway
             } else {
                 resetTurn()
                 if !micOn, micWanted { Task { await startMic() } }
@@ -306,7 +308,7 @@ final class VoiceConversation: ObservableObject {
 
     // MARK: Working out what you meant
 
-    private func beginProcessing(text override: String? = nil, typed: Bool = false) {
+    private func beginProcessing(text override: String? = nil, typed: Bool = false, final: Bool = false) {
         let text = (override ?? turnText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
@@ -328,7 +330,7 @@ final class VoiceConversation: ObservableObject {
         processingTask?.cancel()
         processingTask = Task { [weak self] in
             guard let self else { return }
-            let result = await self.turns.decide(utterance: text)
+            let result = await self.turns.decide(utterance: text, final: final || typed)
             guard !Task.isCancelled, g == self.generation else { return }
             self.finishProcessing(result, typed: typed)
         }
