@@ -1,0 +1,281 @@
+// Add this file to a UNIT TEST target only (File > New > Target > Unit Testing Bundle), never to the app target.
+// If your app module is not called MyApp, change the import below to its name.
+import XCTest
+@testable import Kitty
+
+/// A model that answers from a script, so tests can count calls and control the answers.
+@MainActor
+final class ScriptedEngine: DecisionProviding {
+    var answers: [AgentDecisionValue?]
+    private(set) var prompts: [String] = []
+    init(_ answers: [AgentDecisionValue?]) { self.answers = answers }
+    func decide(prompt: String) async -> AgentDecisionValue? {
+        prompts.append(prompt)
+        return answers.isEmpty ? nil : answers.removeFirst()
+    }
+}
+
+@MainActor
+final class KittyVoiceTurnTests: XCTestCase {
+
+    // A fixed "now": Wednesday 21 October 2026, in UTC, so date answers never depend on the day the tests run.
+    private var calendar: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }()
+    private var now: Date { DateComponents(calendar: calendar, year: 2026, month: 10, day: 21, hour: 9).date! }
+    private func ctx(known: [String] = ["Bathroom", "Groceries", "Plants"], pending: [String] = [], recent: [String] = []) -> ValidationContext {
+        ValidationContext(knownCategories: known, pendingTitles: pending, recentTitles: recent, now: now, calendar: calendar)
+    }
+    private func decision(_ action: String, title: String = "", category: String = "", dueDate: String = "", priority: String = "",
+                          assignee: String = "", frequency: String = "", more: [String] = [], steps: [String] = [],
+                          name: String = "", question: String = "", wait: Bool = false) -> AgentDecisionValue {
+        AgentDecisionValue(wait: wait, action: action, title: title, category: category, dueDate: dueDate, priority: priority,
+                           assignee: assignee, frequency: frequency, playbookName: name, playbookSteps: steps,
+                           clarifyingQuestion: question, moreTasks: more)
+    }
+
+    // MARK: Incomplete utterances
+
+    func testIncompleteUtterancesDoNotReachTheModel() {
+        let incomplete = ["Add a task to…", "Add a task to clean the…", "Um, I want to…", "The bathroom", "Buy…",
+                          "Clean bathroom, buy milk, and…", "Add a task to clean the", "I need to", "actually make it", "wait",
+                          "Clean the bathroom and", "Buy milk but"]
+        for text in incomplete {
+            guard case .incomplete = LocalSemanticPrechecker.check(text) else { return XCTFail("should wait: \(text)") }
+        }
+    }
+
+    func testLikelyCompleteUtterancesMayBeSent() {
+        let complete = ["Add a task to clean the bathroom", "Water the plants every morning", "Buy milk tomorrow",
+                        "Clean bathroom, buy milk, and water plants", "Add a task for laundry.", "What tasks do I have today?",
+                        "Actually, make it high priority", "Create a playbook to cook biryani", "yes", "done"]
+        for text in complete {
+            XCTAssertEqual(LocalSemanticPrechecker.check(text), .mayBeComplete, text)
+        }
+    }
+
+    func testShortPauseNeverCallsTheModelAndLongPauseOnlyWhenComplete() {
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to clean the bathroom", silence: 0.8, lastActed: ""), .keepListening)
+        if case .hold = VoiceTurnManager.gate(utterance: "Add a task to clean the", silence: 2, lastActed: "") {} else { XCTFail() }
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to clean the bathroom", silence: 2, lastActed: ""),
+                       .evaluate("Add a task to clean the bathroom"))
+        // the same words are not judged twice
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to clean the bathroom", silence: 3, lastActed: "Add a task to clean the bathroom"), .keepListening)
+        // a long silence on unfinished speech asks whether the user is done
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to", silence: 11, lastActed: ""), .nudge)
+    }
+
+    // MARK: Ambiguous utterances
+
+    func testAmbiguousRequestsAskOneQuestion() {
+        let laundry = TaskValidator.validate(decision("create_task", title: "Laundry"), utterance: "Add a task for laundry.", context: ctx())
+        XCTAssertEqual(laundry, .clarify("What would you like me to do with laundry?"))
+
+        let asked = TaskValidator.validate(decision("clarify", question: "Wash, fold, or put it away? And when?"),
+                                           utterance: "Add a task for laundry.", context: ctx())
+        XCTAssertEqual(asked, .clarify("Wash, fold, or put it away?"))     // only the first question
+
+        XCTAssertEqual(TaskValidator.validate(decision("complete_task"), utterance: "mark it done", context: ctx()), .clarify("Which task do you mean?"))
+        XCTAssertEqual(TaskValidator.validate(decision("create_task", title: "The bathroom"), utterance: "The bathroom", context: ctx()),
+                       .clarify("What would you like me to do with the bathroom?"))
+    }
+
+    func testWaitSavesNothing() {
+        XCTAssertEqual(TaskValidator.validate(decision("create_task", title: "Clean bathroom", wait: true), utterance: "Add a task to", context: ctx()), .wait)
+    }
+
+    // MARK: One-time tasks
+
+    func testOneTimeTask() {
+        let v = TaskValidator.validate(decision("create_task", title: "clean bathroom", category: "Bathroom"),
+                                       utterance: "Add a task to clean the bathroom.", context: ctx())
+        guard case .tasks(let tasks) = v, tasks.count == 1 else { return XCTFail("\(v)") }
+        XCTAssertEqual(tasks[0].title, "Clean bathroom")
+        XCTAssertEqual(tasks[0].categoryName, "Bathroom")
+        XCTAssertNil(tasks[0].due)
+        XCTAssertNil(tasks[0].priority)
+    }
+
+    func testRelativeDatesAreResolvedInSwiftAndNothingIsInvented() {
+        let tomorrow = TaskValidator.validate(decision("create_task", title: "Buy milk", category: "Groceries", dueDate: "2020-01-01"),
+                                              utterance: "Buy milk tomorrow.", context: ctx())
+        guard case .tasks(let t1) = tomorrow else { return XCTFail() }
+        XCTAssertEqual(t1[0].due, calendar.date(from: DateComponents(year: 2026, month: 10, day: 22)))   // the model's date is ignored
+
+        // the model invents a date, a priority and an assignee that the user never said
+        let invented = TaskValidator.validate(decision("create_task", title: "Buy milk", dueDate: "2026-10-25", priority: "high", assignee: "Rani"),
+                                              utterance: "Buy milk.", context: ctx())
+        guard case .tasks(let t2) = invented else { return XCTFail() }
+        XCTAssertNil(t2[0].due); XCTAssertNil(t2[0].priority); XCTAssertNil(t2[0].assignee)
+    }
+
+    func testCategoryRules() {
+        XCTAssertEqual(TaskValidator.resolveCategory("bathroom", known: ["Bathroom"]), "Bathroom")     // reuse
+        XCTAssertEqual(TaskValidator.resolveCategory("Balcony", known: ["Bathroom"]), "Balcony")       // new but specific
+        XCTAssertNil(TaskValidator.resolveCategory("Other", known: []))                                // too generic
+        XCTAssertNil(TaskValidator.resolveCategory("miscellaneous household chores for later", known: []))
+    }
+
+    // MARK: Routines
+
+    func testRoutines() {
+        let daily = TaskValidator.validate(decision("create_routine", title: "Water plants", category: "Plants", frequency: "daily"),
+                                           utterance: "Water the plants every morning.", context: ctx())
+        guard case .routine(let r1) = daily else { return XCTFail("\(daily)") }
+        XCTAssertEqual(r1.recurrence, RecurrenceSpec())
+
+        let weekly = TaskValidator.validate(decision("create_routine", title: "Clean bathroom", category: "Bathroom", assignee: "househelp", frequency: "weekly"),
+                                            utterance: "Add a task to clean the bathroom every Monday for the househelp", context: ctx())
+        guard case .routine(let r2) = weekly else { return XCTFail("\(weekly)") }
+        XCTAssertEqual(r2.recurrence?.weekdays, [2])
+        XCTAssertEqual(r2.assignee, "Househelp")
+
+        XCTAssertEqual(TaskValidator.validate(decision("create_routine", title: "Clean bathroom", frequency: "weekly"),
+                                              utterance: "Clean the bathroom every week", context: ctx()),
+                       .clarify("Which day of the week should it repeat?"))
+        XCTAssertEqual(TaskValidator.validate(decision("create_routine", title: "Clean bathroom", frequency: "once"),
+                                              utterance: "Clean the bathroom", context: ctx()),
+                       .clarify("How often should it repeat?"))
+    }
+
+    // MARK: Playbooks
+
+    func testPlaybooks() {
+        let steps = ["Buy ingredients", "Marinate chicken", "Cook rice", "Assemble and cook biryani"]
+        let proposed = TaskValidator.validate(decision("create_playbook", steps: steps, name: "Cook biryani"),
+                                              utterance: "Create a playbook to cook biryani.", context: ctx())
+        XCTAssertEqual(proposed, .playbook(name: "Cook biryani", steps: steps, stated: false))      // suggested: needs a yes
+
+        let stated = TaskValidator.validate(decision("create_playbook", steps: steps, name: "Cook biryani"),
+                                            utterance: "Playbook for biryani: buy ingredients, marinate chicken, cook rice", context: ctx())
+        XCTAssertEqual(stated, .playbook(name: "Cook biryani", steps: steps, stated: true))
+
+        XCTAssertEqual(TaskValidator.validate(decision("create_playbook", name: "Cook biryani"), utterance: "Create a playbook to cook biryani", context: ctx()),
+                       .clarify("What steps should it include?"))
+    }
+
+    // MARK: Several unrelated tasks
+
+    func testMultipleUnrelatedTasksAreSeparate() {
+        let v = TaskValidator.validate(decision("create_task", title: "Clean bathroom", category: "Bathroom",
+                                                more: ["Buy milk | Groceries", "Water plants | Plants"]),
+                                       utterance: "Clean the bathroom, buy milk, and water the plants.", context: ctx())
+        guard case .tasks(let tasks) = v else { return XCTFail("\(v)") }
+        XCTAssertEqual(tasks.map(\.title), ["Clean bathroom", "Buy milk", "Water plants"])
+        XCTAssertEqual(tasks.map(\.categoryName), ["Bathroom", "Groceries", "Plants"])
+    }
+
+    // MARK: Corrections and duplicates
+
+    func testCorrectionsChangeThePendingTaskInsteadOfAddingOne() {
+        let v = TaskValidator.validate(decision("update_task", priority: "high"), utterance: "Actually, make it high priority.", context: ctx(pending: ["Clean bathroom"]))
+        guard case .update(let target, let changes) = v else { return XCTFail("\(v)") }
+        XCTAssertEqual(target, "")
+        XCTAssertEqual(changes.priority, "high")
+
+        XCTAssertEqual(TaskValidator.validate(decision("update_task"), utterance: "Actually, change it", context: ctx()), .clarify("What would you like to change?"))
+
+        // the same task again with the pending one: replaces it, not a duplicate
+        let again = TaskValidator.validate(decision("create_task", title: "Clean bathroom", priority: "high"),
+                                           utterance: "Clean the bathroom, it's urgent", context: ctx(pending: ["Clean bathroom"]))
+        guard case .tasks(let tasks) = again else { return XCTFail("\(again)") }
+        XCTAssertEqual(tasks.count, 1)
+
+        // one that was just saved is not added twice
+        let dup = TaskValidator.validate(decision("create_task", title: "Clean bathroom"), utterance: "Clean the bathroom", context: ctx(recent: ["Clean bathroom"]))
+        XCTAssertEqual(dup, .duplicate("Clean bathroom"))
+    }
+
+    // MARK: Confirmation phrases
+
+    func testConfirmationPhrases() {
+        for phrase in ["done", "save it", "go ahead", "thats all", "yes", "okay"] {
+            XCTAssertTrue(VoiceConversation.isConfirmation(phrase), phrase)
+        }
+        XCTAssertEqual(VoiceTurnManager.splitFinalizer("every Monday for the househelp, done").isFinal, true)
+        XCTAssertEqual(VoiceTurnManager.splitFinalizer("every Monday for the househelp, done").text, "every Monday for the househelp")
+        XCTAssertEqual(VoiceTurnManager.splitFinalizer("Clean the bathroom, that's all.").text, "Clean the bathroom")
+        XCTAssertEqual(VoiceTurnManager.splitFinalizer("save it").text, "")
+        // "done" inside a command is not "I'm finished talking"
+        XCTAssertFalse(VoiceTurnManager.splitFinalizer("mark dusting done").isFinal)
+        XCTAssertFalse(VoiceTurnManager.splitFinalizer("the dishes are done").isFinal)
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Clean the bathroom every Monday done", silence: 0.6, lastActed: ""),
+                       .forceEvaluate("Clean the bathroom every Monday"))
+    }
+
+    // MARK: Context-window safety
+
+    func testPromptsStayShort() {
+        let manyCategories = (1...100).map { "Category \($0)" }
+        let long = String(repeating: "clean the bathroom and then ", count: 100)
+        let prompt = PromptBuilder.build(utterance: long, pendingTask: String(repeating: "x", count: 500), pendingPlaybook: nil,
+                                         knownCategories: manyCategories, now: now, calendar: calendar)
+        XCTAssertLessThan(prompt.count, 1_800)
+        XCTAssertTrue(prompt.contains("Category 12"))
+        XCTAssertFalse(prompt.contains("Category 13"))
+        XCTAssertTrue(prompt.contains("Current date: 2026-10-21"))
+        XCTAssertLessThan(PersistentInstructions.text.count, 6_000)     // about 1,500 tokens, well inside the window
+    }
+
+    func testTheSessionIsReplacedBeforeItFillsUp() {
+        if #available(iOS 26.0, *) {
+            XCTAssertFalse(DecisionEngine.shouldRotate(turnsSoFar: 5))
+            XCTAssertTrue(DecisionEngine.shouldRotate(turnsSoFar: DecisionEngine.maxTurnsPerSession))
+        }
+    }
+
+    // MARK: The acceptance sequence
+
+    func testAcceptanceSequence() async {
+        let engine = ScriptedEngine([
+            decision("", wait: true),                                                                   // "...clean the bathroom": may be incomplete
+            decision("create_routine", title: "Clean bathroom", category: "Bathroom", assignee: "househelp", frequency: "weekly")
+        ])
+        let manager = VoiceTurnManager(engine: engine)
+
+        // 1-4: "Add a task to…", pause, "clean the…", pause: the app keeps listening and never asks the model
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to…", silence: 2, lastActed: ""), .hold("trailing off"))
+        if case .hold = VoiceTurnManager.gate(utterance: "Add a task to clean the…", silence: 2, lastActed: "") {} else { XCTFail() }
+        XCTAssertEqual(engine.prompts.count, 0)
+
+        // 5: "bathroom": the model may be asked once, and says wait
+        let u5 = "Add a task to clean the bathroom"
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: u5, silence: 2, lastActed: ""), .evaluate(u5))
+        let r5 = await manager.decide(utterance: u5)
+        guard case .wait = r5 else { return XCTFail("expected wait") }
+        XCTAssertEqual(engine.prompts.count, 1)
+
+        // 7: "every Monday for the househelp": one more call, and it becomes a routine
+        let u7 = "Add a task to clean the bathroom every Monday for the househelp"
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: u7, silence: 2, lastActed: u5), .evaluate(u7))
+        let r7 = await manager.decide(utterance: u7)
+        guard case .proposal(let proposal) = r7 else { return XCTFail("expected a proposal") }
+        XCTAssertEqual(engine.prompts.count, 2)
+        XCTAssertEqual(proposal.rows.first?.title, "Clean bathroom")
+        let tags = proposal.rows.first?.tags.map(\.text) ?? []
+        XCTAssertTrue(tags.contains("every Monday"), "\(tags)")
+        XCTAssertTrue(tags.contains("Househelp"), "\(tags)")
+        XCTAssertTrue(tags.contains("Bathroom"), "\(tags)")
+        XCTAssertEqual(manager.state.pendingTitles, ["Clean bathroom"])
+
+        // 8: "done" saves what is pending (no extra model call)
+        let u8 = u7 + " done"
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: u8, silence: 0.6, lastActed: u7), .forceEvaluate(u7))
+        XCTAssertTrue(VoiceConversation.isConfirmation("done"))
+        XCTAssertEqual(engine.prompts.count, 2)
+    }
+
+    /// Regression: the real model returned wait=true together with a finished task ("Add a task to clean bathroom").
+    func testWaitWithACompleteTaskIsNotDropped() {
+        func decision(wait: Bool, title: String) -> AgentDecisionValue {
+            AgentDecisionValue(wait: wait, action: "create_task", title: title, category: "", dueDate: "", dueTime: "", priority: "",
+                               assignee: "", frequency: "", notes: "", playbookName: "", playbookSteps: [], clarifyingQuestion: "",
+                               spokenResponse: "", moreTasks: [])
+        }
+        XCTAssertTrue(TaskValidator.waitIsContradicted(decision(wait: true, title: "Clean bathroom"), utterance: "add a taks to clean bathroom"))
+        XCTAssertFalse(TaskValidator.waitIsContradicted(decision(wait: true, title: ""), utterance: "add a task to clean bathroom"))
+        XCTAssertFalse(TaskValidator.waitIsContradicted(decision(wait: true, title: "Clean bathroom"), utterance: "add a task to clean the bathroom and"))
+    }
+}
