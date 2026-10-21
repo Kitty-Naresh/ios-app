@@ -275,8 +275,14 @@ final class VoiceConversation: ObservableObject {
             Breadcrumb.log("question: \(q.prefix(60))")
             if speakReplies { Task { await speakAndResume(q) } }
         } else {
-            resetTurn()
-            if !micOn, micWanted { Task { await startMic() } }
+            // Nothing to ask. If there was real content before a trailing "and" or "the", act on that. Never just drop it.
+            let trimmed = VoiceTurnManager.dropTrailingFiller(raw)
+            if trimmed.split(separator: " ").count >= 2, VoiceTurnManager.norm(trimmed) != VoiceTurnManager.norm(processedText) {
+                beginProcessing(text: trimmed)
+            } else {
+                resetTurn()
+                if !micOn, micWanted { Task { await startMic() } }
+            }
         }
     }
 

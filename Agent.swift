@@ -3254,7 +3254,7 @@ final class VoiceTurnManager {
         if silence < longPause { return .keepListening }                          // a short pause: keep listening
         switch LocalSemanticPrechecker.check(text) {
         case .incomplete(let reason):
-            if reason == "action without an object", silence >= quickNudgeAfter { return .nudge }
+            if silence >= quickNudgeAfter, bareQuestion(for: text) != nil { return .nudge }     // "clean", "clean the", "buy"
             return .hold(reason)
         case .mayBeComplete: return .evaluate(text)
         }
@@ -3273,9 +3273,20 @@ final class VoiceTurnManager {
     /// "Add a task to…" it is a real question about the missing task. Anything else is dropped quietly (nil).
     /// The question for an utterance that names an action but nothing to act on: a bare "clean", "Buy", "Add a task to
     /// clean", or an empty playbook or routine. Decided here, not by the model, so it is the same question every time.
+    /// "Clean the" -> "Clean". "Buy milk and" -> "Buy milk". Words that only introduce something that never came.
+    static func dropTrailingFiller(_ text: String) -> String {
+        var words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        func bare(_ w: String) -> String { w.lowercased().filter { $0.isLetter || $0 == "'" } }
+        while let last = words.last, LocalSemanticPrechecker.dangling.contains(bare(last)) || LocalSemanticPrechecker.determiners.contains(bare(last)) {
+            words.removeLast()
+        }
+        return words.joined(separator: " ")
+    }
+
     static func bareQuestion(for utterance: String) -> String? {
         let t = LocalSemanticPrechecker.tokens(utterance)
-        let rest = LocalSemanticPrechecker.tokens(BulkDetector.stripFrames(utterance))
+        // "clean the" is "clean": a trailing "the", "to", "my"... says nothing more.
+        let rest = LocalSemanticPrechecker.tokens(dropTrailingFiller(BulkDetector.stripFrames(utterance)))
         if t.count <= 3, t.starts(with: ["create", "a", "playbook"]) || t.starts(with: ["add", "a", "playbook"]) { return "What should the playbook be for?" }
         if t.count <= 3, t.starts(with: ["create", "a", "routine"]) || t.starts(with: ["add", "a", "routine"]) { return "What should the routine be?" }
         if rest.count == 1, let verb = rest.first, ActionLexicon.verbs.contains(verb) { return "What should I \(verb)?" }

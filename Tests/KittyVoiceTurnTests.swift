@@ -321,4 +321,13 @@ final class KittyVoiceTurnTests: XCTestCase {
         XCTAssertEqual(convo.liveText, "")
         convo.close()
     }
+
+    /// Regression: "clean the" went quiet. A trailing "the" says nothing, so it is the same question as "clean".
+    func testATrailingFillerWordStillGetsTheQuestion() {
+        XCTAssertEqual(VoiceTurnManager.bareQuestion(for: "clean the"), "What should I clean?")
+        XCTAssertEqual(VoiceTurnManager.bareQuestion(for: "Add a task to clean the"), "What should I clean?")
+        XCTAssertNil(VoiceTurnManager.bareQuestion(for: "clean the bathroom"))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean the", silence: 4, lastActed: ""), .nudge)
+        XCTAssertEqual(VoiceTurnManager.dropTrailingFiller("buy milk and"), "buy milk")
+    }
 }
