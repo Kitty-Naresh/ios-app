@@ -2931,15 +2931,21 @@ enum TaskValidator {
         }
     }
 
+    /// The model also sets wait=true when what it really wants is to ask ("clean" -> action "clarify"). A question the user
+    /// never hears looks like Kitty ignoring them, so a wait that arrives with a clarify action becomes the question.
+    static func waitIsReallyAQuestion(_ d: AgentDecisionValue) -> Bool {
+        d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) == "clarify"
+    }
+
     static func validate(_ d: AgentDecisionValue, utterance: String, context ctx: ValidationContext) -> Validated {
-        if d.wait, !waitIsContradicted(d, utterance: utterance) { return .wait }
+        if d.wait, !waitIsContradicted(d, utterance: utterance), !waitIsReallyAQuestion(d) { return .wait }
         let action = d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch action {
         case "clarify":
             let q = d.clarifyingQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
             let one = q.split(separator: "?", omittingEmptySubsequences: true).first.map { String($0) + "?" } ?? q
-            return .clarify(q.isEmpty ? "Could you say a bit more about what you'd like me to do?" : one)
+            return .clarify(q.isEmpty ? ClarificationStateManager.fallbackQuestion(for: .action) : one)
 
         case "unrelated":
             return .unrelated(d.spokenResponse.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -3262,22 +3268,24 @@ final class VoiceTurnManager {
 
     /// Never "Are you done?". With a pending draft the question is the one that draft is waiting on. With a dangling
     /// "Add a task to…" it is a real question about the missing task. Anything else is dropped quietly (nil).
+    /// The question for an utterance that names an action but nothing to act on: a bare "clean", "Buy", "Add a task to
+    /// clean", or an empty playbook or routine. Decided here, not by the model, so it is the same question every time.
+    static func bareQuestion(for utterance: String) -> String? {
+        let t = LocalSemanticPrechecker.tokens(utterance)
+        let rest = LocalSemanticPrechecker.tokens(BulkDetector.stripFrames(utterance))
+        if t.count <= 3, t.starts(with: ["create", "a", "playbook"]) || t.starts(with: ["add", "a", "playbook"]) { return "What should the playbook be for?" }
+        if t.count <= 3, t.starts(with: ["create", "a", "routine"]) || t.starts(with: ["add", "a", "routine"]) { return "What should the routine be?" }
+        if rest.count == 1, let verb = rest.first, ActionLexicon.verbs.contains(verb) { return "What should I \(verb)?" }
+        return nil
+    }
+
     func nudgeQuestion(for utterance: String) -> String? {
         if let p = state.pendingProposal, let q = p.prompt { return q }
         guard state.clarify.rounds < ClarificationStateManager.maxRounds else { return nil }
         let t = LocalSemanticPrechecker.tokens(utterance)
-        let rest = LocalSemanticPrechecker.tokens(BulkDetector.stripFrames(utterance))
-        let question: String?
-        if t.starts(with: ["create", "a", "playbook"]) || t.starts(with: ["add", "a", "playbook"]) {
-            question = "What should the playbook be for?"
-        } else if t.starts(with: ["create", "a", "routine"]) || t.starts(with: ["add", "a", "routine"]) {
-            question = "What should the routine be?"
-        } else if rest.count == 1, let verb = rest.first, ActionLexicon.verbs.contains(verb) {
-            question = "What should I \(verb)?"                      // a bare "Buy", or "Add a task to clean"
-        } else if ["add", "create", "make", "remind", "i"].contains(t.first ?? ""), t.count <= 5 {
+        var question = Self.bareQuestion(for: utterance)
+        if question == nil, ["add", "create", "make", "remind", "i"].contains(t.first ?? ""), t.count <= 5 {
             question = ClarificationStateManager.fallbackQuestion(for: .action)
-        } else {
-            question = nil
         }
         guard let q = question else { return nil }
         if case .ask(let asked) = state.clarify.register(question: q, field: .action) {
@@ -3351,6 +3359,13 @@ final class VoiceTurnManager {
         // 3. The model decides what it means.
         let answering = state.phase == .awaitingClarification && !state.drafts.hasContent && state.clarify.lastQuestion != nil
         if answering { state.clarify.recordAnswer(delta) }
+        // An action with nothing to act on ("clean", "Add a task to clean") is a question, whatever the model would say.
+        if !answering, state.phase != .awaitingClarification, state.pendingProposal == nil, !state.drafts.hasContent,
+           state.clarify.rounds < ClarificationStateManager.maxRounds, let q = Self.bareQuestion(for: utterance),
+           case .ask(let asked) = state.clarify.register(question: q, field: .action) {
+            lastTrace.route = "bare-action"
+            return .question(asked)
+        }
         let analysis = BulkDetector.analyze(answering ? delta : utterance)
 
         var lines: [String] = []

@@ -285,4 +285,19 @@ final class KittyVoiceTurnTests: XCTestCase {
         XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean", silence: 4, lastActed: ""), .nudge)
         XCTAssertEqual(m.nudgeQuestion(for: "clean"), "What should I clean?")
     }
+
+    /// Regression: "clean", "buy" and "Add a task to clean" got silence. They are always a question, even typed.
+    func testBareActionsAlwaysAskWhatToDo() async {
+        for (text, q) in [("clean", "What should I clean?"), ("Buy", "What should I buy?"), ("Add a task to clean", "What should I clean?")] {
+            let m = VoiceTurnManager(engine: NoModelEngine(), sink: InMemorySaveSink(), knownCategories: { [] })
+            let r = await m.decide(utterance: text)
+            guard case .question(let asked) = r else { return XCTFail("\(text): expected a question, got \(VoiceTurnManager.describe(r))") }
+            XCTAssertEqual(asked, q)
+        }
+    }
+
+    /// Regression: the model said wait=true with action "clarify", and the question was swallowed.
+    func testWaitWithAClarifyActionBecomesTheQuestion() {
+        XCTAssertTrue(TaskValidator.waitIsReallyAQuestion(AgentDecisionValue(wait: true, action: "clarify", title: "", category: "", dueDate: "", dueTime: "", priority: "", assignee: "", frequency: "", notes: "", playbookName: "", playbookSteps: [], clarifyingQuestion: "", spokenResponse: "", moreTasks: [])))
+    }
 }

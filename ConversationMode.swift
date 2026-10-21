@@ -116,7 +116,7 @@ final class VoiceConversation: ObservableObject {
         } else {
             carry = typed
             turnText = typed
-            beginProcessing()
+            beginProcessing(typed: true)
         }
     }
 
@@ -299,7 +299,7 @@ final class VoiceConversation: ObservableObject {
 
     // MARK: Working out what you meant
 
-    private func beginProcessing(text override: String? = nil) {
+    private func beginProcessing(text override: String? = nil, typed: Bool = false) {
         let text = (override ?? turnText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
@@ -323,16 +323,17 @@ final class VoiceConversation: ObservableObject {
             guard let self else { return }
             let result = await self.turns.decide(utterance: text)
             guard !Task.isCancelled, g == self.generation else { return }
-            self.finishProcessing(result)
+            self.finishProcessing(result, typed: typed)
         }
     }
 
-    private func finishProcessing(_ result: TurnResult) {
+    private func finishProcessing(_ result: TurnResult, typed: Bool = false) {
         processingTask = nil
         switch result {
         case .wait:
             Breadcrumb.log("decision: wait")
             stage = .listening                      // the model thinks you are still speaking: say nothing, keep listening
+            if typed { handleLongSilence(turnText.trimmingCharacters(in: .whitespacesAndNewlines)) }   // typing has no pause to wait for
 
         case .reply(let reply):
             let said = turnText
@@ -415,7 +416,7 @@ final class VoiceConversation: ObservableObject {
         sessionText = ""
         turnText = carry
         if wasListening { Task { await startMic() } }
-        beginProcessing()
+        beginProcessing(typed: true)
     }
 
     // MARK: Finishing a turn
