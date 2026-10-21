@@ -310,4 +310,15 @@ final class KittyVoiceTurnTests: XCTestCase {
         XCTAssertEqual(TaskValidator.validate(d, utterance: "show me personal tasks",
                                               context: ValidationContext(knownCategories: [], pendingTitles: [], recentTitles: [], now: Date(), calendar: .current)), .view)
     }
+
+    /// Regression: the question and your answer both stay in the chat.
+    func testAQuestionAndTheAnswerStayInTheChat() async throws {
+        let convo = VoiceConversation()
+        convo.open(seed: "clean")
+        for _ in 0..<50 where convo.lines.isEmpty { try await Task.sleep(nanoseconds: 100_000_000) }
+        XCTAssertEqual(convo.lines.map(\.text), ["clean", "What should I clean?"])
+        XCTAssertEqual(convo.lines.map(\.role), [.you, .kitty])
+        XCTAssertEqual(convo.liveText, "")
+        convo.close()
+    }
 }

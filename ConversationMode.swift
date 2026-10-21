@@ -47,6 +47,8 @@ final class VoiceConversation: ObservableObject {
     @Published private(set) var proposal: Proposal?
     @Published private(set) var question = ""
     @Published private(set) var lines: [ChatLine] = []
+    /// How many of the words in `turnText` are already in the chat (said before a question). The live bubble shows the rest.
+    @Published private(set) var committedWords = 0
     @Published private(set) var countdownActive = false
     @Published private(set) var isStale = false         // you kept talking: the preview is out of date
     @Published private(set) var micOn = false { didSet { turns.state.setListening(micOn) } }
@@ -269,8 +271,7 @@ final class VoiceConversation: ObservableObject {
             lastActedRaw = turnText
             processedText = turnText
             turns.state.markProcessed(turnText)
-            question = q
-        stage = .question
+            showQuestion(q)
             Breadcrumb.log("question: \(q.prefix(60))")
             if speakReplies { Task { await speakAndResume(q) } }
         } else {
@@ -336,7 +337,7 @@ final class VoiceConversation: ObservableObject {
             if typed { handleLongSilence(turnText.trimmingCharacters(in: .whitespacesAndNewlines)) }   // typing has no pause to wait for
 
         case .reply(let reply):
-            let said = turnText
+            let said = liveText
             Task { await finishTurn(you: said, reply: reply) }
 
         case .proposal(let p):
@@ -351,8 +352,7 @@ final class VoiceConversation: ObservableObject {
         case .question(let q):
             proposal = nil
             isStale = false
-            question = q
-            stage = .question
+            showQuestion(q)
             Breadcrumb.log("question: \(q.prefix(60))")
             if speakReplies { Task { await speakAndResume(q) } }
         }
@@ -386,7 +386,7 @@ final class VoiceConversation: ObservableObject {
         cancelCountdown()
         processingTask?.cancel()
         generation += 1
-        let said = turnText
+        let said = liveText
         stage = .thinking
         Task {
             let reply = await p.apply()
@@ -399,7 +399,7 @@ final class VoiceConversation: ObservableObject {
         cancelCountdown()
         processingTask?.cancel()
         generation += 1
-        let said = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !said.isEmpty { lines.append(ChatLine(role: .you, text: said)) }
         lines.append(ChatLine(role: .kitty, text: "Okay, I didn't change anything."))
         resetTurn()
@@ -442,6 +442,7 @@ final class VoiceConversation: ObservableObject {
         carry = ""
         sessionText = ""
         turnText = ""
+        committedWords = 0
         processedText = ""
         proposal = nil
         question = ""
@@ -477,6 +478,22 @@ final class VoiceConversation: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             if self.stage == .listening, self.turnText.isEmpty { self.pauseListening() }   // nobody is talking: stop listening
         }
+    }
+
+    /// What you have said since the last thing Kitty asked: the live bubble, and the line added to the chat.
+    var liveText: String {
+        let words = turnText.split(whereSeparator: { $0.isWhitespace })
+        return words.dropFirst(min(committedWords, words.count)).joined(separator: " ")
+    }
+
+    /// Kitty asks a question: what you said so far and the question both go into the chat, so the whole exchange stays visible.
+    private func showQuestion(_ q: String) {
+        let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said)) }
+        lines.append(ChatLine(role: .kitty, text: q))
+        committedWords = turnText.split(whereSeparator: { $0.isWhitespace }).count
+        question = q
+        stage = .question
     }
 
     private func join(_ a: String, _ b: String) -> String {
@@ -685,7 +702,7 @@ struct ConversationView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if convo.lines.isEmpty && convo.turnText.isEmpty && convo.stage != .thinking { welcome }
                     ForEach(convo.lines) { line in lineView(line) }
-                    if !convo.turnText.isEmpty { youBubble }
+                    if !convo.liveText.isEmpty { youBubble }
                     responseArea
                     Color.clear.frame(height: 1).id("bottom")
                 }
@@ -729,7 +746,7 @@ struct ConversationView: View {
     }
 
     private var youBubble: some View {
-        youBubbleView(convo.turnText, live: convo.stage == .listening)
+        youBubbleView(convo.liveText, live: convo.stage == .listening)
     }
 
     @ViewBuilder
@@ -798,17 +815,12 @@ struct ConversationView: View {
         .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
+    /// The question itself is in the chat above, so this is only a quiet hint.
     private var questionCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "questionmark.bubble.fill").foregroundStyle(Color.accentColor).padding(.top, 2)
-                Text(convo.question).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
-            }
-                Text("Just answer. I'm listening.").font(.footnote).foregroundStyle(.secondary)
-        }
-        .padding(14)
-        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.05), radius: 6, y: 2)
+        Text("Just answer. I'm listening.")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
     }
 
     private func color(_ c: PreviewColor) -> Color {
