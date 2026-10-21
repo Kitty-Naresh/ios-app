@@ -3172,6 +3172,7 @@ final class VoiceTurnManager {
     static let shortPause: TimeInterval = 0.8       // breathing: always keep listening
     static let longPause: TimeInterval = 1.6        // long enough to check whether the thought is finished
     static let finalizerDelay: TimeInterval = 0.5   // after "done"
+    static let quickNudgeAfter: TimeInterval = 3.5  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
     static let nudgeAfter: TimeInterval = 10        // a long silence on unfinished speech: gently ask what the task is
 
     enum Gate: Equatable {
@@ -3243,7 +3244,9 @@ final class VoiceTurnManager {
         }
         if silence < longPause { return .keepListening }                          // a short pause: keep listening
         switch LocalSemanticPrechecker.check(text) {
-        case .incomplete(let reason): return .hold(reason)
+        case .incomplete(let reason):
+            if reason == "action without an object", silence >= quickNudgeAfter { return .nudge }
+            return .hold(reason)
         case .mayBeComplete: return .evaluate(text)
         }
     }

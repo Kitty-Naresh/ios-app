@@ -278,4 +278,11 @@ final class KittyVoiceTurnTests: XCTestCase {
         XCTAssertFalse(TaskValidator.waitIsContradicted(decision(wait: true, title: ""), utterance: "add a task to clean bathroom"))
         XCTAssertFalse(TaskValidator.waitIsContradicted(decision(wait: true, title: "Clean bathroom"), utterance: "add a task to clean the bathroom and"))
     }
+
+    /// A lone "clean" is never silent: the gate holds it, then a long silence turns it into a question.
+    func testALoneVerbGetsAQuestionAfterALongSilence() {
+        let m = VoiceTurnManager(engine: NoModelEngine(), sink: InMemorySaveSink(), knownCategories: { [] })
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean", silence: 4, lastActed: ""), .nudge)
+        XCTAssertEqual(m.nudgeQuestion(for: "clean"), "What should I clean?")
+    }
 }
