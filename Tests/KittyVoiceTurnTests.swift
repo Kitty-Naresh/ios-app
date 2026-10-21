@@ -300,4 +300,14 @@ final class KittyVoiceTurnTests: XCTestCase {
     func testWaitWithAClarifyActionBecomesTheQuestion() {
         XCTAssertTrue(TaskValidator.waitIsReallyAQuestion(AgentDecisionValue(wait: true, action: "clarify", title: "", category: "", dueDate: "", dueTime: "", priority: "", assignee: "", frequency: "", notes: "", playbookName: "", playbookSteps: [], clarifyingQuestion: "", spokenResponse: "", moreTasks: [])))
     }
+
+    /// Regression: "show me personal tasks" came back as wait=true with action view_tasks, so nothing was listed.
+    func testWaitWithAViewRequestStillShowsTheTasks() {
+        let d = AgentDecisionValue(wait: true, action: "view_tasks", title: "", category: "", dueDate: "", dueTime: "", priority: "",
+                                   assignee: "", frequency: "", notes: "", playbookName: "", playbookSteps: [], clarifyingQuestion: "",
+                                   spokenResponse: "", moreTasks: [])
+        XCTAssertTrue(TaskValidator.waitIsContradicted(d, utterance: "show me personal tasks"))
+        XCTAssertEqual(TaskValidator.validate(d, utterance: "show me personal tasks",
+                                              context: ValidationContext(knownCategories: [], pendingTitles: [], recentTitles: [], now: Date(), calendar: .current)), .view)
+    }
 }

@@ -2927,6 +2927,9 @@ enum TaskValidator {
         switch d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
         case "create_task":  return isActionable(TaskPlanner.tidyTitle(d.title, removingDay: false))
         case "create_playbook", "playbook", "teach_playbook": return !d.playbookSteps.isEmpty
+        case "view_tasks": return true                                  // "show me personal tasks" is a whole request
+        case "complete_task", "delete_task": return !d.title.trimmingCharacters(in: .whitespaces).isEmpty
+        case "update_task": return true
         default: return false
         }
     }
