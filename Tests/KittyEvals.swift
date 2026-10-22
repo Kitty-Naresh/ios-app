@@ -10,6 +10,9 @@
 // answer, the validation result, what Kitty said and the state it ended in. Per case it stores the saved objects.
 // The JSON report is written to $KITTY_EVAL_REPORT, or /tmp/kitty-eval-report.json.
 import XCTest
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 @testable import Kitty
 
 // MARK: - Recorded model answers
@@ -1633,5 +1636,101 @@ final class KittyEvals: XCTestCase {
         XCTAssertFalse(Judge.grade("What is it for?", earlier: ["What is it for?"]).issues.isEmpty)
         XCTAssertFalse(Judge.grade("What? And when?", earlier: []).issues.isEmpty)
         XCTAssertTrue(Judge.grade("I have 3 tasks: a, b, and c. Should I save these?", earlier: []).issues.isEmpty)
+    }
+}
+
+// MARK: - The long and noisy cases against Apple's real on-device model (opt in)
+
+/// Skipped unless KITTY_REAL_MODEL=1. Runs the first turn of every K case through the real model, several times, with the rule
+/// fallback off, and writes what came back to /tmp/kitty-real-model-k.md. Nothing is scripted and nothing is judged pass or fail:
+/// the model varies from run to run, so this reports how often it does what the case wants, and how many model calls it took.
+///
+///     TEST_RUNNER_KITTY_REAL_MODEL=1 xcodebuild test -project Kitty.xcodeproj -scheme Kitty \
+///         -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:KittyTests/RealModelKTests
+@MainActor
+final class RealModelKTests: XCTestCase {
+    private func words(_ s: String) -> Set<String> {
+        Set(s.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init).filter { !["the", "a", "an", "to", "my", "of"].contains($0) })
+    }
+
+    /// Two titles are the same task when most of their words agree ("Clean the bathrooms" and "Clean bathrooms").
+    private func same(_ a: String, _ b: String) -> Bool {
+        let x = words(a), y = words(b)
+        guard !x.isEmpty, !y.isEmpty else { return false }
+        return Double(x.intersection(y).count) / Double(x.union(y).count) >= 0.6
+    }
+
+    func testLongTurnsAgainstTheOnDeviceModel() async throws {
+        guard ProcessInfo.processInfo.environment["KITTY_REAL_MODEL"] == "1" else {
+            throw XCTSkip("Set KITTY_REAL_MODEL=1 (as TEST_RUNNER_KITTY_REAL_MODEL=1 for xcodebuild) to run the real on-device model.")
+        }
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) else { throw XCTSkip("Needs the on-device model (iOS 26).") }
+        // No model, no result: an unavailable model must never be reported as "the model found nothing".
+        guard case .available = SystemLanguageModel.default.availability else {
+            let why = "\(SystemLanguageModel.default.availability)"
+            try? "# Real on-device model, long and noisy cases (K)\n\nNot run: the on-device model is unavailable here (\(why)).\n"
+                .write(toFile: "/tmp/kitty-real-model-k.md", atomically: true, encoding: .utf8)
+            throw XCTSkip("The on-device model is unavailable: \(why)")
+        }
+        let runs = Int(ProcessInfo.processInfo.environment["KITTY_REAL_RUNS"] ?? "") ?? 5
+        var summary = ["| # | case | runs | tasks found | extra / chatter | model calls (avg) | asked about a day | outcome |",
+                       "|---|------|------|-------------|-----------------|-------------------|-------------------|---------|"]
+        var raw = ""
+        var totalExpected = 0, totalFound = 0, totalMade = 0, totalChatter = 0
+
+        for c in EvalSuite.k {
+            guard let first = c.turns.first else { continue }
+            let expected: [String] = first.expect.draft ?? (c.saved.tasks + c.saved.routines).map(\.title)
+            guard !expected.isEmpty else { continue }                                   // a case about a question or a wait: nothing to compare
+            guard case .evaluate(let text) = VoiceTurnManager.gate(utterance: first.say, silence: max(first.silence, 4.5), lastActed: "") else { continue }
+
+            var found = 0, extras = 0, chatter = 0, calls = 0, dayQuestions = 0
+            var outcomes: [String: Int] = [:]
+            raw += "\n#\(c.id) \(c.name)\n  said: \(first.say)\n  want: \(expected)\n"
+            for run in 1...runs {
+                let sink = InMemorySaveSink()
+                let manager = VoiceTurnManager(engine: DecisionEngine(), sink: sink, knownCategories: { EvalRunner.knownCategories })
+                manager.ruleFallbackEnabled = false
+                manager.state.setListening(true)
+                let result = await manager.decide(utterance: text, now: EvalRunner.now)
+                calls += manager.modelCalls
+                var titles: [String] = []
+                var kind = ""
+                switch result {
+                case .proposal(let p):
+                    kind = "preview"
+                    titles = manager.state.drafts.hasContent ? manager.state.drafts.items.map(\.title) : p.rows.map(\.title)
+                    if manager.state.pendingContextDue != nil { dayQuestions += 1 }
+                case .question: kind = "question"
+                case .reply: kind = "reply"
+                case .wait: kind = "wait"
+                }
+                outcomes[kind, default: 0] += 1
+                let hit = expected.filter { e in titles.contains { same($0, e) } }.count
+                found += hit
+                extras += titles.filter { t in !expected.contains { same(t, $0) } }.count
+                chatter += titles.filter { t in c.chatter.contains { t.lowercased().contains($0) } }.count
+                totalMade += titles.count
+                raw += "  run \(run): \(kind), calls \(manager.modelCalls), route \(manager.lastTrace.route), \(titles)\n"
+            }
+            totalExpected += expected.count * runs
+            totalFound += found
+            totalChatter += chatter
+            let outcome = outcomes.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+            summary.append("| \(c.id) | \(c.name) | \(runs) | \(found)/\(expected.count * runs) | \(extras) / \(chatter) | "
+                           + String(format: "%.1f", Double(calls) / Double(runs)) + " | \(dayQuestions)/\(runs) | \(outcome) |")
+        }
+
+        let recall = totalExpected == 0 ? 0 : Double(totalFound) / Double(totalExpected)
+        var out = "# Real on-device model, long and noisy cases (K)\n\n"
+        out += "Run on \(ProcessInfo.processInfo.operatingSystemVersionString), Apple's on-device model, \(runs) runs per case, rule fallback off, the first turn of each case only.\n\n"
+        out += String(format: "Task recall %.1f%% (%d of %d), %d tasks made in all, %d with chatter in the title.\n\n", recall * 100, totalFound, totalExpected, totalMade, totalChatter)
+        out += summary.joined(separator: "\n") + "\n\n## Raw\n\n```\n" + raw + "```\n"
+        try? out.write(toFile: "/tmp/kitty-real-model-k.md", atomically: true, encoding: .utf8)
+        print(out)
+        #else
+        throw XCTSkip("FoundationModels is not available.")
+        #endif
     }
 }
