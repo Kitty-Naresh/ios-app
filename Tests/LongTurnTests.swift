@@ -447,3 +447,79 @@ final class LongTurnPreviewTests: XCTestCase {
         XCTAssertEqual(after.used, "Saturday, for in-laws")
     }
 }
+
+// MARK: How long this person pauses
+
+@MainActor
+final class PauseProfileTests: XCTestCase {
+    private func words(gaps: [TimeInterval], endingSentenceAt: Int? = nil) -> [SpokenWord] {
+        var t = 0.0
+        var out: [SpokenWord] = []
+        for (i, g) in gaps.enumerated() {
+            out.append(SpokenWord(text: i == endingSentenceAt ? "word." : "word", confidence: 0.9, timestamp: t, duration: 0.3))
+            t += 0.3 + g
+        }
+        out.append(SpokenWord(text: "end", confidence: 0.9, timestamp: t, duration: 0.3))
+        return out
+    }
+    private func defaults() -> UserDefaults {
+        let d = UserDefaults(suiteName: "PauseProfileTests-\(UUID().uuidString)")!
+        return d
+    }
+
+    func testGapsInsideSentencesOnly() {
+        let g = PauseProfile.gaps(in: words(gaps: [0.1, 0.5, 0.9, 3.0, 0.7], endingSentenceAt: 2))
+        XCTAssertEqual(g.count, 2)                      // 0.1 is speech, 0.9 is after a full stop, 3.0 is too long
+        XCTAssertEqual(g[0], 0.5, accuracy: 0.001)
+        XCTAssertEqual(g[1], 0.7, accuracy: 0.001)
+    }
+
+    func testDefaultsUntilEnoughIsKnown() {
+        XCTAssertEqual(PauseProfile.profile(from: [0.5, 0.6]), .standard)
+        let d = defaults()
+        XCTAssertEqual(PauseProfile.current(d), .standard)
+    }
+
+    func testMedianAndP90AreStoredPerUser() {
+        let d = defaults()
+        for _ in 0..<5 { PauseProfile.record(words: words(gaps: [0.6, 0.8, 1.0, 1.2, 1.4]), to: d) }
+        let p = PauseProfile.current(d)
+        XCTAssertEqual(p.median, 1.0, accuracy: 0.05)
+        XCTAssertEqual(p.p90, 1.4, accuracy: 0.05)
+        XCTAssertEqual(PauseProfile.stored(d).count, 25)
+    }
+
+    func testTheDefaultProfileKeepsTheOldTimings() {
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk"), 1.6)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: .standard), 1.6)
+    }
+
+    func testASlowerTalkerWaitsLongerAndAQuickOneNotBelowTheFloor() {
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 1.2, p90: 2.0)), 2.4, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 0.5, p90: 1.0)), 1.2, accuracy: 0.001)
+    }
+
+    func testACommaOrConnectorAtTheEndWaitsAnotherSecond() {
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk and"), 2.6, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk,"), 2.6, accuracy: 0.001)
+    }
+
+    func testALongUnfinishedTurnWaitsAnotherSecondAndMayPassTheOldCap() {
+        let long = String(repeating: "clean the bathrooms and mop the floor ", count: 4) + "and then"
+        XCTAssertGreaterThan(VoiceTurnManager.pauseNeeded(for: long), 3.2)
+        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: long), 4.2)
+        let longUnfinished = String(repeating: "clean the bathrooms and mop the floor ", count: 4) + "clean the garage"
+        XCTAssertGreaterThan(VoiceTurnManager.pauseNeeded(for: longUnfinished), 3.2)
+    }
+
+    func testASentenceFinalLongTurnKeepsTheOldCap() {
+        let said = String(repeating: "clean the bathrooms and mop the floor. ", count: 6)
+        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: said), 3.2)
+    }
+
+    func testTheGateUsesTheProfile() {
+        let said = "Buy milk and eggs from the shop"
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 1.7, lastActed: ""), .evaluate(said))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 1.7, lastActed: "", profile: PauseProfile(median: 1.2, p90: 2.0)), .keepListening)
+    }
+}

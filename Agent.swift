@@ -3359,19 +3359,89 @@ final class VoiceTurnManager {
 
     /// How long a pause has to be before Kitty looks at the speech. A longer turn gets a longer grace: someone dictating
     /// several sentences pauses between them, and a sentence that ends is not the end of the thought.
-    static func pauseNeeded(for text: String) -> TimeInterval {
+    static func pauseNeeded(for text: String, profile: PauseProfile = .standard) -> TimeInterval {
         let words = text.split(whereSeparator: { $0.isWhitespace }).count
         let sentences = text.filter { ".?!".contains($0) }.count
-        var pause = longPause
+        var pause = profile.median == PauseProfile.standard.median ? longPause : max(1.2, longPause * profile.median / PauseProfile.standard.median)
         if words >= 12 { pause += 0.3 }
         if words >= 25 { pause += 0.4 }
         if words >= 45 { pause += 0.4 }
         if sentences >= 2 { pause += 0.3 }
-        return min(pause, 3.2)
+        // Someone mid-thought: after a comma or a connector ("…the bathrooms, and"), or deep into a long turn whose last clause
+        // has not ended, a pause is not the end. Only these two cases may wait past the usual cap.
+        let extended = endsMidThought(text) || (words > 25 && !endsSentence(text))
+        if endsMidThought(text) { pause += 1.0 }
+        if words > 25, !endsSentence(text) { pause += 1.0 }
+        return min(pause, extended ? 4.2 : 3.2)
+    }
+
+    static let connectors: Set<String> = ["and", "then", "but", "so", "because", "also", "plus", "or", "which", "that", "while", "until"]
+
+    static func endsSentence(_ text: String) -> Bool {
+        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
+        return ".?!".contains(last)
+    }
+
+    /// A trailing comma, or a trailing "and" / "then" / "but"…: the sentence is still going.
+    static func endsMidThought(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasSuffix(",") || t.hasSuffix(";") { return true }
+        let last = t.lowercased().split(whereSeparator: { $0.isWhitespace }).last.map { $0.filter { $0.isLetter } } ?? ""
+        return connectors.contains(last)
     }
 
     enum Gate: Equatable {
         case keepListening
+/// How this person pauses inside a sentence: the median and the 90th percentile of the gaps between consecutive words.
+/// Someone who talks slowly gets a longer wait before Kitty looks at their speech; a quick talker does not. Kept per user
+/// as a rolling set of gaps in UserDefaults (nothing leaves the device). Until enough gaps are known the defaults apply.
+nonisolated struct PauseProfile: Equatable, Sendable {
+    var median: TimeInterval
+    var p90: TimeInterval
+
+    static let standard = PauseProfile(median: 0.8, p90: 1.6)
+    static let minimumGaps = 20
+    static let maxGaps = 200
+    static let storageKey = "kitty.pauseGaps"
+
+    /// The hesitations inside sentences: gaps between consecutive words of at least 0.3 s (shorter ones are just speech)
+    /// and under 2.5 s, never across sentence-final punctuation.
+    static func gaps(in words: [SpokenWord]) -> [TimeInterval] {
+        guard words.count >= 2 else { return [] }
+        var out: [TimeInterval] = []
+        for (a, b) in zip(words, words.dropFirst()) {
+            if let last = a.text.trimmingCharacters(in: .whitespaces).last, ".?!".contains(last) { continue }
+            let gap = b.timestamp - (a.timestamp + a.duration)
+            if gap >= 0.3, gap < 2.5 { out.append(gap) }
+        }
+        return out
+    }
+
+    static func profile(from gaps: [TimeInterval]) -> PauseProfile {
+        guard gaps.count >= minimumGaps else { return .standard }
+        let sorted = gaps.sorted()
+        func at(_ q: Double) -> TimeInterval { sorted[min(sorted.count - 1, Int(Double(sorted.count - 1) * q + 0.5))] }
+        return PauseProfile(median: min(max(at(0.5), 0.5), 2.0), p90: min(max(at(0.9), 1.0), 3.0))
+    }
+
+    static func stored(_ defaults: UserDefaults = .standard) -> [TimeInterval] {
+        (defaults.array(forKey: storageKey) as? [Double]) ?? []
+    }
+
+    /// The profile from what was learned so far.
+    static func current(_ defaults: UserDefaults = .standard) -> PauseProfile { profile(from: stored(defaults)) }
+
+    /// Adds the gaps of one finished turn and returns the updated profile.
+    @discardableResult
+    static func record(words: [SpokenWord], to defaults: UserDefaults = .standard) -> PauseProfile {
+        let new = gaps(in: words)
+        guard !new.isEmpty else { return current(defaults) }
+        let all = Array((stored(defaults) + new).suffix(maxGaps))
+        defaults.set(all, forKey: storageKey)
+        return profile(from: all)
+    }
+}
+
         case hold(String)               // the local check says it is unfinished: no model call
         case evaluate(String)           // may be complete: one model call
         case forceEvaluate(String)      // "done" / "save it" / "go ahead": treat it as final
@@ -3433,7 +3503,7 @@ final class VoiceTurnManager {
     /// Decides what to do about the speech so far. The model is never involved here.
     /// The words are cleaned first (fillers, repeats, "no wait" repairs), so everything below judges what was meant.
     /// `lastActed` is compared as raw speech: it is the unedited words Kitty last looked at.
-    static func gate(utterance: String, silence: TimeInterval, lastActed: String) -> Gate {
+    static func gate(utterance: String, silence: TimeInterval, lastActed: String, profile: PauseProfile = .standard) -> Gate {
         let said = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return .keepListening }
         if silence >= nudgeAfter { return .nudge }
@@ -3449,7 +3519,8 @@ final class VoiceTurnManager {
             if text.isEmpty { return .keepListening }
             return silence >= finalizerDelay ? .forceEvaluate(text) : .keepListening
         }
-        if silence < pauseNeeded(for: text) { return .keepListening }               // a short pause: keep listening
+        if silence < pauseNeeded(for: text, profile: profile) { return .keepListening }               // a short pause: keep listening
+        if UnclearAnswer.matches(text) { return .evaluate(text) }                // "I don't know", "nothing": answered in Swift, never held
         switch LocalSemanticPrechecker.check(text) {
         case .incomplete(let reason):
             if silence >= quickNudgeAfter, bareQuestion(for: text) != nil { return .nudge }     // "clean", "clean the", "buy"

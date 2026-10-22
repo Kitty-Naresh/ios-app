@@ -79,6 +79,7 @@ final class VoiceConversation: ObservableObject {
     }()
     /// Decides when speech might be a finished thought, and makes the one model call for it.
     private let turns = VoiceTurnManager()
+    private var pauseProfile = PauseProfile.current()   // how long this person pauses mid-sentence, learned over time
     private var lastActedRaw = ""      // the speech Kitty last acted on, so the same words are not judged twice
     private var carry = ""             // text from earlier recognition sessions in this turn
     private var sessionText = ""       // the current recognition session (cumulative)
@@ -339,7 +340,7 @@ final class VoiceConversation: ObservableObject {
         }
 
         let silence = Date().timeIntervalSince(lastChange)
-        switch VoiceTurnManager.gate(utterance: raw, silence: silence, lastActed: lastActedRaw) {
+        switch VoiceTurnManager.gate(utterance: raw, silence: silence, lastActed: lastActedRaw, profile: pauseProfile) {
         case .keepListening, .hold:
             break                                   // a short pause, or unfinished speech: no model call
         case .evaluate(let text):
@@ -398,6 +399,7 @@ final class VoiceConversation: ObservableObject {
         }
 
         Breadcrumb.log("pause: working on “\(text.prefix(60))”")
+        if !typed, !speech.words.isEmpty { pauseProfile = PauseProfile.record(words: speech.words) }
         lastActedRaw = turnText
         processedText = text
         stage = .thinking
