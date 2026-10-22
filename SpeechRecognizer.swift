@@ -448,6 +448,8 @@ nonisolated enum AudioSessionControl {
                     Breadcrumb.log("  queue: activating audio session")
                     try session.setActive(true)
                     Breadcrumb.log("  queue: audio session active")
+                    if mode == .voiceChat { preferEchoCancellation(session) }
+                    Breadcrumb.log("  route: \(describeRoute(session))")
                     cont.resume()
                 } catch {
                     Breadcrumb.log("  queue: audio session failed: \(error.localizedDescription)")
@@ -455,6 +457,30 @@ nonisolated enum AudioSessionControl {
                 }
             }
         }
+    }
+
+    /// Asks for the system's echo-cancelled input as well, where the device offers it. Voice-chat mode already cancels echo
+    /// on most routes; this is a second request, and a refusal is harmless.
+    private static func preferEchoCancellation(_ session: AVAudioSession) {
+        if #available(iOS 18.2, *) {
+            if session.isEchoCancelledInputAvailable {
+                do {
+                    try session.setPrefersEchoCancelledInput(true)
+                    Breadcrumb.log("  echo-cancelled input: on")
+                } catch {
+                    Breadcrumb.log("  echo-cancelled input refused: \(error.localizedDescription)")
+                }
+            } else {
+                Breadcrumb.log("  echo-cancelled input: not available on this route")
+            }
+        }
+    }
+
+    /// Which microphone and speaker are in use. Bluetooth and wired routes echo differently from the phone's own.
+    static func describeRoute(_ session: AVAudioSession) -> String {
+        let ins = session.currentRoute.inputs.map { $0.portType.rawValue }.joined(separator: ",")
+        let outs = session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
+        return "in \(ins.isEmpty ? "none" : ins), out \(outs.isEmpty ? "none" : outs)"
     }
 
     /// Fire-and-forget. Runs in order after any earlier configure call.
@@ -516,7 +542,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                 utterance.voice = voice
                 utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.94          // a touch slower than the default
                 utterance.pitchMultiplier = 1.03
-                utterance.volume = 1
+                utterance.volume = 0.9                                           // a little under full: less of her voice reaches the mic
                 utterance.preUtteranceDelay = i == 0 ? 0.08 : 0
                 utterance.postUtteranceDelay = Self.pause(after: sentence)
                 synthesizer.speak(utterance)

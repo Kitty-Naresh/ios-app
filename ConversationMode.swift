@@ -40,6 +40,10 @@ final class VoiceConversation: ObservableObject {
     /// Kitty is talking. The mic is off then, so tapping the mic button stops her and starts listening.
     @Published private(set) var isSpeaking = false
     private var spokenNow = ""          // what Kitty is saying right now, so her own voice is not mistaken for yours
+    private var spokenBuffer = SpokenBuffer()   // and what she said just before, for the tail of her voice after she stops
+    private var lastEchoLogged = ""
+    private var sessionEchoLead = 0    // leading words of this session that were Kitty's tail, not yours
+    private var bargeBase = ""          // what was already said in this turn when she began speaking
     private var userMuted = false       // you (or the idle timeout) turned the mic off: the watchdog leaves it off
     private var micBlocked = false      // a permission problem: only you can fix it, so do not keep retrying
     private var startingMic = false
@@ -147,6 +151,7 @@ final class VoiceConversation: ObservableObject {
     private func startMic() async {
         guard active, !startingMic else { return }
         startingMic = true
+        sessionEchoLead = 0
         defer { startingMic = false }
         speech.cancel()
         var attempt = 0
@@ -222,10 +227,30 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    private func heard(_ text: String) {
-        guard active, !text.isEmpty else { return }
-        if isSpeaking { bargeInHeard(text); return }
-        sessionText = text
+    private func heard(_ incoming: String) {
+        guard active, !incoming.isEmpty else { return }
+        if isSpeaking { bargeInHeard(incoming); return }
+        // Just after Kitty stops, the start of what the microphone hears can be the tail of her own voice. Words before the
+        // point where you begin are hers; the same number is dropped from every later partial of this session.
+        let now = Date()
+        let recent = spokenBuffer.recentText(now: now)
+        if !recent.isEmpty {
+            let lead = BargeIn.leadingEcho(heard: incoming, spoken: recent, strict: spokenBuffer.inQuietWindow(now: now))
+            if lead > sessionEchoLead {
+                sessionEchoLead = lead
+                Breadcrumb.log("echo: dropping the first \(lead) words of “\(incoming.prefix(40))”")
+            }
+        }
+        var text = incoming
+        if sessionEchoLead > 0 {
+            text = incoming.split(whereSeparator: { $0.isWhitespace }).dropFirst(sessionEchoLead).joined(separator: " ")
+        }
+        guard !text.isEmpty else { return }
+        // A partial that starts over (it holds only the new sentence) is added to the turn, not put in place of it.
+        let merged = TurnAccumulator.absorb(carry: carry, session: sessionText, partial: text)
+        if merged.reset { Breadcrumb.log("partials restarted: kept “\(sessionText.prefix(40))”") }
+        carry = merged.carry
+        sessionText = merged.session
         let full = join(carry, sessionText)
         guard full != turnText else { return }
         turnText = full
@@ -241,6 +266,7 @@ final class VoiceConversation: ObservableObject {
     /// The recognizer ended on its own (time limit). Keep what was heard and listen again.
     private func sessionEnded(_ text: String) {
         guard active else { return }
+        if !isSpeaking { sessionEchoLead = 0 }
         if isSpeaking {
             // The recogniser ended while Kitty is still talking: open it again so "stop" keeps working. This has its own
             // budget, so it can never use up the one for normal listening.
@@ -340,7 +366,7 @@ final class VoiceConversation: ObservableObject {
             turns.state.markProcessed(turnText)
             showQuestion(q)
             Breadcrumb.log("question: \(q.prefix(60))")
-            if speakReplies { Task { await speakAndResume(q) } }
+            speakQuestion(q)
         } else {
             // Nothing to ask. If there was real content before a trailing "and" or "the", act on that. Never just drop it.
             let trimmed = VoiceTurnManager.dropTrailingFiller(SpeechCleaner.clean(raw).text)
@@ -413,7 +439,19 @@ final class VoiceConversation: ObservableObject {
             isStale = false
             showQuestion(q)
             Breadcrumb.log("question: \(q.prefix(60))")
-            if speakReplies { Task { await speakAndResume(q) } }
+            speakQuestion(q)
+        }
+    }
+
+    /// A question is spoken after a beat. If you carry on in that moment it is dropped, so Kitty never talks over the rest
+    /// of a long thought.
+    private func speakQuestion(_ q: String) {
+        guard speakReplies else { return }
+        let g = generation
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard let self, self.active, self.stage == .question, g == self.generation else { return }
+            await self.speakAndResume(q)
         }
     }
 
@@ -498,6 +536,7 @@ final class VoiceConversation: ObservableObject {
 
     private func resetTurn() {
         turns.state.clearPending()
+        sessionEchoLead = 0
         lastActedRaw = ""
         carry = ""
         sessionText = ""
@@ -523,11 +562,15 @@ final class VoiceConversation: ObservableObject {
         micOn = false
         isSpeaking = true
         spokenNow = text
+        bargeBase = turnText                    // anything you said before this (a question mid-thought) stays in the turn
+        spokenBuffer.began(text)
         let duplex = await startBargeInListening()
         if !duplex { speech.cancel() }          // no hands-free stop: the mic stays off while she talks
         await Speaker.shared.speakAndWait(text, duplex: duplex)
         isSpeaking = false
         spokenNow = ""
+        spokenBuffer.ended(at: Date())
+        sessionEchoLead = 0
         guard active, micWanted, !userMuted else { speech.cancel(); return }
         // The audio session and microphone stay as they are (see `restartRecognition`); only the recognition starts afresh,
         // so nothing of Kitty's voice carries over and a stop never touches the audio setup.
@@ -550,12 +593,21 @@ final class VoiceConversation: ObservableObject {
 
     /// What the microphone hears while Kitty is speaking. A stop word or real speech stops her and keeps your words.
     private func bargeInHeard(_ text: String) {
-        guard case .interrupt(let rest) = BargeIn.decide(heard: text, spoken: spokenNow) else { return }
+        guard case .interrupt(let rest) = BargeIn.decide(heard: text, spoken: spokenNow) else {
+            let mine = BargeIn.userWords(heard: text, spoken: spokenNow).count
+            let all = text.split(whereSeparator: { $0.isWhitespace }).count
+            if mine < all, text != lastEchoLogged {                 // some of what the mic heard was Kitty's own voice
+                lastEchoLogged = text
+                Breadcrumb.log("echo while speaking: ignored “\(text.suffix(40))” (\(all - mine) of \(all) words hers)")
+            }
+            return
+        }
         Breadcrumb.log("barge-in: “\(rest.prefix(40))”")
-        carry = rest
+        // Added to what was said before she spoke, never in place of it: "…a list of tasks" then, over her question,
+        // "the first task is…" is one thought.
+        carry = join(bargeBase, rest)
         sessionText = ""
-        turnText = rest
-        committedWords = 0
+        turnText = carry
         lastChange = Date()
         stopSpeaking()
     }

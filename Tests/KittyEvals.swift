@@ -595,6 +595,14 @@ enum EvalSuite {
         EvalCase(id: 105, category: "J", name: "“it looks like rain” keeps its “like” and is asked about", tags: [.messy, .clarify],
                  turns: [turn("It looks like rain", S("clarify", q: "What would you like me to do about the rain?"),
                               TurnExpect.ask("what would you like", model: true).seeing("it looks like rain"))]),
+        // A long prompt over two sentences: the setup sentence is not answered, and the whole thought is understood together.
+        EvalCase(id: 106, category: "J", name: "A project over two sentences: held, then only the project's name is asked", tags: [.messy, .clarify],
+                 turns: [
+                    EvalTurn(say: "I'm working on a project and I would like to create list of tasks for that project.", script: .none,
+                             silence: 3.0, expect: TurnExpect.held()),
+                    EvalTurn(say: "And the first task is, to write a strategy document.", script: .none, silence: 3.0,
+                             expect: TurnExpect.ask("project called", model: false)),
+                 ]),
     ]
 
     /// The twelve to start with.
@@ -1236,7 +1244,7 @@ final class KittyEvals: XCTestCase {
         XCTAssertEqual(Set(EvalSuite.all.map(\.id)).count, EvalSuite.all.count, "ids must be unique")
         XCTAssertEqual(Set(numbered.map(\.category)), ["A", "B", "C", "D", "E", "F", "G"])
         XCTAssertGreaterThanOrEqual(EvalSuite.all.filter { $0.category == "I" }.count, 12)
-        XCTAssertEqual(EvalSuite.all.filter { $0.category == "J" }.map(\.id), Array(76...105))
+        XCTAssertEqual(EvalSuite.all.filter { $0.category == "J" }.map(\.id), Array(76...106))
         XCTAssertEqual(EvalSuite.minimal12.count, 12)
     }
 

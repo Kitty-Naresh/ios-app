@@ -749,6 +749,18 @@ final class ClarificationStateManager {
             .contains { t.contains($0) }
     }
 
+    /// "What kind of strategy document?", "What is the context?": a question about the details of something already said
+    /// well enough to save. Never needed, and often about what the person has just told us.
+    static func asksForDetail(_ question: String) -> Bool {
+        let t = question.lowercased()
+        if ["how often", "every", "repeat", "routine", "one-time", "one time", "which task", "which one", "which routine"].contains(where: { t.contains($0) }) { return false }
+        return ["what kind of", "what type of", "what sort of", "which kind of", "which type of", "what is the context", "what's the context",
+                "what context", "more detail", "more context", "tell me more", "can you elaborate", "what is it about", "what's it about",
+                "what is the purpose", "what's the purpose", "what is it for", "what's it for", "what exactly", "any specific", "anything specific",
+                "what specifically", "which project", "what project", "what is the project", "what's the project"]
+            .contains { t.contains($0) }
+    }
+
     /// One short question: the first sentence ending in a question mark.
     static func oneQuestion(_ raw: String) -> String {
         let q = Words.trim(raw)
@@ -1168,3 +1180,105 @@ enum BulkValidator {
     }
 }
 
+
+// MARK: A project and its tasks, spoken over several sentences
+
+/// "I'm working on a project and I'd like a list of tasks for it. The first task is to write a strategy document."
+/// The project is a list, and each "first task is…", "second task is…" is an item on it.
+enum ProjectOutline {
+    struct Outline: Equatable {
+        var name: String?
+        var tasks: [String]
+    }
+
+    private static let ordinals = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|next|last|final"
+    private static let marker = #"\b(?:the |my |our )?(?:"# + ordinals + #")\s+(?:(?:task|one|thing|item|step|to-do|todo)\b(?:\s+(?:is|would be|will be))?|(?:is|would be|will be)\b)"#
+
+    private static func regex(_ pattern: String) -> NSRegularExpression? {
+        try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+    }
+
+    private static func matches(_ re: NSRegularExpression?, in text: String) -> [NSTextCheckingResult] {
+        guard let re else { return [] }
+        return re.matches(in: text, range: NSRange(text.startIndex..., in: text))
+    }
+
+    static func hasMarker(_ text: String) -> Bool { !matches(regex(marker), in: text).isEmpty }
+
+    /// Only a turn that talks about a project or a list of tasks counts, so a plain "first task is…" is left to the model.
+    private static func hasProjectCue(_ lower: String) -> Bool {
+        lower.contains("project") || lower.contains("list of task") || lower.contains("task list") || lower.contains("list of to")
+            || lower.contains("to do list") || lower.contains("todo list")
+    }
+
+    static func parse(_ raw: String) -> Outline? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard hasProjectCue(text.lowercased()) else { return nil }
+        let found = matches(regex(marker), in: text)
+        guard !found.isEmpty else { return nil }
+
+        var tasks: [String] = []
+        for (i, m) in found.enumerated() {
+            guard let after = Range(m.range, in: text)?.upperBound else { continue }
+            let end = i + 1 < found.count ? (Range(found[i + 1].range, in: text)?.lowerBound ?? text.endIndex) : text.endIndex
+            var span = String(text[after..<end]).trimmingCharacters(in: CharacterSet(charactersIn: " ,:;-"))
+            if let stop = span.firstIndex(where: { ".!?".contains($0) }) { span = String(span[..<stop]) }   // the sentence ends the task
+            for piece in span.components(separatedBy: " and then ").flatMap({ $0.components(separatedBy: ", then ") }) {
+                if let title = tidy(piece) { tasks.append(title) }
+            }
+        }
+        guard !tasks.isEmpty else { return nil }
+        return Outline(name: name(in: text), tasks: tasks)
+    }
+
+    private static func tidy(_ piece: String) -> String? {
+        var s = piece.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-"))
+        for lead in ["to ", "and ", "then ", "also ", "i need to ", "i want to ", "we need to "] where s.lowercased().hasPrefix(lead) {
+            s = String(s.dropFirst(lead.count)).trimmingCharacters(in: .whitespaces)
+        }
+        for tail in [" and", " then", " also"] where s.lowercased().hasSuffix(tail) { s = String(s.dropLast(tail.count)) }
+        s = s.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-"))
+        guard !s.isEmpty else { return nil }
+        let title = TaskPlanner.tidyTitle(s, removingDay: false)
+        return title.isEmpty ? nil : title
+    }
+
+    private static let notNames: Set<String> = ["that", "this", "it", "a", "an", "the", "new", "next", "big", "some", "one", "another", "my", "our",
+                                                "your", "same", "and", "for", "to", "i", "would", "like", "list", "of", "tasks", "task"]
+
+    /// The project's name when it was said: "a project called Goa trip", "working on the website redesign project".
+    static func name(in text: String) -> String? {
+        let patterns = [
+            #"(?:project|list)\s+(?:called|named)\s+(.+?)(?=[.,;!?]|\s+and\s|\s+so\s|\s+the\s+first|\s+my\s+first|$)"#,
+            #"working on\s+(?:the |my |our |a |an )?(\w+(?:\s\w+){0,3}?)\s+project\b"#,
+            #"\bfor\s+(?:the |my |our )(\w+(?:\s\w+){0,3}?)\s+project\b"#,
+        ]
+        for p in patterns {
+            guard let m = matches(regex(p), in: text).first, m.numberOfRanges > 1, let r = Range(m.range(at: 1), in: text) else { continue }
+            var words = text[r].split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            while let f = words.first, ["new", "a", "an", "the", "my", "our"].contains(f.lowercased()) { words.removeFirst() }
+            if words.isEmpty || words.count > 5 { continue }
+            if words.contains(where: { notNames.contains($0.lowercased()) }) { continue }
+            return words.joined(separator: " ")
+        }
+        return nil
+    }
+
+    /// What the user said when asked what the project is called: "Website relaunch", "it's called the Goa trip".
+    static func name(fromAnswer raw: String) -> String? {
+        var s = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        let leads = ["it's called ", "its called ", "it is called ", "call it ", "the project is called ", "the project is ", "project is ",
+                     "it's ", "its ", "it is ", "the name is ", "name is ", "um ", "uh "]
+        var changed = true
+        while changed {
+            changed = false
+            for l in leads where s.lowercased().hasPrefix(l) { s = String(s.dropFirst(l.count)); changed = true }
+            for l in ["the ", "my ", "our ", "a "] where s.lowercased().hasPrefix(l) { s = String(s.dropFirst(l.count)); changed = true }
+        }
+        if s.lowercased().hasSuffix(" project") { s = String(s.dropLast(" project".count)) }
+        s = s.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        let words = s.split(whereSeparator: { $0.isWhitespace })
+        guard !words.isEmpty, words.count <= 6 else { return nil }
+        return s
+    }
+}

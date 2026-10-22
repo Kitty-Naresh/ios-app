@@ -2721,7 +2721,9 @@ enum ActionLexicon {
         "sanitize", "schedule", "scrub", "send", "serve", "service", "set", "sew", "shop", "shred", "sort", "soak", "stock",
         "sweep", "switch", "take", "tidy", "trim", "turn", "unload", "unpack", "update", "vacuum", "visit", "walk", "wash", "water",
         "wipe", "wrap", "book", "meet", "pickup", "dispose", "restock", "spray", "steam", "peel", "chop", "boil", "heat", "wake",
-        "test", "inspect", "weigh", "submit", "file", "register", "apply", "donate", "recycle", "throw", "bleach", "descale"
+        "test", "inspect", "weigh", "submit", "file", "register", "apply", "donate", "recycle", "throw", "bleach", "descale",
+        "write", "draft", "review", "research", "build", "develop", "launch", "outline", "analyze", "analyse", "finalize", "finalise",
+        "brainstorm", "evaluate", "assess", "define", "publish", "approve", "negotiate", "design"
     ]
 }
 
@@ -2747,6 +2749,38 @@ struct LocalSemanticPrechecker {
             .replacingOccurrences(of: "…", with: " ")
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "'" })
             .map(String.init)
+    }
+
+    // MARK: A setup sentence: "I'm working on a project…", "I'd like to create a list of tasks…"
+
+    /// Phrases that introduce something the speaker is about to list, not something to act on.
+    static let announcements: [[String]] = [
+        ["working", "on", "a", "project"], ["working", "on", "the", "project"], ["working", "on", "my", "project"],
+        ["have", "a", "project"], ["starting", "a", "project"], ["starting", "a", "new", "project"], ["start", "a", "project"],
+        ["list", "of", "tasks"], ["list", "of", "to", "dos"], ["list", "of", "todos"], ["list", "of", "things"], ["list", "of", "items"],
+        ["task", "list"], ["to", "do", "list"], ["todo", "list"],
+        ["a", "few", "things"], ["a", "few", "tasks"], ["a", "few", "items"], ["a", "couple", "of", "things"], ["a", "couple", "of", "tasks"],
+        ["some", "tasks"], ["several", "tasks"], ["multiple", "tasks"], ["bunch", "of", "tasks"], ["bunch", "of", "things"],
+        ["let", "me", "give", "you"], ["let", "me", "tell", "you"], ["let", "me", "list"], ["let", "me", "dictate"]
+    ]
+    /// The speaker talking about themselves ("I want…", "we need…", "let me…"): what keeps "show my list of tasks" a request.
+    private static let selfWords: Set<String> = ["i", "im", "i'm", "i'd", "id", "i've", "ive", "i'll", "ill", "we", "we're", "were", "let", "let's", "lets"]
+
+    /// True when the speech so far only sets the scene for a list of tasks and names none of them yet.
+    /// Kitty keeps listening instead of asking about it: the tasks are about to be said.
+    static func announcesMore(_ raw: String) -> Bool {
+        let t = tokens(raw)
+        guard t.count >= 4, t.prefix(5).contains(where: { selfWords.contains($0) }) else { return false }
+        var lastEnd = -1
+        for phrase in announcements where phrase.count <= t.count {
+            for start in 0...(t.count - phrase.count) where Array(t[start..<(start + phrase.count)]) == phrase {
+                lastEnd = max(lastEnd, start + phrase.count)
+            }
+        }
+        guard lastEnd >= 0 else { return false }
+        let rest = Array(t[lastEnd...])
+        if rest.count <= 2 { return true }                                         // "to add", "for it"
+        return rest.count <= 4 && !rest.contains { ActionLexicon.verbs.contains($0) }   // "for that project"
     }
 
     static func check(_ raw: String) -> Verdict {
@@ -3149,6 +3183,8 @@ final class ConversationStateManager {
     let confirmation = ConfirmationManager()
     private(set) var pendingProposal: Proposal?
     private(set) var lastProcessed = ""         // the merged speech the pending draft or question was built from
+    /// A project's tasks have been heard, and Kitty is waiting to hear what the project is called.
+    var projectTasks: [String]?
 
     /// "Did you say Rani?": what Kitty is waiting to hear back, and what to do with the answer.
     struct ReadBack {
@@ -3208,6 +3244,7 @@ final class ConversationStateManager {
         clarification = nil
         pendingProposal = nil
         lastProcessed = ""
+        projectTasks = nil
         readBack = nil
         readBackUsed = false
         drafts.clear()
@@ -3288,6 +3325,20 @@ final class VoiceTurnManager {
     static let finalizerDelay: TimeInterval = 0.5   // after "done"
     static let quickNudgeAfter: TimeInterval = 3.5  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
     static let nudgeAfter: TimeInterval = 10        // a long silence on unfinished speech: gently ask what the task is
+    static let announcedHold: TimeInterval = 6      // "I'd like to create a list of tasks…": the tasks are about to come
+
+    /// How long a pause has to be before Kitty looks at the speech. A longer turn gets a longer grace: someone dictating
+    /// several sentences pauses between them, and a sentence that ends is not the end of the thought.
+    static func pauseNeeded(for text: String) -> TimeInterval {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).count
+        let sentences = text.filter { ".?!".contains($0) }.count
+        var pause = longPause
+        if words >= 12 { pause += 0.3 }
+        if words >= 25 { pause += 0.4 }
+        if words >= 45 { pause += 0.4 }
+        if sentences >= 2 { pause += 0.3 }
+        return min(pause, 3.2)
+    }
 
     enum Gate: Equatable {
         case keepListening
@@ -3368,12 +3419,16 @@ final class VoiceTurnManager {
             if text.isEmpty { return .keepListening }
             return silence >= finalizerDelay ? .forceEvaluate(text) : .keepListening
         }
-        if silence < longPause { return .keepListening }                          // a short pause: keep listening
+        if silence < pauseNeeded(for: text) { return .keepListening }               // a short pause: keep listening
         switch LocalSemanticPrechecker.check(text) {
         case .incomplete(let reason):
             if silence >= quickNudgeAfter, bareQuestion(for: text) != nil { return .nudge }     // "clean", "clean the", "buy"
             return .hold(reason)
-        case .mayBeComplete: return .evaluate(text)
+        case .mayBeComplete:
+            if LocalSemanticPrechecker.announcesMore(text) {                       // "I'd like a list of tasks…": the tasks come next
+                return silence >= announcedHold ? .nudge : .hold("the tasks are still to come")
+            }
+            return .evaluate(text)
         }
     }
 
@@ -3417,6 +3472,9 @@ final class VoiceTurnManager {
         guard state.clarify.rounds < ClarificationStateManager.maxRounds else { return nil }
         let t = LocalSemanticPrechecker.tokens(utterance)
         var question = Self.bareQuestion(for: utterance)
+        if question == nil, LocalSemanticPrechecker.announcesMore(utterance) {
+            question = t.contains("project") || t.contains("tasks") || t.contains("task") ? "What's the first task?" : "What's the first one?"
+        }
         if question == nil, ["add", "create", "make", "remind", "i"].contains(t.first ?? ""), t.count <= 5 {
             question = ClarificationStateManager.fallbackQuestion(for: .action)
         }
@@ -3529,6 +3587,11 @@ final class VoiceTurnManager {
             return applyEdit(edit, ctx: ctx)
         }
 
+        // 2b. A project and its tasks ("I'm working on a project… the first task is…"): the project is a list.
+        if state.pendingProposal == nil, !state.drafts.hasContent, let project = projectTurn(utterance: utterance, delta: delta, ctx: ctx) {
+            return project
+        }
+
         // 3. The model decides what it means.
         let answering = state.phase == .awaitingClarification && !state.drafts.hasContent && state.clarify.lastQuestion != nil
         if answering { state.clarify.recordAnswer(delta) }
@@ -3542,6 +3605,10 @@ final class VoiceTurnManager {
         let analysis = BulkDetector.analyze(answering ? delta : utterance)
 
         var lines: [String] = []
+        let sentenceCount = utterance.filter { ".?!".contains($0) }.count
+        if sentenceCount >= 2 {
+            lines.append("This is one thought spoken over several sentences. Use all of it: what an earlier sentence says (the project, the person, the place, the day) applies to the sentences after it. Never ask for something already said.")
+        }
         if answering, let q = state.clarify.lastQuestion {
             lines.append("You asked: “\(q)” They answered: “\(delta)”.")
         } else if state.pendingProposal != nil || state.drafts.hasContent, delta != utterance.trimmingCharacters(in: .whitespacesAndNewlines) {
@@ -3696,7 +3763,8 @@ final class VoiceTurnManager {
         switch validated {
         case .clarify(let q):
             // A question about something optional is never needed: save what is clear instead.
-            if ClarificationStateManager.asksForOptionalMetadata(q) {
+            let enrichment = ClarificationStateManager.asksForDetail(q) && Self.isActionableTitle(d.title.isEmpty ? BulkDetector.stripFrames(utterance) : d.title)
+            if ClarificationStateManager.asksForOptionalMetadata(q) || enrichment {
                 var copy = d
                 copy.action = "create_task"
                 if copy.title.isEmpty { copy.title = TaskPlanner.tidyTitle(BulkDetector.stripFrames(utterance), removingDay: true) }
@@ -3780,6 +3848,48 @@ final class VoiceTurnManager {
     }
 
     // MARK: Asking: one required slot at a time
+
+    /// A title that says what to do to what ("Write a strategy document"): nothing more is needed to save it.
+    static func isActionableTitle(_ title: String) -> Bool {
+        let t = LocalSemanticPrechecker.tokens(title)
+        guard t.count >= 2 else { return false }
+        return t.contains { ActionLexicon.verbs.contains($0) } || t.count >= 3
+    }
+
+    /// A project and its tasks become items on a named list. The project's name is asked for only when it was not said.
+    private func projectTurn(utterance: String, delta: String, ctx: ValidationContext) -> TurnResult? {
+        var tasks: [String]
+        var name: String?
+        if let waiting = state.projectTasks {
+            tasks = waiting
+            if ProjectOutline.hasMarker(delta), let more = ProjectOutline.parse("project " + delta) {
+                tasks += more.tasks                                     // more tasks came before the name did
+                name = more.name
+            } else {
+                name = ProjectOutline.name(fromAnswer: delta)
+            }
+        } else if let outline = ProjectOutline.parse(utterance) {
+            tasks = outline.tasks
+            name = outline.name
+        } else {
+            return nil
+        }
+        guard let project = name.map({ TaskStore.cleanProfileName($0) }), !project.isEmpty else {
+            state.projectTasks = tasks
+            lastTrace.route = "project-name"
+            let q = "What's the project called?"
+            switch state.clarify.register(question: q, field: ClarificationStateManager.field(for: q, action: "create_task")) {
+            case .ask(let asked): return .question(asked)
+            case .exhausted:
+                state.projectTasks = nil
+                return .question("Sorry, I couldn't get the project's name. What would you like me to add?")
+            }
+        }
+        state.projectTasks = nil
+        lastTrace.route = "project-list"
+        let planned = tasks.map { PlannedTask(title: $0, category: .guess(from: $0), due: nil, profile: project) }
+        return TaskAgent.buildAddProposal(planned, usedAI: false, text: utterance, sink: sink)
+    }
 
     private func clarification(_ question: String, action: String, utterance: String, ctx: ValidationContext) -> TurnResult {
         let q = ClarificationStateManager.oneQuestion(question)

@@ -28,26 +28,21 @@ nonisolated enum BargeIn {
         word.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
-    /// The words the user said, leaving out words that continue Kitty's own sentence.
-    static func userWords(heard: String, spoken: String) -> [String] {
-        let heardWords = heard.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        let said = spoken.split(whereSeparator: { $0.isWhitespace }).map { norm(String($0)) }.filter { !$0.isEmpty }
-        guard !said.isEmpty else { return heardWords }
-        let single = Set(said)
-        var pairs = Set<String>()
-        for i in 0..<max(said.count - 1, 0) { pairs.insert(said[i] + " " + said[i + 1]) }
+    static func leadingEcho(heard: String, spoken: String, strict: Bool) -> Int {
+        EchoGuard.leadingEcho(heard: heard, spoken: spoken, strict: strict)
+    }
 
-        let normed = heardWords.map(norm)
-        func echo(_ i: Int) -> Bool {
-            let w = normed[i]
-            if w.isEmpty { return true }
-            if stopWords.contains(w) { return false }
-            guard single.contains(w) else { return false }
-            if i > 0, pairs.contains(normed[i - 1] + " " + w) { return true }
-            if i + 1 < normed.count, pairs.contains(w + " " + normed[i + 1]) { return true }
-            return false
-        }
-        return heardWords.indices.filter { !echo($0) }.map { heardWords[$0] }
+    /// The words the user said, leaving out words that continue Kitty's own sentence (see `EchoGuard`).
+    static func userWords(heard: String, spoken: String, strict: Bool = false) -> [String] {
+        EchoGuard.userWords(heard: heard, spoken: spoken, strict: strict, keep: stopWords)
+    }
+
+    /// Speech that shares no word with what Kitty is saying needs two words; speech that overlaps her words (which is what
+    /// her own voice, misheard, looks like) needs three. A stop word never needs either.
+    static func minWordsToInterrupt(_ words: [String], spoken: String) -> Int {
+        let said = TurnAccumulator.words(spoken)
+        let overlaps = words.contains { w in said.contains { EchoGuard.matches(w, $0) } }
+        return overlaps ? 3 : 2
     }
 
     static func decide(heard: String, spoken: String) -> Decision {
@@ -62,7 +57,7 @@ nonisolated enum BargeIn {
             || (words.first == "thats" && words.contains("enough"))
             || zip(words, words.dropFirst()).contains { $0 == "never" && $1 == "mind" }
         if stops { return .interrupt(rest: rest(after: user)) }
-        if anySpeechInterrupts, words.count >= 2 { return .interrupt(rest: user.joined(separator: " ")) }
+        if anySpeechInterrupts, words.count >= minWordsToInterrupt(words, spoken: spoken) { return .interrupt(rest: user.joined(separator: " ")) }
         return .ignore
     }
 
@@ -78,6 +73,165 @@ nonisolated enum BargeIn {
             else { break }
         }
         return user[i...].joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?"))
+    }
+}
+
+/// Tells Kitty's own voice, as the microphone hears it, from the user's.
+///
+/// What comes back from the recogniser is her sentences, garbled: "tasks" becomes "task's", a word is dropped, a number is
+/// written as digits. So a heard word counts as hers when it matches a spoken word loosely, and only when it sits in a run
+/// of at least two such words in her order. One word on its own is left alone, because the user may well say "bathroom"
+/// right after she did.
+nonisolated enum EchoGuard {
+    /// Same word for this purpose: equal, one letter apart, or one a plural of the other.
+    private static let numbers: [String: String] = [
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8",
+        "nine": "9", "ten": "10", "eleven": "11", "twelve": "12",
+    ]
+
+    static func matches(_ x: String, _ y: String) -> Bool {
+        let a = numbers[x] ?? x, b = numbers[y] ?? y
+        if a == b { return !a.isEmpty }
+        guard a.count >= 4, b.count >= 4 else { return false }
+        return withinOneEdit(a, b)
+    }
+
+    static func withinOneEdit(_ a: String, _ b: String) -> Bool {
+        let x = Array(a), y = Array(b)
+        if abs(x.count - y.count) > 1 { return false }
+        if x == y { return true }
+        var i = 0
+        while i < x.count, i < y.count, x[i] == y[i] { i += 1 }
+        if x.count == y.count { return Array(x[(i + 1)...]) == Array(y[(i + 1)...]) }          // one letter changed
+        let (long, short) = x.count > y.count ? (x, y) : (y, x)
+        return Array(long[(i + 1)...]) == Array(short[i...])                                       // one letter added
+    }
+
+    /// The heard words (in their original form) that are not Kitty's. `keep` words (stop words) are never dropped.
+    /// `strict` also drops a single heard word that matches hers: used in the moments right after she stops, when anything
+    /// that sounds like her is her.
+    static func userWords(heard: String, spoken: String, strict: Bool = false, keep: Set<String> = []) -> [String] {
+        let heardWords = heard.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let flags = echoFlags(heard: heardWords, spoken: spoken, strict: strict, keep: keep)
+        return heardWords.indices.filter { !flags[$0] }.map { heardWords[$0] }
+    }
+
+    /// How many words at the start of `heard` are Kitty's. Her tail comes first in a fresh recognition, the user's words after.
+    static func leadingEcho(heard: String, spoken: String, strict: Bool) -> Int {
+        let words = heard.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let flags = echoFlags(heard: words, spoken: spoken, strict: strict, keep: [])
+        return flags.prefix(while: { $0 }).count
+    }
+
+    /// One flag per heard word: true when it is Kitty's. Punctuation-only tokens count as hers (they are nothing).
+    static func echoFlags(heard heardWords: [String], spoken: String, strict: Bool, keep: Set<String>) -> [Bool] {
+        let said = TurnAccumulator.words(spoken)
+        guard !said.isEmpty else { return heardWords.map { _ in false } }
+        let normed = heardWords.map(BargeIn.norm)
+        var echo = Array(repeating: false, count: heardWords.count)
+
+        // Empty tokens (punctuation only) and words that match one of hers.
+        let hit = normed.map { w in !w.isEmpty && said.contains { matches(w, $0) } }
+        func position(_ w: String) -> [Int] { said.indices.filter { matches(w, said[$0]) } }
+
+        // A pair of neighbouring heard words that sit within two words of each other in her sentence (one word may be dropped).
+        for i in 0..<max(heardWords.count - 1, 0) where hit[i] && hit[i + 1] {
+            let a = position(normed[i]), b = position(normed[i + 1])
+            if a.contains(where: { j in b.contains { k in k > j && k - j <= 2 } }) {
+                echo[i] = true; echo[i + 1] = true
+            }
+        }
+        // The same with one extra small word between them ("pay the rent" for "pay rent").
+        for i in 0..<max(heardWords.count - 2, 0) where hit[i] && hit[i + 2] && normed[i + 1].count <= 3 {
+            let a = position(normed[i]), b = position(normed[i + 2])
+            if a.contains(where: { j in b.contains { k in k > j && k - j <= 2 } }) {
+                echo[i] = true; echo[i + 1] = true; echo[i + 2] = true
+            }
+        }
+        // A heard run that is nearly all hers is hers: "you have three task buy milk call".
+        let matched = hit.filter { $0 }.count
+        if heardWords.count >= 4, Double(matched) / Double(heardWords.count) >= 0.8 {
+            for i in heardWords.indices where hit[i] { echo[i] = true }
+        }
+        if strict { for i in heardWords.indices where hit[i] { echo[i] = true } }
+
+        return heardWords.indices.map { i in
+            if normed[i].isEmpty { return true }
+            if keep.contains(normed[i]) { return false }
+            return echo[i]
+        }
+    }
+}
+
+/// What Kitty has said lately, so the tail of her voice that the microphone picks up just after she stops is not taken as
+/// the user's.
+nonisolated struct SpokenBuffer {
+    /// Seconds after she stops during which the start of what is heard is checked against what she said.
+    static let tail: TimeInterval = 2
+    /// Seconds right after she stops during which any word that sounds like hers is dropped.
+    static let quiet: TimeInterval = 0.6
+
+    private var entries: [(text: String, end: Date?)] = []
+    mutating func began(_ text: String) {
+        entries.append((text, nil))
+        if entries.count > 4 { entries.removeFirst() }
+    }
+    mutating func ended(at: Date) {
+        for i in entries.indices where entries[i].end == nil { entries[i].end = at }
+    }
+    mutating func clear() { entries = [] }
+
+    func recentText(now: Date) -> String {
+        entries.filter { $0.end == nil || now.timeIntervalSince($0.end!) < Self.tail }.map(\.text).joined(separator: " ")
+    }
+    func inQuietWindow(now: Date) -> Bool {
+        entries.contains { $0.end != nil && now.timeIntervalSince($0.end!) < Self.quiet }
+    }
+}
+
+/// Keeps every sentence of a long turn.
+///
+/// The recogniser sends cumulative partials: each one should contain everything said so far in the session. After a pause it
+/// sometimes starts over instead, and the new partial holds only the new sentence. Replacing the old text with it would
+/// lose the first sentence, so a partial that is clearly a fresh transcription is added to what was said before.
+nonisolated enum TurnAccumulator {
+    static func words(_ s: String) -> [String] {
+        s.split(whereSeparator: { $0.isWhitespace }).map { BargeIn.norm(String($0)) }.filter { !$0.isEmpty }
+    }
+
+    /// Two words that are the same word as far as a recogniser's revisions go ("task" / "tasks", "im" / "i'm").
+    static func sameWord(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        if a.isEmpty || b.isEmpty { return false }
+        if (a.hasPrefix(b) || b.hasPrefix(a)) && min(a.count, b.count) >= 2 { return true }
+        return EchoGuard.withinOneEdit(a, b)
+    }
+
+    /// True when `new` is not a longer or revised version of `previous`: it begins differently and shares no pair of
+    /// neighbouring words with it. A revision ("i'm working" -> "i am working") keeps most of the earlier words.
+    static func isReset(previous: String, new: String) -> Bool {
+        let p = words(previous), n = words(new)
+        guard p.count >= 2, !n.isEmpty else { return false }
+        // The start agrees: it is the same sentence, longer or revised.
+        let k = min(6, p.count, n.count)
+        let agree = (0..<k).filter { sameWord(p[$0], n[$0]) }.count
+        if Double(agree) / Double(k) >= 0.6 { return false }
+        // A revision that shifted the words ("i'm" -> "i am") still shares real pairs of words with what came before.
+        var pairs = Set<String>()
+        for i in 0..<(p.count - 1) where !(trivial.contains(p[i]) && trivial.contains(p[i + 1])) { pairs.insert(p[i] + " " + p[i + 1]) }
+        for i in 0..<max(n.count - 1, 0) where pairs.contains(n[i] + " " + n[i + 1]) { return false }
+        return true
+    }
+
+    /// Words that begin many sentences: sharing "and the" says nothing about whether it is the same sentence.
+    private static let trivial: Set<String> = ["and", "the", "a", "an", "to", "of", "is", "i", "it", "for", "my", "in", "on", "so", "then", "also",
+                                               "that", "this", "we", "you", "are", "be", "do", "ok", "okay"]
+
+    /// The turn after a new partial: `carry` holds earlier sessions, `session` the current one.
+    static func absorb(carry: String, session: String, partial: String) -> (carry: String, session: String, reset: Bool) {
+        guard !session.isEmpty, isReset(previous: session, new: partial) else { return (carry, partial, false) }
+        let joined = [carry, session].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: " ")
+        return (joined, partial, true)
     }
 }
 
