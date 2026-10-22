@@ -212,7 +212,7 @@ Every response Kitty speaks in every case above is graded by `Judge`, and the ca
 For the long and noisy cases (K), four more, with the thresholds the test asserts:
 
 K1. Task recall (long turns) at least 90%: of the tasks the speaker asked for, how many were made.
-K2. Task precision (long turns): of the tasks made, how many were asked for.
+K2. Task precision (long turns) at least 90%: of the tasks made, how many were asked for.
 K3. Chatter-as-task rate at most 5%: tasks whose title is the story, not an ask.
 K4. Context-carry accuracy at least 90%: a shared day or person lands on the right tasks (and only those), and a day that
 was not said is asked about, never written in.

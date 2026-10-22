@@ -1,3 +1,19 @@
+# Kitty v31.1: non-answers, vague placeholders, bulk routines
+
+- **Non-answers get an honest reply.** "I don't know", "no idea", "I really don't know", "nothing" are neither an answer nor a request:
+  Kitty says she is unclear what to do and that nothing was done. She never lists your tasks for them (`UnclearAnswer`, with a gate,
+  a route step in `VoiceTurnManager`, and a guard on the model's "view" and "ask" answers).
+- **Vague placeholders are asked about.** "Add a task for the project" names no task, so Kitty asks "What would you like the task to be
+  for the project?" instead of creating one titled "Project" (`VaguePlaceholder`). The answer becomes the real task, and a request that
+  names something specific ("add a task to call the project manager") still just works.
+- **Bulk routines, schedule first or by a named person.** "Every day: sweep, wash the dishes", "Every Sunday clean and mop" and "the maid
+  should sweep every day and mop every Saturday" become separate routines, each with its own schedule and assignee; "weekly" or
+  "monthly" alone is asked about ("Which day should I mop each week?") and the answer fills that routine.
+  Known gap: a single third-person sentence like "Every day the maid sweeps and mops" still yields only "Sweep".
+- **Tests no longer depend on the machine's model.** `TaskPlanner.onDeviceModelAllowed` keeps the on-device model off under XCTest
+  (unless KITTY_REAL_MODEL=1), so scripted tests and evals give the same result whether Apple Intelligence is ready or not. Titles
+  returned by the model are sentence-cased like the rule path's.
+
 # Kitty v31: long, noisy speech
 
 Someone who says "my in-laws are coming this Saturday and the house is a mess, so the maid should clean the bathrooms on Friday, oh and
