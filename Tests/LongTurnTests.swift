@@ -358,3 +358,52 @@ final class LongTurnValidationTests: XCTestCase {
     }
 }
 
+
+// MARK: A model that only says "wait" does not stop a turn that holds real actions
+
+@MainActor
+final class LongTurnWaitTests: XCTestCase {
+    private struct WaitingEngine: DecisionProviding {
+        func decide(prompt: String) async -> AgentDecisionValue? { AgentDecisionValue(wait: true, action: "wait") }
+        func decideBulk(prompt: String) async -> BulkDecisionValue? { BulkDecisionValue(action: "wait") }
+    }
+    private let now = LongTurnAnalyzerTests.now
+    private func manager(fallback: Bool) -> VoiceTurnManager {
+        let m = VoiceTurnManager(engine: WaitingEngine(), sink: InMemorySaveSink(), knownCategories: { [] }, knownAssignees: { [] })
+        m.ruleFallbackEnabled = fallback
+        return m
+    }
+
+    func testSeveralActionsComeFromTheClausesWhenEveryCallSaysWait() async {
+        let m = manager(fallback: true)
+        let r = await m.decide(utterance: LongTurnAnalyzerTests.inLaws, now: now)
+        guard case .proposal = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(m.lastTrace.route, "long-turn-rules")
+        XCTAssertEqual(m.state.drafts.items.count, 4)
+    }
+
+    func testOneActionInALongTurnGoesThroughTheRulePlanner() async {
+        let m = manager(fallback: true)
+        let said = "So yesterday was a total mess and honestly I am so tired of it all but anyway I need to call the plumber on Friday"
+        let r = await m.decide(utterance: said, now: now)
+        XCTAssertEqual(m.lastTrace.route, "long-turn-rules")
+        switch r {
+        case .wait: XCTFail("a turn with an action must not wait")
+        case .proposal(let p): XCTAssertTrue(p.rows.contains { $0.title.lowercased().contains("plumber") }, "\(p.rows.map(\.title))")
+        default: break
+        }
+    }
+
+    func testWithoutTheRuleFallbackTheWaitIsReportedHonestly() async {
+        let m = manager(fallback: false)
+        let said = "So yesterday was a total mess and honestly I am so tired of it all but anyway I need to call the plumber on Friday"
+        let r = await m.decide(utterance: said, now: now)
+        if case .wait = r {} else { XCTFail("\(r)") }
+    }
+
+    func testAShortUnfinishedTurnStillWaits() async {
+        let m = manager(fallback: true)
+        let r = await m.decide(utterance: "Add a task to", now: now)
+        if case .wait = r {} else { XCTFail("\(r)") }
+    }
+}

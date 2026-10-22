@@ -3688,6 +3688,11 @@ final class VoiceTurnManager {
             lastTrace.modelOutput = "\(decision)"
             Breadcrumb.log("decision: \(decision.action) wait=\(decision.wait)")
             var validated = TaskValidator.validate(decision, utterance: utterance, context: ctx)
+            if case .wait = validated, let turn = longTurn, ruleFallbackEnabled {
+                // The gate released this turn and it holds a real action: the model's "wait" is not an answer.
+                lastTrace.validation = "\(validated)"
+                return await longTurnRules(turn, analysis: analysis, utterance: utterance, ctx: ctx)
+            }
             if case .wait = validated, !final, Self.modelMeantToCreate(decision, utterance: utterance) {
                 // The on-device model sometimes sets wait=true on a plain, finished "Buy bread" while still choosing create_task
                 // with an empty title (seen in real-model runs, and it varies run to run). The local gate already judged the
@@ -3722,7 +3727,16 @@ final class VoiceTurnManager {
         guard ruleFallbackEnabled else {
             return .reply(AgentReply(message: "I couldn't reach the on-device model.", didAdd: false))
         }
+        if let turn = longTurn { return await longTurnRules(turn, analysis: analysis, utterance: utterance, ctx: ctx) }
         return await TaskAgent.propose(utterance)
+    }
+
+    /// The model gave nothing usable for a turn that holds real actions: the local rules answer, one action at a time.
+    /// A single action goes through the rule planner; several become one preview built from the clauses.
+    private func longTurnRules(_ turn: LongTurn, analysis: BulkDetector.Analysis, utterance: String, ctx: ValidationContext) async -> TurnResult {
+        lastTrace.route = "long-turn-rules"
+        if turn.actions.count >= 2 { return bulkFromClauses(turn, analysis: analysis, utterance: utterance, ctx: ctx) }
+        return await TaskAgent.propose(turn.actions[0].source)
     }
 
     /// yes -> true, no -> false, anything else (including "discard") -> nil so the normal handling runs.
@@ -3768,9 +3782,11 @@ final class VoiceTurnManager {
         guard !outputs.isEmpty else {
             lastTrace.route = "no-model"
             guard ruleFallbackEnabled else { return .reply(AgentReply(message: "I couldn't reach the on-device model.", didAdd: false)) }
+            lastTrace.route = "long-turn-rules"
             return bulkFromClauses(turn, analysis: analysis, utterance: utterance, ctx: ctx)
         }
-        lastTrace.route = "model-bulk-long"
+        // Every call said "wait" or asked something: the actions still come from the clauses.
+        lastTrace.route = answered == 0 ? "long-turn-rules" : "model-bulk-long"
         if let q = readBackQuestion(bulk: merged, utterance: utterance) { lastTrace.route = "read-back"; return q }
         let validated = BulkValidator.validate(merged, utterance: utterance, segments: analysis.segments, context: ctx, turn: turn)
         lastTrace.validation = "\(validated)"
