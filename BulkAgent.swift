@@ -312,8 +312,42 @@ enum BulkDetector {
     /// Verbs that change or look at what is already on the list: a long sentence with one of these is not a list of new tasks.
     private static let managingVerbs: Set<String> = ["mark", "complete", "delete", "remove", "cancel", "change", "update", "rename", "show", "read", "move"]
 
+    // MARK: A schedule said first: "every morning water the plants, every evening lock the doors"
+
+    private static let scheduleUnit = "day|days|morning|afternoon|evening|night|week|weeks|month|weekday|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    private static let scheduleLead = try? NSRegularExpression(
+        pattern: #"(?:^|[,;.]\s*|\b(?:and|then|also|but)\s+)((?:(?:every|each)\s+(?:(?:other|alternate|second|third)\s+)?(?:\d+\s+)?(?:"# + scheduleUnit
+            + #")(?:\s+and\s+(?:"# + scheduleUnit + #"))*|daily|nightly|weekly|monthly|(?:on\s+)?weekdays|(?:on\s+)?weekends))\s+"#,
+        options: [.caseInsensitive])
+
+    /// A schedule that opens an action ("every Sunday clean the fridge", "daily take out the trash") moves to the end of it and
+    /// of the actions after it, up to the next schedule: "clean the fridge every sunday". Verb-led routines are what the rest of
+    /// the detector, the validator and the model already understand.
+    static func scheduleFirst(_ text: String) -> String {
+        guard let re = scheduleLead else { return text }
+        let ns = text as NSString
+        var leads: [(range: NSRange, phrase: String)] = []
+        for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let next = ns.substring(from: m.range.location + m.range.length)
+            guard let first = LocalSemanticPrechecker.tokens(next).first, ActionLexicon.verbs.contains(first) else { continue }
+            leads.append((m.range, ns.substring(with: m.range(at: 1)).lowercased()))
+        }
+        guard !leads.isEmpty else { return text }
+        var parts: [String] = []
+        let prefix = ns.substring(to: leads[0].range.location).trimmingCharacters(in: CharacterSet(charactersIn: " ,;."))
+        if !prefix.isEmpty { parts.append(prefix) }
+        for (i, lead) in leads.enumerated() {
+            let start = lead.range.location + lead.range.length
+            let end = i + 1 < leads.count ? leads[i + 1].range.location : ns.length
+            let chunk = ns.substring(with: NSRange(location: start, length: max(0, end - start)))
+            for seg in actionSegments(chunk) { parts.append(seg + " " + lead.phrase) }
+        }
+        return parts.joined(separator: ", ")
+    }
+
     static func analyze(_ raw: String, words: [SpokenWord] = [], now: Date = Date()) -> Analysis {
-        let text = raw.lowercased().replacingOccurrences(of: "’", with: "'")
+        let lowered = raw.lowercased().replacingOccurrences(of: "’", with: "'")
+        let text = scheduleFirst(lowered)
         let tokens = LocalSemanticPrechecker.tokens(text)
         guard !tokens.isEmpty else { return Analysis() }
 
@@ -341,7 +375,7 @@ enum BulkDetector {
 
         // A long turn with an intro, asides and several asks: only the action clauses count, so chatter cannot defeat detection.
         if LongTurnAnalyzer.isLong(text) {
-            let turn = LongTurnAnalyzer.analyze(raw, words: words, now: now)
+            let turn = LongTurnAnalyzer.analyze(text == lowered ? raw : text, words: words, now: now)
             let leads = turn.actions.compactMap { LocalSemanticPrechecker.tokens($0.text).first }
             let asksQuestion = turn.clauses.contains { c in
                 c.kind != .action && LocalSemanticPrechecker.tokens(c.text).first.map { LocalSemanticPrechecker.questionStarters.contains($0) } ?? false
@@ -355,9 +389,18 @@ enum BulkDetector {
             }
         }
 
-        let segments = actionSegments(text)
-        let verbLed = segments.filter { s in LocalSemanticPrechecker.tokens(s).first.map { ActionLexicon.verbs.contains($0) } ?? false }
-        guard verbLed.count >= 2, verbLed.count == segments.count else { return Analysis() }
+        func verbLedOnly(_ s: [String]) -> Bool {
+            let led = s.filter { LocalSemanticPrechecker.tokens($0).first.map { ActionLexicon.verbs.contains($0) } ?? false }
+            return led.count >= 2 && led.count == s.count
+        }
+        var segments = actionSegments(text)
+        // "The maid should sweep every day and mop every Saturday": the person and the modal come off, the routines remain.
+        if !verbLedOnly(segments), hasSchedule(text),
+           let body = LongTurnAnalyzer.actionBody(text.split(whereSeparator: { $0.isWhitespace }).map(String.init)) {
+            let alt = actionSegments(body.joined(separator: " "))
+            if verbLedOnly(alt) { segments = alt }
+        }
+        guard verbLedOnly(segments) else { return Analysis() }
         let scheduled = segments.contains { hasSchedule($0) }
         return Analysis(kind: scheduled ? .routines : .tasks, segments: segments)
     }
@@ -392,6 +435,7 @@ struct DraftItem: Identifiable, Equatable {
     var assignee: String? = nil
     var notes: String? = nil
     var recurrence: RecurrenceSpec? = nil
+    var slot: DaySlot? = nil              // a routine's time of day when only the words said it ("every evening")
 
     init(_ v: ValidatedTask, kind: Kind) {
         self.kind = kind
@@ -412,7 +456,11 @@ struct DraftItem: Identifiable, Equatable {
                       assignee: assignee, notes: notes, recurrence: kind == .routine ? recurrence : nil)
     }
 
-    func planned() -> PlannedTask { validated.planned() }
+    func planned() -> PlannedTask {
+        var p = validated.planned()
+        if let s = slot, timeMinutes == nil { p.slot = s }
+        return p
+    }
     var key: String { TaskValidator.key(title) }
 }
 
@@ -617,19 +665,27 @@ final class BulkDraftManager {
         return TaskPlanner.tidyTitle(verb + " " + t, removingDay: false)
     }
 
+    /// "Sweep" on its own is a fine routine ("the maid should sweep every day"): the schedule says what it is.
+    static func isChoreVerb(_ title: String) -> Bool {
+        let w = LocalSemanticPrechecker.tokens(title)
+        return w.count == 1 && ActionLexicon.verbs.contains(w[0])
+    }
+
     /// A draft from a few words the user added ("water plants", "water the plants every morning").
     static func makeItem(from text: String, context ctx: ValidationContext) -> DraftItem? {
         var working = BulkDetector.stripFrames(text)
         var recurrence: RecurrenceSpec?
         if let r = TaskPlanner.ruleRecurrence(in: working) { recurrence = r.spec; working = r.cleaned }
         let title = TaskPlanner.tidyTitle(working, removingDay: false)
-        guard TaskValidator.isActionable(title), title.count <= 80 else { return nil }
+        guard TaskValidator.isActionable(title) || (recurrence != nil && isChoreVerb(title)), title.count <= 80 else { return nil }
         var v = ValidatedTask(title: title)
         let nouns = Set(Words.nouns(title))
         v.categoryName = ctx.knownCategories.first { c in !Set(Words.nouns(c)).isDisjoint(with: nouns) }
-        v.due = TaskValidator.resolveDate("", utterance: text, ctx: ctx)
+        v.due = recurrence == nil ? TaskValidator.resolveDate("", utterance: text, ctx: ctx) : nil     // "every Sunday" is a schedule, not a day
         v.recurrence = recurrence
-        return DraftItem(v, kind: recurrence == nil ? .task : .routine)
+        var item = DraftItem(v, kind: recurrence == nil ? .task : .routine)
+        if recurrence != nil, DaySlot.guess(from: text) != .anytime { item.slot = DaySlot.guess(from: text) }   // "every evening"
+        return item
     }
 }
 
@@ -1024,7 +1080,8 @@ enum DraftProposals {
         var tags: [PreviewTag] = []
         if let r = i.recurrence, i.kind == .routine { tags.append(PreviewTag(text: r.scheduleText, icon: "repeat", color: .purple)) }
         if let d = i.due { tags.append(PreviewTag(text: d.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()), icon: "calendar")) }
-        if let m = i.timeMinutes { tags.append(PreviewTag(text: DaySlot.clockLabel(m), icon: "clock", color: .indigo)) }
+        if let m = i.timeMinutes { tags.append(PreviewTag(text: DaySlot.clockLabel(m), icon: "clock", color: .indigo))
+        } else if let s = i.slot { tags.append(PreviewTag(text: s.label, icon: s.symbol, color: .indigo)) }
         if let a = i.assignee { tags.append(PreviewTag(text: a, icon: "person.fill", color: .person(a))) }
         if let c = i.categoryName { tags.append(PreviewTag(text: c, icon: "tag.fill")) }
         if let p = i.priority { tags.append(PreviewTag(text: p.capitalized + " priority", icon: "flag.fill", color: p == "high" ? .red : .orange)) }
@@ -1132,9 +1189,9 @@ enum BulkValidator {
 
     private static func make(title raw: String, category: String, dueDate: String, dueTime: String, priority: String, assignee: String,
                              notes: String, segments: [String], utterance: String, ctx: ValidationContext,
-                             matched: ActionClause? = nil, contextNotes: String? = nil) -> ValidatedTask? {
+                             matched: ActionClause? = nil, contextNotes: String? = nil, scheduled: Bool = false) -> ValidatedTask? {
         let title = TaskPlanner.tidyTitle(raw, removingDay: false)
-        guard TaskValidator.isActionable(title), title.count <= 80 else { return nil }
+        guard TaskValidator.isActionable(title) || (scheduled && BulkDraftManager.isChoreVerb(title)), title.count <= 80 else { return nil }
         if let a = matched {
             // A long turn: the day and the person come from this action's own clause, never from the intro or another task.
             return ValidatedTask(
@@ -1156,6 +1213,27 @@ enum BulkValidator {
             priority: TaskValidator.resolvePriority(priority, utterance: seg),
             assignee: TaskValidator.resolveAssignee(assignee, utterance: utterance, known: ctx.knownAssignees),
             notes: cleanNotes(notes))
+    }
+
+    /// Where in the day a routine happens, when its words say so ("every evening"). Nil when they do not.
+    private static func slot(in text: String) -> DaySlot? {
+        let s = DaySlot.guess(from: text)
+        return s == .anytime ? nil : s
+    }
+
+    /// "weekly" or "monthly" without the day it needs: the question to ask, or nil when the words are enough.
+    private static func scheduleQuestion(_ title: String, in text: String) -> String? {
+        let t = text.lowercased()
+        let name = title.lowercased()
+        if t.range(of: "\\bweekly\\b|\\bevery week\\b|\\bonce a week\\b", options: .regularExpression) != nil,
+           TaskPlanner.weekdaysMentioned(t).isEmpty {
+            return "Which day should I \(name) each week?"
+        }
+        if ["monthly", "every month", "once a month", "each month"].contains(where: { t.contains($0) }),
+           t.range(of: "\\d{1,2}(st|nd|rd|th)", options: .regularExpression) == nil {
+            return "Which day of the month should I \(name)?"
+        }
+        return nil
     }
 
     private static func clarifyAbout(_ title: String) -> String {
@@ -1195,6 +1273,10 @@ enum BulkValidator {
         case "create_tasks", "create_routines", "create_task", "create_routine":
             var items: [DraftItem] = []
             let utterNouns = Words.nouns(utterance)
+            // "Every day: sweep the floors, wash the dishes": the schedule is said once, before the list, and holds for every item.
+            let head = segments.isEmpty ? "" : BulkDetector.head(of: utterance, segments: segments)
+            let headSchedule = head.count < utterance.count && BulkDetector.hasSchedule(head)
+                && TaskPlanner.ruleRecurrence(in: head) != nil ? head : ""
 
             for t in d.tasks {
                 // Never invent a task: it has to name something the user said.
@@ -1205,10 +1287,24 @@ enum BulkValidator {
                     guard let a = matchingAction(for: t.title, in: turn) else { continue }
                     matched = a
                 }
+                let own = matched?.text ?? segment(for: t.title, segments: segments, whole: utterance)
+                let said = !segments.isEmpty && own != utterance
+                let scheduleWords = said ? (BulkDetector.hasSchedule(own) ? own : headSchedule) : ""
                 guard let v = make(title: t.title, category: t.category, dueDate: t.dueDate, dueTime: t.dueTime, priority: t.priority,
                                    assignee: t.assignee, notes: t.notes, segments: segments, utterance: utterance, ctx: ctx,
-                                   matched: matched, contextNotes: turn?.context.notes) else {
+                                   matched: matched, contextNotes: turn?.context.notes, scheduled: !scheduleWords.isEmpty) else {
                     return .clarify(clarifyAbout(t.title))
+                }
+                // The user said it repeats ("water the plants every morning"): a routine, whatever kind the model chose.
+                if !scheduleWords.isEmpty, let spec = TaskPlanner.ruleRecurrence(in: scheduleWords)?.spec {
+                    if let q = scheduleQuestion(v.title, in: scheduleWords) { return .clarify(q) }
+                    var routine = v
+                    routine.recurrence = spec
+                    routine.due = nil
+                    var item = DraftItem(routine, kind: .routine)
+                    item.slot = slot(in: scheduleWords)
+                    items.append(item)
+                    continue
                 }
                 items.append(DraftItem(v, kind: .task))
             }
@@ -1222,14 +1318,14 @@ enum BulkValidator {
                 }
                 guard var v = make(title: r.title, category: r.category, dueDate: "", dueTime: "", priority: "", assignee: r.assignee,
                                    notes: r.notes, segments: segments, utterance: utterance, ctx: ctx,
-                                   matched: matched, contextNotes: turn?.context.notes) else {
+                                   matched: matched, contextNotes: turn?.context.notes, scheduled: true) else {
                     return .clarify(clarifyAbout(r.title))
                 }
                 let freq = r.frequency.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
                 guard TaskValidator.frequencies.contains(freq) else {
                     return .clarify("How often should I repeat \(v.title.lowercased())?")
                 }
-                let seg = segment(for: v.title, segments: segments, whole: utterance)
+                let seg = matched?.text ?? segment(for: v.title, segments: segments, whole: utterance)
                 let scheduleText = (r.schedule + " " + seg).lowercased()
                 var spec = TaskPlanner.ruleRecurrence(in: r.schedule)?.spec
                     ?? TaskPlanner.ruleRecurrence(in: seg)?.spec
@@ -1239,16 +1335,24 @@ enum BulkValidator {
                 case "daily": if spec == nil { spec = RecurrenceSpec() }
                 case "weekly":
                     if days.isEmpty { return .clarify("Which day should I \(v.title.lowercased()) each week?") }
-                    if spec == nil { spec = RecurrenceSpec(weekdays: days) }
+                    // "weekly" on its own reads as today's weekday: the day the user named wins.
+                    // The model's own schedule ("every Saturday") is the most specific; the whole sentence may say "every day" elsewhere.
+                    let own = TaskPlanner.weekdaysMentioned(r.schedule).isEmpty ? nil : TaskPlanner.ruleRecurrence(in: r.schedule)?.spec
+                    spec = own ?? TaskPlanner.ruleRecurrence(in: scheduleText)?.spec ?? spec ?? RecurrenceSpec(weekdays: days)
                 case "monthly":
-                    if scheduleText.range(of: "\\d{1,2}(st|nd|rd|th)", options: .regularExpression) == nil, spec == nil {
+                    // "monthly" on its own reads as today's date, which nobody said.
+                    if scheduleText.range(of: "\\d{1,2}(st|nd|rd|th)", options: .regularExpression) == nil {
                         return .clarify("Which day of the month should I \(v.title.lowercased())?")
                     }
+                    spec = TaskPlanner.ruleRecurrence(in: scheduleText)?.spec ?? spec
                 default: break
                 }
                 guard let schedule = spec else { return .clarify("How often should I repeat \(v.title.lowercased())?") }
                 v.recurrence = schedule
-                items.append(DraftItem(v, kind: .routine))
+                v.due = nil                                     // a routine repeats: "every Sunday" is not a due day
+                var item = DraftItem(v, kind: .routine)
+                item.slot = slot(in: scheduleText)
+                items.append(item)
             }
 
             // The detector found pieces the model left out: keep them as the user said them.
@@ -1263,6 +1367,18 @@ enum BulkValidator {
                         local.due = a.due ?? local.due
                         local.assignee = a.assignee ?? local.assignee
                         if local.notes == nil { local.notes = turn.context.notes }
+                    } else if local.assignee == nil, let who = Assignee.detect(in: utterance), who != Assignee.me {
+                        local.assignee = who                                                       // "the maid should sweep ... and mop ..."
+                    }
+                    if local.kind == .task, !headSchedule.isEmpty, let spec = TaskPlanner.ruleRecurrence(in: headSchedule)?.spec {
+                        local.kind = .routine                                                      // the list's own schedule
+                        local.recurrence = spec
+                    }
+                    if local.kind == .routine {
+                        let words = BulkDetector.hasSchedule(s) ? s : headSchedule
+                        if let q = scheduleQuestion(local.title, in: words) { return .clarify(q) } // "weekly" alone is not a day
+                        local.due = nil
+                        local.slot = slot(in: words)
                     }
                     items.append(local)
                 }

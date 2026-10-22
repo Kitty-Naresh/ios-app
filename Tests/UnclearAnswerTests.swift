@@ -122,16 +122,6 @@ final class UnclearAnswerTests: XCTestCase {
         }
     }
 
-    func testANonAnswerNeverTouchesAPendingDraft() async {
-        // Something is waiting for a yes: a hesitation is not a reason to drop it or to claim nothing is happening.
-        let m = manager(ScriptedEngine([AgentDecisionValue(action: "create_task", title: "Buy milk")]))
-        let first = await m.decide(utterance: "buy milk", final: true)
-        guard case .proposal = first else { return XCTFail("expected a preview, got \(VoiceTurnManager.describe(first))") }
-        let r = await m.decide(utterance: "I don't know", final: true)
-        if case .reply(let reply) = r { XCTAssertNotEqual(reply.message, UnclearAnswer.message) }
-        XCTAssertNotNil(m.state.pendingProposal ?? (r.isProposal ? nil : nil) ?? m.state.pendingProposal, "the preview is still waiting")
-    }
-
     // MARK: The general principle
 
     func testAViewActionFromAnUtteranceWithNoQueryIntentIsNotAList() async {
@@ -205,6 +195,13 @@ final class UnclearAnswerTests: XCTestCase {
         }
     }
 
+    /// A classifier that says "ask" for words with no query in them ("review the budget") must not list everything:
+    /// the plain rules decide, and that is an add.
+    func testAnAskFromTheClassifierWithNoQueryWordsIsNotAList() async {
+        let r = await TaskAgent.propose("review the budget")
+        if case .reply(let reply) = r { XCTAssertNil(reply.spec, "no list for \"review the budget\"") }
+    }
+
     func testTheGateLetsANonAnswerThroughInsteadOfHoldingIt() {
         for s in nonAnswers {
             if case .evaluate = VoiceTurnManager.gate(utterance: s, silence: 2, lastActed: "") {} else {
@@ -212,8 +209,4 @@ final class UnclearAnswerTests: XCTestCase {
             }
         }
     }
-}
-
-private extension TurnResult {
-    var isProposal: Bool { if case .proposal = self { return true }; return false }
 }

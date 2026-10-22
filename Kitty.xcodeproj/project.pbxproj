@@ -17,6 +17,7 @@
 		A10000000000000000000310 /* KittyVoiceTurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030F /* KittyVoiceTurnTests.swift */; };
 		A10000000000000000000312 /* KittyEvals.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000311 /* KittyEvals.swift */; };
 		A10000000000000000000403 /* SpeechLexicon.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000402 /* SpeechLexicon.swift */; };
+		FA9E00000000000000000012 /* VaguePlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA9E00000000000000000011 /* VaguePlaceholder.swift */; };
 		A10000000000000000000405 /* SpeechCleaner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000404 /* SpeechCleaner.swift */; };
 		A10000000000000000000407 /* SpeechCleanerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000406 /* SpeechCleanerTests.swift */; };
 		A10000000000000000000409 /* VocabularyProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000408 /* VocabularyProvider.swift */; };
@@ -55,6 +56,7 @@
 		A10000000000000000000028 /* Kitty.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kitty.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000029 /* KittyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KittyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000402 /* SpeechLexicon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechLexicon.swift; sourceTree = "<group>"; };
+		FA9E00000000000000000011 /* VaguePlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaguePlaceholder.swift; sourceTree = "<group>"; };
 		A10000000000000000000404 /* SpeechCleaner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCleaner.swift; sourceTree = "<group>"; };
 		A10000000000000000000406 /* SpeechCleanerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCleanerTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000408 /* VocabularyProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyProvider.swift; sourceTree = "<group>"; };
@@ -99,6 +101,7 @@
 				A1000000000000000000030B /* Intents.swift */,
 				A1000000000000000000030D /* SpeechRecognizer.swift */,
 				A10000000000000000000402 /* SpeechLexicon.swift */,
+				FA9E00000000000000000011 /* VaguePlaceholder.swift */,
 				A10000000000000000000404 /* SpeechCleaner.swift */,
 				A10000000000000000000408 /* VocabularyProvider.swift */,
 				A1000000000000000000040A /* VocabularyMatcher.swift */,
@@ -238,6 +241,7 @@
 				A10000000000000000000409 /* VocabularyProvider.swift in Sources */,
 				A10000000000000000000405 /* SpeechCleaner.swift in Sources */,
 				A10000000000000000000403 /* SpeechLexicon.swift in Sources */,
+				FA9E00000000000000000012 /* VaguePlaceholder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

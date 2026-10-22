@@ -19,7 +19,7 @@ enum UnclearAnswer {
         "no idea", "i have no idea", "i got no idea", "i have no clue", "no clue", "not sure", "i am not sure", "im not sure", "i am not certain",
         "im not certain", "not certain", "i am unsure", "im unsure", "unsure", "i cant think", "i cant think of anything",
         "i cant remember", "i cant decide", "i forgot", "i forget", "nothing", "nothing really", "nothing much", "nothing at all",
-        "never thought", "hmm", "hm", "mm", "uh", "um", "who knows", "not a clue", "dont have one",
+        "hmm", "hm", "mm", "uh", "um", "who knows", "not a clue", "dont have one",
         "i dont have one", "i dont have anything", "i have nothing", "i have nothing to say", "nothing to say"
     ]
 
@@ -27,6 +27,7 @@ enum UnclearAnswer {
     /// and neither is a sentence that goes on to say something real ("I don't know, maybe call the plumber").
     static func matches(_ raw: String) -> Bool {
         var words = VoiceTurnManager.norm(raw.replacingOccurrences(of: "’", with: "'")).split(separator: " ").map(String.init)
+        words.removeAll { ["really", "honestly", "actually", "truly", "genuinely", "just"].contains($0) }     // "I really don't know"
         while let f = words.first, leading.contains(f), words.count > 1 { words.removeFirst() }
         if phrases.contains(words.joined(separator: " ")) { return true }
         while let l = words.last, trailing.contains(l), words.count > 1 {
@@ -47,10 +48,26 @@ enum UnclearAnswer {
             "view", "display", "check", "remind", "reminders", "task", "tasks", "chore", "chores", "todo", "todos", "routine", "routines",
             "playbook", "playbooks", "agenda", "schedule", "overdue", "pending", "open", "completed", "finished", "done", "left",
             "remaining", "outstanding", "backlog", "today", "tomorrow", "everything", "order", "cart", "basket", "mine", "anyone",
-            "someone", "did"
+            "someone", "did", "do", "does", "have", "has", "is", "are"
         ]
         if !words.isDisjoint(with: cues) { return true }
         return text.contains("to do") || text.contains("to-do")
+    }
+
+    /// The actions the validator knows. Anything else (an empty or invented action) is not guessed at.
+    private static let knownActions: Set<String> = [
+        "clarify", "unrelated", "view_tasks", "complete_task", "delete_task", "update_task",
+        "create_task", "create_routine", "create_playbook", "playbook", "teach_playbook"
+    ]
+
+    /// True when the model's answer has no clear action Kitty should carry out: a view from words that ask for nothing, or an
+    /// empty/unknown action on speech that names nothing to do. Never a reason to list or read back everything.
+    static func shouldDecline(_ validated: Validated, decision d: AgentDecisionValue, utterance: String) -> Bool {
+        if case .view = validated, isUnclear(utterance) { return true }
+        let action = d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !d.wait, !knownActions.contains(action) else { return false }
+        let said = LocalSemanticPrechecker.tokens(utterance)
+        return matches(utterance) || !said.contains { ActionLexicon.verbs.contains($0) }
     }
 
     /// A request that is not a request: no hesitation recogniser hit, but nothing to act on either.

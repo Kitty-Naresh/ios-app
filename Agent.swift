@@ -52,6 +52,14 @@ struct TaskCommand {
 // MARK: - Planner: understands what the user said
 
 enum TaskPlanner {
+    /// Whether the on-device model may be called at all. Unit tests and evals use scripted engines and the plain rules, so
+    /// they must not change with whether Apple Intelligence happens to be ready on the machine running them: under XCTest
+    /// the model is off unless KITTY_REAL_MODEL=1 (the opt-in real-model run).
+    nonisolated static let onDeviceModelAllowed: Bool = {
+        let env = ProcessInfo.processInfo.environment
+        return env["XCTestConfigurationFilePath"] == nil || env["KITTY_REAL_MODEL"] == "1"
+    }()
+
     private static let categoryNames = ["househelp", "work", "personal", "family", "errands", "health", "finance", "other"]
 
     nonisolated static func todayString() -> String {
@@ -783,6 +791,7 @@ struct TaskCommandDraft {
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 extension TaskPlanner {
     private static var isModelAvailable: Bool {
+        guard onDeviceModelAllowed else { return false }
         if case .available = SystemLanguageModel.default.availability { return true }
         Breadcrumb.log("AI unavailable: \(fallbackReason())")
         return false
@@ -861,8 +870,9 @@ extension TaskPlanner {
         do {
             let r = try await session.respond(to: prompt, generating: TaskPlan.self)
             return r.content.tasks.compactMap { draft in
-                let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !title.isEmpty else { return nil }
+                let said = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !said.isEmpty else { return nil }
+                let title = said.prefix(1).uppercased() + said.dropFirst()           // sentence case, whatever the model returned
                 var rec: RecurrenceSpec? = nil
                 let today = Calendar.current.component(.weekday, from: .now)
                 switch draft.repeats {
@@ -1603,6 +1613,14 @@ extension TaskAgent {
         let routed = await TaskPlanner.route(text)
         switch routed {
         case .ask:
+            // Only show tasks when asked to see or hear them. A classifier's "ask" for a hesitation is not a request.
+            if UnclearAnswer.matches(text) { return .reply(UnclearAnswer.reply) }
+            if !UnclearAnswer.hasQueryIntent(text) {
+                // The model's "ask" has no query words behind it ("review the budget"): the plain rules decide instead.
+                let rule = TaskPlanner.ruleRoute(text)
+                if rule == .add { return await proposeAdd(text) }
+                return .reply(UnclearAnswer.reply)
+            }
             return .reply(await askReply(text))
 
         case .chat:
@@ -1845,6 +1863,7 @@ extension TaskAgent {
     static func proposeAdd(_ text: String, sink: SaveSink? = nil) async -> TurnResult {
         let store = TaskStore.shared
         if let question = missingInfoQuestion(text) { return .question(question) }
+        if let question = VaguePlaceholder.question(forRequest: text) { return .question(question) }     // never a task titled "Project"
 
         let result = await TaskPlanner.plan(text)
         guard !result.tasks.isEmpty else { return .question("I didn't catch a task in that. What should I add?") }
@@ -2658,7 +2677,7 @@ final class DecisionEngine: DecisionProviding {
     }
 
     private func respond<T>(_ prompt: String, _ run: (LanguageModelSession) async throws -> T) async -> T? {
-        guard case .available = SystemLanguageModel.default.availability else {
+        guard TaskPlanner.onDeviceModelAllowed, case .available = SystemLanguageModel.default.availability else {
             Breadcrumb.log("decision: model unavailable: \(TaskPlanner.fallbackReason())")
             return nil
         }
@@ -2738,7 +2757,7 @@ enum ActionLexicon {
         "write", "draft", "review", "research", "build", "develop", "launch", "outline", "analyze", "analyse", "finalize", "finalise",
         "brainstorm", "evaluate", "assess", "define", "publish", "approve", "negotiate", "design",
         "validate", "verify", "implement", "deploy", "release", "ship", "improve", "optimize", "optimise", "investigate", "discuss",
-        "align", "share"
+        "align", "share", "sign"
     ]
 }
 
@@ -2947,6 +2966,7 @@ enum TaskValidator {
     static func isActionable(_ title: String) -> Bool {
         let words = LocalSemanticPrechecker.tokens(title)
         guard words.count >= 2 else { return false }
+        if VaguePlaceholder.isVague(words) { return false }                 // "Project task", "The thing": a placeholder, not a task
         if ActionLexicon.verbs.contains(words[0]) { return true }
         if words.count >= 3, ["please", "also", "then"].contains(words[0]), ActionLexicon.verbs.contains(words[1]) { return true }
         return !LocalSemanticPrechecker.determiners.contains(words[0])     // an unfamiliar verb is allowed, a bare noun phrase is not
@@ -3052,6 +3072,7 @@ enum TaskValidator {
 
     private static func clarifyAbout(_ title: String) -> String {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty, VaguePlaceholder.isVague(title: t) { return VaguePlaceholder.question(forTitle: t) }
         return t.isEmpty ? "What would you like me to add?" : "What would you like me to do with \(t.lowercased())?"
     }
 
@@ -3476,6 +3497,9 @@ final class VoiceTurnManager {
     let state = ConversationStateManager()
     private(set) var modelCalls = 0
     private(set) var lastTrace = TurnTrace()
+    /// The list being read this turn, and (after a question about one of its pieces) which piece the answer belongs to.
+    private var bulkContext: BulkDetector.Analysis?
+    private var bulkAsk: (segments: [String], kind: BulkDetector.Kind, target: Int)?
     private let engine: DecisionProviding
     let sink: SaveSink
     private let knownCategories: () -> [String]
@@ -3730,6 +3754,12 @@ final class VoiceTurnManager {
             return .reply(AgentReply(message: "All set.", didAdd: false))
         }
 
+        // 1b. "I don't know", "no idea", "nothing": not an answer and not a request. Say so, do nothing, start fresh.
+        if state.pendingProposal == nil, !state.drafts.hasContent, state.pendingList == nil, UnclearAnswer.matches(delta) {
+            lastTrace.route = "unclear-answer"
+            return .reply(UnclearAnswer.reply)
+        }
+
         // 2. A pending draft is being corrected item by item.
         if state.drafts.hasContent, let edit = DraftEditParser.parse(delta, hasPlaybook: state.drafts.playbook != nil) {
             lastTrace.route = "edit"
@@ -3751,7 +3781,18 @@ final class VoiceTurnManager {
             lastTrace.route = "bare-action"
             return .question(asked)
         }
-        let analysis = BulkDetector.analyze(answering ? delta : utterance, words: answering ? [] : heardWords, now: now)
+        var analysis = BulkDetector.analyze(answering ? delta : utterance, words: answering ? [] : heardWords, now: now)
+        // The answer to "Which day should I mop the floors each week?" belongs to that piece of the list, not to a new one.
+        if answering, var ask = bulkAsk, ask.segments.indices.contains(ask.target), !delta.isEmpty {
+            // "the 5th" alone would leave a stray "the" on the title; "on the 5th" reads as the date it is.
+            let said = delta.range(of: #"^the\s+\d"#, options: [.regularExpression, .caseInsensitive]) != nil ? "on " + delta : delta
+            ask.segments[ask.target] += " " + said
+            bulkAsk = ask
+            analysis = BulkDetector.Analysis(kind: ask.kind, segments: ask.segments)
+        } else if !answering {
+            bulkAsk = nil
+        }
+        bulkContext = analysis
 
         var lines: [String] = []
         let sentenceCount = utterance.filter { ".?!".contains($0) }.count
@@ -3788,6 +3829,11 @@ final class VoiceTurnManager {
             let validated = BulkValidator.validate(bulk, utterance: utterance, segments: analysis.segments, context: ctx)
             lastTrace.validation = "\(validated)"
             Breadcrumb.log("decision: bulk \(bulk.action)")
+            if case .wait = validated, ruleFallbackEnabled, analysis.kind != .playbook {
+                // The gate released a list of finished items and the model said "wait": that is not an answer. The pieces
+                // the detector found become the draft (the same as when no model answers).
+                return await bulkFromSegments(analysis, utterance: utterance, ctx: ctx)
+            }
             return await bulkResult(validated, spoken: bulk.spokenResponse, utterance: utterance, ctx: ctx)
         }
         if var decision = await engine.decide(prompt: prompt) {
@@ -3818,6 +3864,15 @@ final class VoiceTurnManager {
                     return await TaskAgent.propose(utterance)
                 }
             }
+            // "Add a task for the project" names no task. If the model made one up ("Project task"), or waited after the user
+            // stopped, Swift asks. A question the model asked itself is kept: it already is the question.
+            if !answering, let q = VaguePlaceholder.question(forRequest: utterance) {
+                switch validated {
+                case .tasks, .routine: validated = .clarify(q); lastTrace.route = "vague-placeholder"
+                case .wait where final: validated = .clarify(q); lastTrace.route = "vague-placeholder"
+                default: break
+                }
+            }
             if case .wait = validated {} else if let q = readBackQuestion(single: decision, utterance: utterance) {
                 lastTrace.route = "read-back"
                 return q
@@ -3833,11 +3888,19 @@ final class VoiceTurnManager {
 
         // No Apple Intelligence (or the call failed): the rule-based path, still behind the local gate.
         lastTrace.route = "no-model"
+        if !answering, let q = VaguePlaceholder.question(forRequest: utterance),
+           case .ask(let asked) = state.clarify.register(question: q, field: .action) {
+            lastTrace.route = "vague-placeholder"      // the rules would take "the project" as the title: ask instead
+            return .question(asked)
+        }
         guard ruleFallbackEnabled else {
             return .reply(AgentReply(message: "I couldn't reach the on-device model.", didAdd: false))
         }
         if let turn = longTurn { return await longTurnRules(turn, analysis: analysis, utterance: utterance, ctx: ctx) }
-        return await TaskAgent.propose(utterance)
+        // Several routines or tasks: the single-task planner would read "every morning ... every night" as one item.
+        if analysis.isBulk, analysis.kind != .playbook { return await bulkFromSegments(analysis, utterance: utterance, ctx: ctx) }
+        // An answer to Kitty's question ("review the budget" after "What would you like the task to be?") is the task itself.
+        return await TaskAgent.propose(answering && !delta.isEmpty ? delta : utterance)
     }
 
     /// The model gave nothing usable for a turn that holds real actions: the local rules answer, one action at a time.
@@ -3947,6 +4010,7 @@ final class VoiceTurnManager {
         lastTrace.validation = "\(validated)"
         if case .items(let items) = validated { return startDraft(items, ctx: ctx, question: contextDueQuestion(items, turn: turn),
                              used: turn.context.usedLine, skipped: turn.skipped) }
+        if case .clarify(let q) = validated { return clarification(q, action: "bulk", utterance: utterance, ctx: ctx) }   // "Which day should I mop each week?"
         return .reply(AgentReply(message: "I couldn't work out the tasks. What would you like me to add?", didAdd: false))
     }
 
@@ -4035,6 +4099,11 @@ final class VoiceTurnManager {
     private func singleResult(_ validated: Validated, decision d: AgentDecisionValue, utterance: String,
                               ctx: ValidationContext) async -> TurnResult {
         let spoken = d.spokenResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+        // No clear action: a list is shown only when the user asked to see something, and an action Kitty does not know is not guessed at.
+        if UnclearAnswer.shouldDecline(validated, decision: d, utterance: utterance) {
+            lastTrace.route = "unclear-no-action"
+            return .reply(UnclearAnswer.reply)
+        }
         switch validated {
         case .clarify(let q):
             // A question about something optional is never needed: save what is clear instead.
@@ -4180,8 +4249,15 @@ final class VoiceTurnManager {
         let field = ClarificationStateManager.field(for: q, action: action)
         switch state.clarify.register(question: q, field: field) {
         case .ask(let asked):
+            // A question about one piece of a list ("Which day should I mop the floors each week?"): remember which piece.
+            if action == "bulk", let a = bulkContext, a.isBulk, a.kind != .playbook,
+               let i = a.segments.indices.max(by: { Words.nounOverlap(a.segments[$0], q) < Words.nounOverlap(a.segments[$1], q) }),
+               Words.nounOverlap(a.segments[i], q) > 0 {
+                bulkAsk = (a.segments, a.kind, i)
+            }
             return .question(asked)
         case .exhausted:
+            bulkAsk = nil
             return bestInterpretation(of: utterance, ctx: ctx)
         }
     }
