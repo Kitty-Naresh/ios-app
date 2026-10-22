@@ -344,8 +344,8 @@ enum BulkDetector {
             let turn = LongTurnAnalyzer.analyze(raw, words: words, now: now)
             let leads = turn.actions.compactMap { LocalSemanticPrechecker.tokens($0.text).first }
             let asksQuestion = turn.clauses.contains { c in
-                LocalSemanticPrechecker.tokens(c.text).first.map { LocalSemanticPrechecker.questionStarters.contains($0) } ?? false
-            }
+                c.kind != .action && LocalSemanticPrechecker.tokens(c.text).first.map { LocalSemanticPrechecker.questionStarters.contains($0) } ?? false
+            }                                                                    // (an action clause such as "tell the maid to…" is not one)
             if !turn.actions.isEmpty, !asksQuestion, !leads.contains(where: { managingVerbs.contains($0) }) {
                 let scheduled = turn.actions.contains { $0.scheduled }
                 if turn.actions.count >= 2 {
@@ -1255,7 +1255,9 @@ enum BulkValidator {
             // A piece that only sets the scene ("I want to create a list of tasks") is never added as a task. A piece counts as
             // covered when its words are in a title or in the notes, so a task the model split into title and notes is not lost.
             let made = items.map { (title: $0.title, notes: $0.notes) }
-            for s in segments where !ListOutline.isContext(s) && !ListOutline.covered(s, by: made) {
+            // A long turn: an action is covered when a task the model made was matched to it, whatever words were added around it.
+            let matchedActions: Set<String> = turn.map { t in Set(items.compactMap { matchingAction(for: $0.title, in: t)?.text }) } ?? []
+            for s in segments where !ListOutline.isContext(s) && !matchedActions.contains(s) && !ListOutline.covered(s, by: made) {
                 if var local = BulkDraftManager.makeItem(from: s, context: ctx) {
                     if let turn, let a = turn.actions.first(where: { $0.text == s }) {           // its own day and person, and the occasion
                         local.due = a.due ?? local.due

@@ -419,10 +419,13 @@ final class VoiceConversation: ObservableObject {
 
         // "yes" after a preview saves it, "cancel" throws it away. A bare "no" is not a discard: Kitty asks what to change.
         if proposal != nil {
-            switch ConfirmationManager.interpret(newPart(of: text, after: processedText)) {
-            case .yes: confirm(); return
+            // A repeated word is collapsed by the cleaner ("yes … yes"): then the new words are looked for in what was heard.
+            var fresh = newPart(of: text, after: processedText)
+            if fresh.isEmpty { fresh = newPart(of: turnText, after: lastActedRaw) }
+            switch ConfirmationManager.interpret(fresh) {
+            case .yes where turns.state.pendingContextDue == nil: confirm(); return     // with a due-date question open, "yes" answers it
             case .cancel: discard(); return
-            case .no, .other: break
+            case .yes, .no, .other: break
             }
         }
 

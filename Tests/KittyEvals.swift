@@ -19,28 +19,42 @@ enum Script {
     case none
     case single(AgentDecisionValue)
     case bulk(BulkDecisionValue)
+    /// One answer per model call, in order (a long turn is read a few tasks at a time). After the last one: no answer.
+    indirect case sequence([Script])
 }
 
 @MainActor
 final class EvalEngine: DecisionProviding {
-    var script: Script = .none
+    var script: Script = .none {
+        didSet {
+            queue = []
+            if case .sequence(let all) = script { queue = all }
+        }
+    }
+    private var queue: [Script] = []
     private(set) var calls = 0
+
+    /// What this call gets: the script itself, or the next answer of a sequence.
+    private func next() -> Script {
+        if case .sequence = script { return queue.isEmpty ? .none : queue.removeFirst() }
+        return script
+    }
 
     func decide(prompt: String) async -> AgentDecisionValue? {
         calls += 1
-        if case .single(let d) = script { return d }
+        if case .single(let d) = next() { return d }
         return nil
     }
 
     func decideBulk(prompt: String) async -> BulkDecisionValue? {
-        if case .bulk(let b) = script { calls += 1; return b }
+        if case .bulk(let b) = next() { calls += 1; return b }
         return nil
     }
 }
 
 // MARK: - Fixtures
 
-enum Tag: String { case wait, clarify, bulk, metadata, task, routine, playbook, regression, quality, messy }
+enum Tag: String { case wait, clarify, bulk, metadata, task, routine, playbook, regression, quality, messy, long }
 
 struct TaskExpect {
     var title: String
@@ -51,6 +65,7 @@ struct TaskExpect {
     var priority: String? = nil           // nil: there must be no priority
     var assignee: String? = nil           // nil: there must be no assignee
     var schedule: String? = nil           // routines: the schedule text
+    var notes: String? = nil              // nil: not checked ("For in-laws" from the occasion of a long turn)
 }
 
 struct PlaybookExpect {
@@ -127,6 +142,8 @@ struct EvalCase {
     var turns: [EvalTurn]
     var saved: SavedExpect = .nothing
     var finalDraft: [String]? = nil              // what is still pending when the conversation ends
+    var chatter: [String] = []                   // lower-case fragments that must never end up in a task title
+    var ruleFallback = false                     // on: the local rules answer when the model gives nothing usable
 }
 
 // MARK: - Script helpers
@@ -166,7 +183,7 @@ private func yes(_ say: String = "Yes", _ expect: TurnExpect = .saved(model: fal
 enum EvalSuite {
     static let biryani = ["Chop onions", "Marinate the chicken", "Cook the rice", "Layer and steam"]
 
-    static let all: [EvalCase] = a + b + c + d + e + f + g + i + j
+    static let all: [EvalCase] = a + b + c + d + e + f + g + i + j + k
 
     // MARK: A. Turn completeness
 
@@ -611,6 +628,230 @@ enum EvalSuite {
                  ]),
     ]
 
+    // MARK: K. Long and noisy: stories, asides, several asks and one shared day
+
+    // Today is Wednesday 21 October 2026: tomorrow +1, Friday +2, Saturday +3, Sunday +4, Monday +5.
+    private static let longSilence: TimeInterval = 3.5
+
+    /// A long turn that ends in a preview of `titles`. `then` carries on from there (answering the due-day question, then saving).
+    private static func long(_ id: Int, _ name: String, _ say: String, model: Script, preview titles: [String], says: [String] = [],
+                             then: [EvalTurn] = [], saved: SavedExpect, chatter: [String] = [], fallback: Bool = false,
+                             tags: Set<Tag> = [.long, .bulk, .task]) -> EvalCase {
+        var turns = [EvalTurn(say: say, script: model, silence: longSilence, expect: .draft(titles, says: says))]
+        turns += then
+        return EvalCase(id: id, category: "K", name: name, tags: tags, turns: turns, saved: saved, chatter: chatter, ruleFallback: fallback)
+    }
+
+    /// "Yes" or "No" to the question about tagging the undated tasks, then "Yes" to save.
+    private static func answer(_ word: String, draft titles: [String], says: [String]) -> [EvalTurn] {
+        [EvalTurn(say: word, script: .none, silence: longSilence, expect: .draft(titles, says: says)),
+         EvalTurn(say: "Yes", script: .none, silence: longSilence, expect: .saved(model: false))]
+    }
+
+    private static func save() -> [EvalTurn] {
+        [EvalTurn(say: "Yes", script: .none, silence: longSilence, expect: .saved(model: false))]
+    }
+
+    private static let inLawsSaid = "Okay so we have my in-laws coming this Saturday and honestly the house is a mess, so I was thinking the maid should clean the bathrooms and mop the living room on Friday, oh and I need to buy flowers and snacks, also remind me to call the caterer."
+    private static let inLawsTitles = ["Clean the bathrooms", "Mop the living room", "Buy flowers and snacks", "Call the caterer"]
+    private static let inLawsAsk = ["saturday, for in-laws", "tag the ones without a date as due saturday"]
+
+    /// The four in-laws tasks as saved: the two cleaning tasks keep Friday and the maid, the occasion is in the notes.
+    private static func inLawsSaved(undated: Int?) -> SavedExpect {
+        SavedExpect(tasks: [
+            TaskExpect(title: "Clean the bathrooms", dueDays: 2, assignee: "Househelp", notes: "For in-laws"),
+            TaskExpect(title: "Mop the living room", dueDays: 2, assignee: "Househelp", notes: "For in-laws"),
+            TaskExpect(title: "Buy flowers and snacks", dueDays: undated, notes: "For in-laws"),
+            TaskExpect(title: "Call the caterer", dueDays: undated, notes: "For in-laws")])
+    }
+
+    private static let noDue = answer("No", draft: inLawsTitles, says: ["no due date for those", "should i save these"])
+    private static let yesDue = answer("Yes", draft: inLawsTitles, says: ["tagged 2 tasks as due saturday", "should i save these"])
+
+    private static func bt(_ titles: [String], assignee: String = "", due: String = "") -> BulkDecisionValue {
+        BulkDecisionValue(action: "create_tasks", tasks: titles.map { TaskDraftValue(title: $0, dueDate: due, assignee: assignee) })
+    }
+
+    static let k: [EvalCase] = [
+        // The in-laws example, answered both ways, and with the model getting it wrong in several ways
+        long(108, "In-laws: Friday and the maid stay with their tasks, the day is asked, “no” leaves the rest dateless", inLawsSaid,
+             model: BT(inLawsTitles), preview: inLawsTitles, says: inLawsAsk, then: noDue,
+             saved: inLawsSaved(undated: nil), chatter: ["mess"]),
+        long(109, "In-laws: “yes” tags only the two tasks that had no day", inLawsSaid,
+             model: BT(inLawsTitles), preview: inLawsTitles, says: inLawsAsk, then: yesDue,
+             saved: inLawsSaved(undated: 3), chatter: ["mess"]),
+        long(110, "In-laws, the model only says wait: the tasks come from the clauses", inLawsSaid,
+             model: .bulk(BulkDecisionValue(action: "wait")), preview: inLawsTitles, says: inLawsAsk, then: noDue,
+             saved: inLawsSaved(undated: nil), chatter: ["mess"]),
+        long(111, "In-laws, the model drops the caterer: it is added back from what was said", inLawsSaid,
+             model: BT(Array(inLawsTitles.prefix(3))), preview: inLawsTitles, says: inLawsAsk, then: noDue,
+             saved: inLawsSaved(undated: nil), chatter: ["mess"]),
+        long(112, "In-laws, the model invents a task and turns the chatter into one: both are dropped", inLawsSaid,
+             model: BT(inLawsTitles + ["Walk the dog", "Tidy the house mess"]), preview: inLawsTitles, says: inLawsAsk, then: noDue,
+             saved: inLawsSaved(undated: nil), chatter: ["mess", "dog"]),
+        long(113, "In-laws, the model spreads Saturday and the maid to every task: each keeps only its own", inLawsSaid,
+             model: .bulk(bt(inLawsTitles, assignee: "Househelp", due: "2026-10-24")), preview: inLawsTitles, says: inLawsAsk, then: noDue,
+             saved: inLawsSaved(undated: nil), chatter: ["mess"]),
+        long(114, "In-laws, the model repeats a task: one draft", inLawsSaid,
+             model: BT(["Clean the bathrooms", "Clean the bathrooms"] + inLawsTitles.dropFirst()), preview: inLawsTitles, says: inLawsAsk, then: noDue,
+             saved: inLawsSaved(undated: nil), chatter: ["mess"]),
+
+        // One ask inside a story
+        EvalCase(id: 115, category: "K", name: "The plumber story: one task out of a ramble", tags: [.long, .task],
+                 turns: [EvalTurn(say: "So last week the plumber came and he said the tap was leaking and honestly I don't know if he fixed it, anyway call the plumber about the leaking tap tomorrow morning.",
+                                  script: S("create_task", "Call the plumber about the leaking tap", due: "2026-10-22"), silence: longSilence,
+                                  expect: .saved(model: true))],
+                 saved: SavedExpect(tasks: [TaskExpect(title: "Call the plumber about the leaking tap", dueDays: 1)]), chatter: ["last week", "fixed"]),
+        EvalCase(id: 116, category: "K", name: "A story and one ask, the model says wait: the local rules answer", tags: [.long, .task],
+                 turns: [EvalTurn(say: "So last week the electrician came and he said the wiring was old and honestly I don't know if he fixed it, anyway renew the passport.",
+                                  script: S("wait", wait: true), silence: longSilence, expect: .saved(model: true))],
+                 saved: SavedExpect(tasks: [TaskExpect(title: "Renew the passport")]), chatter: ["last week", "fixed"],
+                 ruleFallback: true),
+        EvalCase(id: 117, category: "K", name: "A bad day, then one ask: “buy milk”", tags: [.long, .task],
+                 turns: [EvalTurn(say: "Honestly the kids are driving me up the wall today but anyway buy milk.", script: S("create_task", "Buy milk"),
+                                  silence: longSilence, expect: .saved(model: true))],
+                 saved: SavedExpect(tasks: [TaskExpect(title: "Buy milk")]), chatter: ["kids", "wall"]),
+
+        // A shopping order and a routine after chatter
+        EvalCase(id: 118, category: "K", name: "Blinkit order and a daily routine after chatter", tags: [.long, .bulk, .routine, .task],
+                 turns: [EvalTurn(say: "Um so it's been a crazy week you know but add milk eggs and bread to my Blinkit order and water the plants every morning.",
+                                  script: .bulk(BulkDecisionValue(action: "create_tasks",
+                                                                  tasks: [TaskDraftValue(title: "Add milk, eggs and bread to Blinkit order")],
+                                                                  routines: [RoutineDraftValue(title: "Water the plants", frequency: "daily", schedule: "every morning")])),
+                                  silence: longSilence,
+                                  expect: .draft(["Add milk, eggs and bread to Blinkit order", "Water the plants"])),
+                         EvalTurn(say: "Yes", script: .none, silence: longSilence, expect: .saved(model: false))],
+                 saved: SavedExpect(tasks: [TaskExpect(title: "Add milk, eggs and bread to Blinkit order")],
+                                    routines: [TaskExpect(title: "Water the plants", schedule: "every day")]), chatter: ["crazy"]),
+
+        // Chatter around a few asks, with their own days
+        long(119, "A tired day, then two asks: Friday for one, “next week” left alone for the other",
+             "Honestly I am so tired today and the kids were up all night, anyway remind me to pay the electricity bill on Friday and book the dentist for next week.",
+             model: BT(["Pay the electricity bill", "Book the dentist"]), preview: ["Pay the electricity bill", "Book the dentist"],
+             then: save(), saved: SavedExpect(tasks: [TaskExpect(title: "Pay the electricity bill", dueDays: 2), TaskExpect(title: "Book the dentist")]),
+             chatter: ["tired", "kids"]),
+        long(120, "Two asks with their own days and no shared day: nothing is asked",
+             "Okay so work has been crazy and I forgot to say, can you add a task to renew the car insurance by next Monday and also call mom on Sunday.",
+             model: BT(["Renew the car insurance", "Call mom"]), preview: ["Renew the car insurance", "Call mom"],
+             then: save(), saved: SavedExpect(tasks: [TaskExpect(title: "Renew the car insurance", dueDays: 5), TaskExpect(title: "Call mom", dueDays: 4)]),
+             chatter: ["crazy", "forgot"]),
+        long(121, "“add buy…, add pay…, add call…”: the word “add” is not part of the task and the maid is only paid, not asked",
+             "Today was a long day and I keep forgetting things so please add buy detergent, add pay the maid, and add call the electrician.",
+             model: BT(["Buy detergent", "Pay the maid", "Call the electrician"]), preview: ["Buy detergent", "Pay the maid", "Call the electrician"],
+             then: save(), saved: SavedExpect(tasks: [TaskExpect(title: "Buy detergent"), TaskExpect(title: "Pay the maid"), TaskExpect(title: "Call the electrician")]),
+             chatter: ["forgetting", "long day"]),
+        long(122, "The technician and the maid: the person belongs to the second task only",
+             "So the washing machine is making a weird noise and my husband thinks it is the drum but I am not sure, so call the technician tomorrow and ask the maid to clean the filter on Friday.",
+             model: BT(["Call the technician", "Clean the filter"]), preview: ["Call the technician", "Clean the filter"],
+             then: save(), saved: SavedExpect(tasks: [TaskExpect(title: "Call the technician", dueDays: 1), TaskExpect(title: "Clean the filter", dueDays: 2, assignee: "Househelp")]),
+             chatter: ["noise", "drum"]),
+        long(123, "The technician and the maid, the model gives both tasks to the maid: only the second keeps her",
+             "So the washing machine is making a weird noise and my husband thinks it is the drum but I am not sure, so call the technician tomorrow and ask the maid to clean the filter on Friday.",
+             model: .bulk(bt(["Call the technician", "Clean the filter"], assignee: "Househelp")), preview: ["Call the technician", "Clean the filter"],
+             then: save(), saved: SavedExpect(tasks: [TaskExpect(title: "Call the technician", dueDays: 1), TaskExpect(title: "Clean the filter", dueDays: 2, assignee: "Househelp")]),
+             chatter: ["noise", "drum"]),
+        long(124, "The cook, the driver and one for me: three people, three tasks",
+             "Okay so ask the cook to prepare dinner at seven and tell the driver to wash the car on Saturday and I need to pay the school fees.",
+             model: BT(["Prepare dinner", "Wash the car", "Pay the school fees"]), preview: ["Prepare dinner", "Wash the car", "Pay the school fees"],
+             then: save(), saved: SavedExpect(tasks: [TaskExpect(title: "Prepare dinner", assignee: "Cook"), TaskExpect(title: "Wash the car", dueDays: 3, assignee: "Driver"),
+                                                       TaskExpect(title: "Pay the school fees")]),
+             chatter: []),
+        long(125, "“remind me to” three times after “tomorrow is going to be hectic”: the day is asked, “yes” tags all three",
+             "So tomorrow is going to be hectic, remind me to submit the report, remind me to call the bank, and don't forget to pick up the laundry.",
+             model: BT(["Submit the report", "Call the bank", "Pick up the laundry"]), preview: ["Submit the report", "Call the bank", "Pick up the laundry"],
+             says: ["because of tomorrow", "due tomorrow"],
+             then: answer("Yes", draft: ["Submit the report", "Call the bank", "Pick up the laundry"], says: ["tagged 3 tasks as due tomorrow"]),
+             saved: SavedExpect(tasks: ["Submit the report", "Call the bank", "Pick up the laundry"].map { TaskExpect(title: $0, dueDays: 1) }), chatter: ["hectic"]),
+        long(126, "A sister is visiting next Tuesday: the visit goes in the notes and the day is asked",
+             "So my sister is visiting next Tuesday and I want the guest room ready, so make the bed in the guest room, dust the shelves, and buy fresh towels.",
+             model: BT(["Make the bed in the guest room", "Dust the shelves", "Buy fresh towels"]),
+             preview: ["Make the bed in the guest room", "Dust the shelves", "Buy fresh towels"], says: ["tuesday, for the visit"],
+             then: answer("No", draft: ["Make the bed in the guest room", "Dust the shelves", "Buy fresh towels"], says: ["no due date for those"]),
+             saved: SavedExpect(tasks: ["Make the bed in the guest room", "Dust the shelves", "Buy fresh towels"].map { TaskExpect(title: $0, notes: "For the visit") }),
+             chatter: ["i want"]),
+        long(127, "Parents on Sunday, the maid on Friday: her task keeps Friday, the others are asked about Sunday",
+             "My parents are coming on Sunday and the place is a disaster, so the maid should wash the curtains on Friday and I will buy fruits and arrange the guest bed.",
+             model: BT(["Wash the curtains", "Buy fruits", "Arrange the guest bed"]), preview: ["Wash the curtains", "Buy fruits", "Arrange the guest bed"],
+             says: ["sunday, for your parents"],
+             then: answer("Yes", draft: ["Wash the curtains", "Buy fruits", "Arrange the guest bed"], says: ["tagged 2 tasks as due sunday"]),
+             saved: SavedExpect(tasks: [TaskExpect(title: "Wash the curtains", dueDays: 2, assignee: "Househelp", notes: "For your parents"),
+                                        TaskExpect(title: "Buy fruits", dueDays: 4, notes: "For your parents"),
+                                        TaskExpect(title: "Arrange the guest bed", dueDays: 4, notes: "For your parents")]),
+             chatter: ["disaster"]),
+        long(128, "Guests on Friday and a party on Saturday: two days, so none is picked and nothing is asked",
+             "So the guests arrive on Friday and the party is on Saturday, so buy snacks and book the cake.",
+             model: BT(["Buy snacks", "Book the cake"]), preview: ["Buy snacks", "Book the cake"], then: save(),
+             saved: SavedExpect(tasks: [TaskExpect(title: "Buy snacks", notes: "For guests"), TaskExpect(title: "Book the cake", notes: "For guests")])),
+        long(129, "Parents on Sunday, the model gives every task a day of its own: only the said one stays",
+             "My parents are coming on Sunday and the place is a disaster, so the maid should wash the curtains on Friday and I will buy fruits and arrange the guest bed.",
+             model: .bulk(bt(["Wash the curtains", "Buy fruits", "Arrange the guest bed"], due: "2026-10-25")),
+             preview: ["Wash the curtains", "Buy fruits", "Arrange the guest bed"], says: ["sunday, for your parents"],
+             then: answer("No", draft: ["Wash the curtains", "Buy fruits", "Arrange the guest bed"], says: ["no due date for those"]),
+             saved: SavedExpect(tasks: [TaskExpect(title: "Wash the curtains", dueDays: 2, assignee: "Househelp", notes: "For your parents"),
+                                        TaskExpect(title: "Buy fruits", notes: "For your parents"),
+                                        TaskExpect(title: "Arrange the guest bed", notes: "For your parents")]),
+             chatter: ["disaster"]),
+        long(130, "The AC guy comes tomorrow: both tasks are the househelp's and “yes” makes them due tomorrow",
+             "So the AC guy is coming tomorrow and the living room is full of boxes, so the househelp should clear the boxes and wipe the shelves.",
+             model: BT(["Clear the boxes", "Wipe the shelves"]), preview: ["Clear the boxes", "Wipe the shelves"], says: ["because of tomorrow"],
+             then: answer("Yes", draft: ["Clear the boxes", "Wipe the shelves"], says: ["tagged 2 tasks as due tomorrow"]),
+             saved: SavedExpect(tasks: [TaskExpect(title: "Clear the boxes", dueDays: 1, assignee: "Househelp"), TaskExpect(title: "Wipe the shelves", dueDays: 1, assignee: "Househelp")]),
+             chatter: ["full of boxes"]),
+        long(131, "A trip on Monday: four tasks, the maid's one is hers, the day is asked",
+             "Okay so I am traveling on Monday and I need to pack my bag, charge the power bank, book the cab, and tell the maid to water the plants.",
+             model: BT(["Pack my bag", "Charge the power bank", "Book the cab", "Water the plants"]),
+             preview: ["Pack my bag", "Charge the power bank", "Book the cab", "Water the plants"], says: ["because of monday", "due monday"],
+             then: answer("Yes", draft: ["Pack my bag", "Charge the power bank", "Book the cab", "Water the plants"], says: ["tagged 4 tasks as due monday"]),
+             saved: SavedExpect(tasks: [TaskExpect(title: "Pack my bag", dueDays: 5), TaskExpect(title: "Charge the power bank", dueDays: 5),
+                                        TaskExpect(title: "Book the cab", dueDays: 5), TaskExpect(title: "Water the plants", dueDays: 5, assignee: "Househelp")]),
+             chatter: ["traveling"]),
+        long(132, "“first… then… and then… and also…” over a messy kitchen: four tasks, no “first” in a title",
+             "Okay so the kitchen is a disaster, first empty the fridge, then wipe the shelves, and then restock the vegetables, and also throw away the expired sauces.",
+             model: BT(["Empty the fridge", "Wipe the shelves", "Restock the vegetables", "Throw away the expired sauces"]),
+             preview: ["Empty the fridge", "Wipe the shelves", "Restock the vegetables", "Throw away the expired sauces"], then: save(),
+             saved: SavedExpect(tasks: ["Empty the fridge", "Wipe the shelves", "Restock the vegetables", "Throw away the expired sauces"].map { TaskExpect(title: $0) }),
+             chatter: ["disaster", "first"]),
+
+        // Many tasks: a few at a time, several model calls
+        long(133, "Six party tasks over two model calls, the day is asked and “no” leaves them dateless",
+             "Okay so the party is on Saturday and we need a lot done, clean the kitchen, wipe the windows, sweep the balcony, wash the curtains, buy balloons, and order the cake.",
+             model: .sequence([.bulk(bt(["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains"])),
+                               .bulk(bt(["Buy balloons", "Order the cake"]))]),
+             preview: ["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains", "Buy balloons", "Order the cake"],
+             says: ["saturday, for the party"],
+             then: answer("No", draft: ["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains", "Buy balloons", "Order the cake"], says: ["no due date for those"]),
+             saved: SavedExpect(tasks: ["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains", "Buy balloons", "Order the cake"]
+                .map { TaskExpect(title: $0, notes: "For the party") }), chatter: ["a lot"]),
+        long(134, "Six party tasks, the second call says wait: the last two come from what was said",
+             "Okay so the party is on Saturday and we need a lot done, clean the kitchen, wipe the windows, sweep the balcony, wash the curtains, buy balloons, and order the cake.",
+             model: .sequence([.bulk(bt(["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains"])),
+                               .bulk(BulkDecisionValue(action: "wait"))]),
+             preview: ["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains", "Buy balloons", "Order the cake"],
+             says: ["saturday, for the party"],
+             then: answer("Yes", draft: ["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains", "Buy balloons", "Order the cake"], says: ["tagged 6 tasks as due saturday"]),
+             saved: SavedExpect(tasks: ["Clean the kitchen", "Wipe the windows", "Sweep the balcony", "Wash the curtains", "Buy balloons", "Order the cake"]
+                .map { TaskExpect(title: $0, dueDays: 3, notes: "For the party") }), chatter: ["a lot"]),
+        long(135, "Nine chores over three model calls (4, 4 and 1)",
+             "Okay so it's a busy week, clean the car, buy vegetables, fill the water bottles, call the electrician, pay the milkman, book the tickets, take the dog to the vet, wash the curtains, and renew the passport.",
+             model: .sequence([.bulk(bt(["Clean the car", "Buy vegetables", "Fill the water bottles", "Call the electrician"])),
+                               .bulk(bt(["Pay the milkman", "Book the tickets", "Take the dog to the vet", "Wash the curtains"])),
+                               .bulk(bt(["Renew the passport"]))]),
+             preview: ["Clean the car", "Buy vegetables", "Fill the water bottles", "Call the electrician", "Pay the milkman", "Book the tickets",
+                       "Take the dog to the vet", "Wash the curtains", "Renew the passport"],
+             then: save(),
+             saved: SavedExpect(tasks: ["Clean the car", "Buy vegetables", "Fill the water bottles", "Call the electrician", "Pay the milkman", "Book the tickets",
+                                        "Take the dog to the vet", "Wash the curtains", "Renew the passport"].map { TaskExpect(title: $0) }),
+             chatter: ["busy week"]),
+
+        // Nothing to do in it
+        EvalCase(id: 136, category: "K", name: "Only complaints: the model waits and nothing is created", tags: [.long, .wait],
+                 turns: [EvalTurn(say: "Honestly I have been feeling so tired lately and the weather is terrible and I do not know what to do about anything today.",
+                                  script: S("wait", wait: true), silence: longSilence, expect: TurnExpect(outcome: .modelWait, model: true))]),
+        EvalCase(id: 137, category: "K", name: "A call from the mother-in-law and a wish to relax: nothing to add", tags: [.long, .wait],
+                 turns: [EvalTurn(say: "So my mother in law called and she was talking about the neighbours again and honestly I just want to relax this weekend.",
+                                  script: S("wait", wait: true), silence: longSilence, expect: TurnExpect(outcome: .modelWait, model: true))]),
+    ]
+
     /// The twelve to start with.
     static let minimal12: [Int] = [1, 2, 4, 41, 42, 17, 45, 24, 48, 31, 39, 75]
 }
@@ -682,6 +923,9 @@ struct CaseResult {
     var savedObjects = 0
     var duplicateObjects = 0
     var typeCorrect = true
+    // Category K (long and noisy): what was asked for, what came out, and how much of the shared context was carried right.
+    var kExpected = 0, kFound = 0, kSaved = 0, kMatched = 0, kChatter = 0
+    var carryPassed = 0, carryTotal = 0
     var passed: Bool { failures.isEmpty }
 }
 
@@ -704,6 +948,7 @@ final class EvalRunner {
     private var proposal: Proposal?
     private var questionOpen = false
     private var holding = false
+    private var lastActedRaw = ""          // the speech last acted on, as heard (the screen keeps the same)
     private var executions: [UUID: Int] = [:]
 
     init() {
@@ -716,6 +961,9 @@ final class EvalRunner {
 
     static func run(_ c: EvalCase) async -> CaseResult {
         let runner = EvalRunner()
+        runner.manager.ruleFallbackEnabled = c.ruleFallback
+        // The local rules read the user's list names from UserDefaults: another test's lists must not change what they make of a title.
+        if c.ruleFallback { UserDefaults.standard.removeObject(forKey: KittyGuideStore.profileNamesKey) }
         var result = CaseResult(evalCase: c)
         for (index, t) in c.turns.enumerated() {
             let record = await runner.step(t, isLast: index == c.turns.count - 1)
@@ -747,7 +995,7 @@ final class EvalRunner {
 
     private func resetTurn() {
         manager.state.clearPending()
-        turnText = ""; processed = ""; proposal = nil; questionOpen = false; holding = false
+        turnText = ""; processed = ""; lastActedRaw = ""; proposal = nil; questionOpen = false; holding = false
     }
 
     /// The same one-shot guard the screen uses.
@@ -778,7 +1026,7 @@ final class EvalRunner {
         var outcome = Outcome.silent
         var spoken: String?
 
-        let gate = VoiceTurnManager.gate(utterance: turnText, silence: t.silence, lastActed: "")
+        let gate = VoiceTurnManager.gate(utterance: turnText, silence: t.silence, lastActed: lastActedRaw)
         switch gate {
         case .keepListening, .hold(_):
             r.gate = "\(gate)"
@@ -810,14 +1058,16 @@ final class EvalRunner {
                     spoken = await confirm(); outcome = spoken == nil ? .silent : .saved; handled = true
                     r.route = "shortcut-done"
                 } else {
-                    switch ConfirmationManager.interpret(newPart(of: text, after: processed)) {
-                    case .yes:
+                    var fresh = newPart(of: text, after: processed)
+                    if fresh.isEmpty { fresh = newPart(of: turnText, after: lastActedRaw) }      // a repeated "yes" is collapsed by the cleaner
+                    switch ConfirmationManager.interpret(fresh) {
+                    case .yes where manager.state.pendingContextDue == nil:      // with a due-date question open, "yes" answers it
                         spoken = await confirm(); outcome = spoken == nil ? .silent : .saved; handled = true
                         r.route = "shortcut-yes"
                     case .cancel:
                         resetTurn(); outcome = .reply; spoken = "Okay, I didn't change anything."; handled = true
                         r.route = "shortcut-cancel"
-                    case .no, .other:
+                    case .yes, .no, .other:
                         break
                     }
                 }
@@ -825,6 +1075,7 @@ final class EvalRunner {
 
             if !handled {
                 processed = text
+                lastActedRaw = turnText
                 let result = await manager.decide(utterance: text, now: Self.now)
                 let trace = manager.lastTrace
                 r.route = trace.route
@@ -898,6 +1149,14 @@ final class EvalRunner {
 
         func match(_ expected: [TaskExpect], _ actual: [PlannedTask], kind: String) {
             check(actual.count == expected.count, "\(kind): saved \(actual.count), expected \(expected.count): \(actual.map(\.title))")
+            if c.category == "K" {
+                let want = Set(expected.map { TaskValidator.key($0.title) })
+                result.kExpected += expected.count
+                result.kFound += expected.filter { e in actual.contains { TaskValidator.key($0.title) == TaskValidator.key(e.title) } }.count
+                result.kSaved += actual.count
+                result.kMatched += actual.filter { want.contains(TaskValidator.key($0.title)) }.count
+                result.kChatter += actual.filter { a in c.chatter.contains { a.title.lowercased().contains($0) } }.count
+            }
             var seen = Set<String>()
             for p in actual where !seen.insert(TaskValidator.key(p.title)).inserted { result.duplicateObjects += 1 }
             result.savedObjects += actual.count
@@ -908,6 +1167,14 @@ final class EvalRunner {
                 }
                 var invented = false
                 check(true, "")
+                if c.category == "K" {
+                    // Did the day, the person and the occasion land on the right tasks, and only on those?
+                    func carry(_ ok: Bool) { result.carryTotal += 1; if ok { result.carryPassed += 1 } }
+                    carry(e.dueDays.map { d in a.due.map { cal.isDate($0, inSameDayAs: Self.day(d)) } ?? false } ?? (a.due == nil))
+                    carry((a.assignee ?? "").lowercased() == (e.assignee ?? "").lowercased())
+                    if let n = e.notes { carry(a.notes == n) }
+                }
+                if let n = e.notes { check(a.notes == n, "“\(e.title)” notes \(a.notes ?? "nil"), expected \(n)") }
                 if let cat = e.category {
                     check((a.categoryName ?? a.category.rawValue).lowercased().contains(cat.lowercased()) || a.category.rawValue.lowercased() == cat.lowercased(),
                           "“\(e.title)” category \(a.categoryName ?? "nil")/\(a.category.rawValue), expected \(cat)")
@@ -974,6 +1241,8 @@ struct EvalMetrics {
     var waitAccuracy = 1.0, clarifyPrecision = 1.0, clarifyRecall = 1.0, extractionAccuracy = 1.0, typeAccuracy = 1.0
     var bulkSplitAccuracy = 1.0, duplicateRate = 0.0, inventedFieldRate = 0.0, confirmationLoopRate = 0.0
     var clarificationLoopRate = 0.0, saveSuccessRate = 1.0, completionRate = 1.0, responseQuality = 1.0
+    // Long and noisy turns (category K only)
+    var taskRecall = 1.0, taskPrecision = 1.0, chatterAsTaskRate = 0.0, contextCarryAccuracy = 1.0
 
     @MainActor
     static func compute(_ results: [CaseResult]) -> EvalMetrics {
@@ -1045,6 +1314,13 @@ struct EvalMetrics {
         // 13. Response quality: the mean of the per-response score out of five.
         let grades = results.flatMap(\.quality)
         m.responseQuality = ratio(grades.map(\.score).reduce(0, +), grades.count * 5)
+
+        // K. Long and noisy: recall and precision of the tasks, chatter that became a task, and the context carried to the right tasks.
+        let k = results.filter { $0.evalCase.category == "K" }
+        m.taskRecall = ratio(k.map(\.kFound).reduce(0, +), k.map(\.kExpected).reduce(0, +))
+        m.taskPrecision = ratio(k.map(\.kMatched).reduce(0, +), k.map(\.kSaved).reduce(0, +))
+        m.chatterAsTaskRate = ratio(k.map(\.kChatter).reduce(0, +), k.map(\.kSaved).reduce(0, +), empty: 0)
+        m.contextCarryAccuracy = ratio(k.map(\.carryPassed).reduce(0, +), k.map(\.carryTotal).reduce(0, +))
         return m
     }
 
@@ -1062,7 +1338,11 @@ struct EvalMetrics {
                 "10. Clarification-loop rate   \(pct(clarificationLoopRate))",
                 "11. Save success rate         \(pct(saveSuccessRate))",
                 "12. Completion rate           \(pct(completionRate))",
-                "13. Response quality (judge)  \(pct(responseQuality))"]
+                "13. Response quality (judge)  \(pct(responseQuality))",
+                "K1. Task recall (long turns)        \(pct(taskRecall))",
+                "K2. Task precision (long turns)     \(pct(taskPrecision))",
+                "K3. Chatter-as-task rate            \(pct(chatterAsTaskRate))",
+                "K4. Context-carry accuracy          \(pct(contextCarryAccuracy))"]
     }
 }
 
@@ -1110,7 +1390,8 @@ enum EvalCatalogue {
     static let titles: [(String, String)] = [
         ("A", "Turn completeness"), ("B", "Task validation"), ("C", "Routines"), ("D", "Playbooks"), ("E", "Bulk creation"),
         ("F", "Clarification loops"), ("G", "Metadata extraction"), ("I", "Regression cases (from production failures) and extras"),
-        ("J", "Messy speech (fillers, repeats, taking words back, run-ons)")
+        ("J", "Messy speech (fillers, repeats, taking words back, run-ons)"),
+        ("K", "Long and noisy (stories, asides, several asks, one shared day)")
     ]
 
     private static func scriptText(_ s: Script) -> String {
@@ -1122,6 +1403,8 @@ enum EvalCatalogue {
         case .bulk(let b):
             let n = b.tasks.count + b.routines.count + (b.playbook?.steps.count ?? 0)
             return "bulk `\(b.action)` (\(n) \(b.playbook != nil ? "steps" : "items"))"
+        case .sequence(let all):
+            return "\(all.count) model calls: " + all.map(scriptText).joined(separator: " then ")
         }
     }
 
@@ -1251,6 +1534,8 @@ final class KittyEvals: XCTestCase {
         XCTAssertEqual(Set(numbered.map(\.category)), ["A", "B", "C", "D", "E", "F", "G"])
         XCTAssertGreaterThanOrEqual(EvalSuite.all.filter { $0.category == "I" }.count, 12)
         XCTAssertEqual(EvalSuite.all.filter { $0.category == "J" }.map(\.id), Array(76...107))
+        XCTAssertEqual(EvalSuite.all.filter { $0.category == "K" }.map(\.id), Array(108...137))
+        XCTAssertGreaterThanOrEqual(EvalSuite.all.filter { $0.category == "K" }.count, 25)
         XCTAssertEqual(EvalSuite.minimal12.count, 12)
     }
 
@@ -1287,6 +1572,10 @@ final class KittyEvals: XCTestCase {
         XCTAssertEqual(m.completionRate, 1)
         XCTAssertGreaterThanOrEqual(m.responseQuality, 0.95)
         XCTAssertGreaterThanOrEqual(m.extractionAccuracy, 0.98)
+        // Long and noisy turns, with the scripted model: what is asked for is made, the chatter is not, the context lands right.
+        XCTAssertGreaterThanOrEqual(m.taskRecall, 0.90, "K recall")
+        XCTAssertLessThanOrEqual(m.chatterAsTaskRate, 0.05, "K chatter-as-task")
+        XCTAssertGreaterThanOrEqual(m.contextCarryAccuracy, 0.90, "K context carry")
     }
 
     // MARK: Components

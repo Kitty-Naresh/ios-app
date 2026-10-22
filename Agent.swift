@@ -375,6 +375,8 @@ enum TaskPlanner {
     static func tidyTitle(_ raw: String, removingDay: Bool) -> String {
         var s = raw
         if removingDay {
+            // "tomorrow morning" goes whole: the part of the day becomes the task's slot, not a stray word in its title.
+            s = s.replacingOccurrences(of: #"(?i)\b(today|tomorrow)\s+(morning|afternoon|evening|night)\b"#, with: " ", options: .regularExpression)
             for w in [" today", " tomorrow", "today ", "tomorrow ", " tonight"] {
                 s = s.replacingOccurrences(of: w, with: " ", options: .caseInsensitive)
             }
@@ -432,7 +434,8 @@ enum TaskPlanner {
             for piece in TaskStore.splitCompound(rec?.cleaned ?? sentenceText) {
                 let title = tidyTitle(piece, removingDay: due != nil)
                 guard !title.isEmpty else { continue }
-                let guess = DaySlot.guess(from: title)
+                let titleGuess = DaySlot.guess(from: title)
+                let guess = titleGuess == .anytime ? DaySlot.guess(from: piece) : titleGuess      // "tomorrow morning" was cut from the title
                 out.append(PlannedTask(title: title, category: .guess(from: title), due: due, recurrence: rec?.spec,
                                        assignee: Assignee.detect(in: sentence),
                                        slot: guess == .anytime ? nil : guess,
@@ -1839,13 +1842,13 @@ extension TaskAgent {
     }
 
     @MainActor
-    private static func proposeAdd(_ text: String) async -> TurnResult {
+    static func proposeAdd(_ text: String, sink: SaveSink? = nil) async -> TurnResult {
         let store = TaskStore.shared
         if let question = missingInfoQuestion(text) { return .question(question) }
 
         let result = await TaskPlanner.plan(text)
         guard !result.tasks.isEmpty else { return .question("I didn't catch a task in that. What should I add?") }
-        return buildAddProposal(result.tasks, usedAI: result.usedAI, text: text)
+        return buildAddProposal(result.tasks, usedAI: result.usedAI, text: text, sink: sink)
     }
 
     /// Turns planned tasks, routines, list items and playbook offers into one preview.
@@ -2795,6 +2798,23 @@ struct LocalSemanticPrechecker {
         return rest.count <= 4 && !rest.contains { ActionLexicon.verbs.contains($0) }   // "for that project"
     }
 
+    /// A sentence that starts with a subject but says what is to be done: "the maid should sweep every day", or, with a
+    /// schedule, "every day the maid sweeps and mops". Not "the bathroom" or "the plants every week".
+    private static func hasPredicate(_ w: [String]) -> Bool {
+        guard w.count >= 4 else { return false }
+        let modals: Set<String> = ["should", "must", "will", "needs", "has"]
+        for i in 1..<(w.count - 1) where modals.contains(w[i]) {
+            let next = w[i + 1] == "to" && i + 2 < w.count ? w[i + 2] : w[i + 1]
+            if ActionLexicon.verbs.contains(next) { return true }
+        }
+        let scheduled = w.contains { ["every", "each", "daily", "weekly", "monthly"].contains($0) }
+        guard scheduled else { return false }
+        return w.dropFirst().contains { word in
+            word.count > 3 && word.hasSuffix("s") && (ActionLexicon.verbs.contains(String(word.dropLast()))
+                || (word.hasSuffix("es") && ActionLexicon.verbs.contains(String(word.dropLast(2)))))
+        }
+    }
+
     static func check(_ raw: String) -> Verdict {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return .incomplete("empty") }
@@ -2850,6 +2870,7 @@ struct LocalSemanticPrechecker {
            w.dropFirst().contains(where: { ActionLexicon.verbs.contains($0) }) { return .mayBeComplete }
         if let first = w.first, determiners.contains(first) {
             if framed, w.count >= 2 { return .mayBeComplete }     // "add a task for the project": finished, but the model asks what to do
+            if hasPredicate(w) { return .mayBeComplete }          // "the maid should sweep every day", "every day the maid sweeps"
             return .incomplete("object without an action")
         }
         if w.count == 1 {
@@ -3349,49 +3370,6 @@ struct TurnTrace {
     var chunks = 0                  // how many groups of actions a long turn was split into
 }
 
-@MainActor
-final class VoiceTurnManager {
-    static let longPause: TimeInterval = 1.6        // long enough to check whether the thought is finished
-    static let finalizerDelay: TimeInterval = 0.5   // after "done"
-    static let quickNudgeAfter: TimeInterval = 3.5  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
-    static let nudgeAfter: TimeInterval = 10        // a long silence on unfinished speech: gently ask what the task is
-    static let announcedHold: TimeInterval = 6      // "I'd like to create a list of tasks…": the tasks are about to come
-
-    /// How long a pause has to be before Kitty looks at the speech. A longer turn gets a longer grace: someone dictating
-    /// several sentences pauses between them, and a sentence that ends is not the end of the thought.
-    static func pauseNeeded(for text: String, profile: PauseProfile = .standard) -> TimeInterval {
-        let words = text.split(whereSeparator: { $0.isWhitespace }).count
-        let sentences = text.filter { ".?!".contains($0) }.count
-        var pause = profile.median == PauseProfile.standard.median ? longPause : max(1.2, longPause * profile.median / PauseProfile.standard.median)
-        if words >= 12 { pause += 0.3 }
-        if words >= 25 { pause += 0.4 }
-        if words >= 45 { pause += 0.4 }
-        if sentences >= 2 { pause += 0.3 }
-        // Someone mid-thought: after a comma or a connector ("…the bathrooms, and"), or deep into a long turn whose last clause
-        // has not ended, a pause is not the end. Only these two cases may wait past the usual cap.
-        let extended = endsMidThought(text) || (words > 25 && !endsSentence(text))
-        if endsMidThought(text) { pause += 1.0 }
-        if words > 25, !endsSentence(text) { pause += 1.0 }
-        return min(pause, extended ? 4.2 : 3.2)
-    }
-
-    static let connectors: Set<String> = ["and", "then", "but", "so", "because", "also", "plus", "or", "which", "that", "while", "until"]
-
-    static func endsSentence(_ text: String) -> Bool {
-        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
-        return ".?!".contains(last)
-    }
-
-    /// A trailing comma, or a trailing "and" / "then" / "but"…: the sentence is still going.
-    static func endsMidThought(_ text: String) -> Bool {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.hasSuffix(",") || t.hasSuffix(";") { return true }
-        let last = t.lowercased().split(whereSeparator: { $0.isWhitespace }).last.map { $0.filter { $0.isLetter } } ?? ""
-        return connectors.contains(last)
-    }
-
-    enum Gate: Equatable {
-        case keepListening
 /// How this person pauses inside a sentence: the median and the 90th percentile of the gaps between consecutive words.
 /// Someone who talks slowly gets a longer wait before Kitty looks at their speech; a quick talker does not. Kept per user
 /// as a rolling set of gaps in UserDefaults (nothing leaves the device). Until enough gaps are known the defaults apply.
@@ -3442,6 +3420,53 @@ nonisolated struct PauseProfile: Equatable, Sendable {
     }
 }
 
+@MainActor
+final class VoiceTurnManager {
+    static let longPause: TimeInterval = 1.6        // long enough to check whether the thought is finished
+    static let finalizerDelay: TimeInterval = 0.5   // after "done"
+    static let quickNudgeAfter: TimeInterval = 3.5  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
+    static let nudgeAfter: TimeInterval = 10        // a long silence on unfinished speech: gently ask what the task is
+    static let announcedHold: TimeInterval = 6      // "I'd like to create a list of tasks…": the tasks are about to come
+
+    /// How long a pause has to be before Kitty looks at the speech. A longer turn gets a longer grace: someone dictating
+    /// several sentences pauses between them, and a sentence that ends is not the end of the thought.
+    static func pauseNeeded(for text: String, profile: PauseProfile = .standard, fresh: String? = nil) -> TimeInterval {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).count
+        let sentences = text.filter { ".?!".contains($0) }.count
+        var pause = profile.median == PauseProfile.standard.median ? longPause : max(1.2, longPause * profile.median / PauseProfile.standard.median)
+        if words >= 12 { pause += 0.3 }
+        if words >= 25 { pause += 0.4 }
+        if words >= 45 { pause += 0.4 }
+        if sentences >= 2 { pause += 0.3 }
+        // Someone mid-thought: after a comma or a connector ("…the bathrooms, and"), or deep into a long turn whose last clause
+        // has not ended, a pause is not the end. Only these two cases may wait past the usual cap.
+        // Only the words since Kitty last acted count: a short "yes" or "no" after a long preview is not a long unfinished turn.
+        let recent = fresh ?? text
+        let recentWords = recent.split(whereSeparator: { $0.isWhitespace }).count
+        let longOpen = recentWords > 25 && !endsSentence(recent)
+        let extended = endsMidThought(text) || longOpen
+        if endsMidThought(text) { pause += 1.0 }
+        if longOpen { pause += 1.0 }
+        return min(pause, extended ? 4.2 : 3.2)
+    }
+
+    static let connectors: Set<String> = ["and", "then", "but", "so", "because", "also", "plus", "or", "which", "that", "while", "until"]
+
+    static func endsSentence(_ text: String) -> Bool {
+        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
+        return ".?!".contains(last)
+    }
+
+    /// A trailing comma, or a trailing "and" / "then" / "but"…: the sentence is still going.
+    static func endsMidThought(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasSuffix(",") || t.hasSuffix(";") { return true }
+        let last = t.lowercased().split(whereSeparator: { $0.isWhitespace }).last.map { $0.filter { $0.isLetter } } ?? ""
+        return connectors.contains(last)
+    }
+
+    enum Gate: Equatable {
+        case keepListening
         case hold(String)               // the local check says it is unfinished: no model call
         case evaluate(String)           // may be complete: one model call
         case forceEvaluate(String)      // "done" / "save it" / "go ahead": treat it as final
@@ -3500,6 +3525,15 @@ nonisolated struct PauseProfile: Equatable, Sendable {
         return (trimmed, false)
     }
 
+    /// The words said after `lastActed` (both as heard, uncleaned), or nil when `said` does not start with them.
+    static func wordsSince(_ lastActed: String, in said: String) -> String? {
+        let done = norm(lastActed).split(separator: " ")
+        guard !done.isEmpty else { return nil }
+        let words = said.split(whereSeparator: { $0.isWhitespace })
+        guard words.count > done.count, norm(words.prefix(done.count).joined(separator: " ")).split(separator: " ") == done else { return nil }
+        return words.dropFirst(done.count).joined(separator: " ")
+    }
+
     /// Decides what to do about the speech so far. The model is never involved here.
     /// The words are cleaned first (fillers, repeats, "no wait" repairs), so everything below judges what was meant.
     /// `lastActed` is compared as raw speech: it is the unedited words Kitty last looked at.
@@ -3519,7 +3553,7 @@ nonisolated struct PauseProfile: Equatable, Sendable {
             if text.isEmpty { return .keepListening }
             return silence >= finalizerDelay ? .forceEvaluate(text) : .keepListening
         }
-        if silence < pauseNeeded(for: text, profile: profile) { return .keepListening }               // a short pause: keep listening
+        if silence < pauseNeeded(for: text, profile: profile, fresh: wordsSince(lastActed, in: said)) { return .keepListening }               // a short pause: keep listening
         if UnclearAnswer.matches(text) { return .evaluate(text) }                // "I don't know", "nothing": answered in Swift, never held
         switch LocalSemanticPrechecker.check(text) {
         case .incomplete(let reason):
@@ -3664,7 +3698,7 @@ nonisolated struct PauseProfile: Equatable, Sendable {
                 lastTrace.route = answer ? "context-due-yes" : "context-due-no"
                 if answer {
                     let n = state.drafts.applyDue(due.date, toKeys: due.keys)
-                    return draftProposal(ack: "Tagged \(n == 1 ? "1 task" : "\(n) tasks") as due \(due.label).")
+                    return draftProposal(ack: "Tagged \(n == 1 ? "1 task" : "\(n) tasks") as due \(Self.spokenDay(due.label)).")
                 }
                 return draftProposal(ack: "Okay, no due date for those.")
             }
@@ -3760,7 +3794,9 @@ nonisolated struct PauseProfile: Equatable, Sendable {
             lastTrace.route = "model-single"
             lastTrace.modelOutput = "\(decision)"
             Breadcrumb.log("decision: \(decision.action) wait=\(decision.wait)")
-            var validated = TaskValidator.validate(decision, utterance: utterance, context: ctx)
+            // One ask in a long turn: its day and person come from its own words ("today" in the chatter is not its day).
+            let judged = longTurn.flatMap { $0.actions.count == 1 ? $0.actions[0].source : nil } ?? utterance
+            var validated = TaskValidator.validate(decision, utterance: judged, context: ctx)
             if case .wait = validated, let turn = longTurn, ruleFallbackEnabled {
                 // The gate released this turn and it holds a real action: the model's "wait" is not an answer.
                 lastTrace.validation = "\(validated)"
@@ -3809,7 +3845,14 @@ nonisolated struct PauseProfile: Equatable, Sendable {
     private func longTurnRules(_ turn: LongTurn, analysis: BulkDetector.Analysis, utterance: String, ctx: ValidationContext) async -> TurnResult {
         lastTrace.route = "long-turn-rules"
         if turn.actions.count >= 2 { return bulkFromClauses(turn, analysis: analysis, utterance: utterance, ctx: ctx) }
-        return await TaskAgent.propose(turn.actions[0].source)
+        TaskStore.shared.refreshRoutines()
+        return await TaskAgent.proposeAdd(turn.actions[0].source, sink: sink)      // saves through this manager's sink
+    }
+
+    /// "Tomorrow" and "Tonight" read naturally in lower case in the middle of a sentence; weekday names keep their capital.
+    static func spokenDay(_ text: String) -> String {
+        for w in ["Tomorrow", "Tonight", "Today"] where text.hasPrefix(w) { return w.lowercased() + text.dropFirst(w.count) }
+        return text
     }
 
     /// yes -> true, no -> false, anything else (including "discard") -> nil so the normal handling runs.
@@ -3884,8 +3927,17 @@ nonisolated struct PauseProfile: Equatable, Sendable {
         let undated = items.filter { $0.kind == .task && $0.due == nil }
         guard !undated.isEmpty else { return nil }
         state.pendingContextDue = .init(date: date, label: label, keys: Set(undated.map(\.key)))
-        let because = turn.context.usedLine ?? label
-        return "I picked these because of \(because). Should I tag the \(undated.count == items.count ? "tasks" : "ones") without a date as due \(label)?"
+        let because = Self.spokenDay(turn.context.usedLine ?? label)
+        return "I picked these because of \(because). Should I tag the \(undated.count == items.count ? "tasks" : "ones") without a date as due \(Self.spokenDay(label))?"
+    }
+
+    /// No model answer for a short list: every piece the detector found becomes a draft through the local rules.
+    private func bulkFromSegments(_ analysis: BulkDetector.Analysis, utterance: String, ctx: ValidationContext) async -> TurnResult {
+        lastTrace.route = "bulk-rules"
+        let validated = BulkValidator.validate(BulkDecisionValue(action: "create_tasks"), utterance: utterance,
+                                               segments: analysis.segments, context: ctx, turn: analysis.turn)
+        lastTrace.validation = "\(validated)"
+        return await bulkResult(validated, spoken: "", utterance: utterance, ctx: ctx)
     }
 
     /// No model at all: every action clause becomes a draft through the local rules.

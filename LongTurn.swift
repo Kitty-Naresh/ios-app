@@ -62,7 +62,7 @@ enum LongTurnAnalyzer {
     private static let leadFillers: Set<String> = [
         "okay", "ok", "so", "now", "well", "anyway", "anyways", "honestly", "basically", "actually", "oh", "and", "but", "then", "yeah",
         "yes", "like", "um", "uh", "alright", "right", "also", "hmm", "listen", "look", "probably", "maybe", "perhaps", "just",
-        "really", "definitely", "still", "finally", "plus"
+        "really", "definitely", "still", "finally", "plus", "first", "next"
     ]
 
     /// Said before the real action ("I need to", "can you"). Longest first.
@@ -76,6 +76,7 @@ enum LongTurnAnalyzer {
         ["dont", "forget", "to"], ["do", "not", "forget", "to"], ["let's"], ["lets"], ["please"], ["need", "to"], ["to"]
     ].sorted { $0.count > $1.count }
 
+    private static let addIntroduces: Set<String> = ["buy", "call", "pay", "book", "send", "order", "renew", "email", "pick", "fix", "submit", "schedule"]
     private static let delegators: Set<String> = ["ask", "tell", "have", "get"]
     private static let modals: Set<String> = ["should", "must", "will", "needs", "need", "has", "can"]
     private static let auxiliaries: Set<String> = ["is", "are", "was", "were", "has", "have", "had", "will", "should", "needs", "need", "can", "could", "would"]
@@ -133,6 +134,18 @@ enum LongTurnAnalyzer {
         for m in markers where i + m.words.count <= b.count && Array(b[i..<(i + m.words.count)]) == m.words {
             return (m.words.count, m.keep)
         }
+        // "..., and tell the driver to wash the car": a second delegation. The words stay: they are the frame.
+        if b[i] == "and", i + 3 < b.count, ["tell", "ask", "have", "get"].contains(b[i + 1]),
+           b[(i + 2)..<min(i + 7, b.count)].contains("to") {
+            return (1, true)
+        }
+        // "...for the party so clean the kitchen": "so" followed by an action starts the next clause
+        if b[i] == "so", i + 1 < b.count {
+            var k = i + 1
+            while k + 1 < b.count, ["please", "first", "then", "next"].contains(b[k]) { k += 1 }
+            let next = b[k]
+            if ActionLexicon.verbs.contains(next), !["tired", "much"].contains(next) { return (1, false) }
+        }
         // "... and he said ...", "... and the house is a mess": a new thought with its own subject
         if b[i] == "and", i + 1 < b.count {
             let next = b[i + 1]
@@ -175,6 +188,8 @@ enum LongTurnAnalyzer {
         while progress, !t.isEmpty {
             progress = false
             if leadFillers.contains(bare(t[0])) { t.removeFirst(); progress = true; continue }
+            // "please add buy detergent": "add" only introduces the action that follows
+            if bare(t[0]) == "add", t.count >= 3, addIntroduces.contains(bare(t[1])) { t.removeFirst(); progress = true; continue }
             if let f = frameList.first(where: { hasPrefix(t, $0) }) { t.removeFirst(f.count); progress = true; continue }
             // "ask the maid to clean", "have the cook make": a delegation
             if delegators.contains(bare(t[0])) {
@@ -233,8 +248,15 @@ enum LongTurnAnalyzer {
         return r.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,.-"))
     }
 
+    private static let roleAsObject = try? NSRegularExpression(
+        pattern: #"\b(pay|call|thank|text|message|email|hire|fire|meet|see|visit|salary of)\s+(?:the\s+|my\s+|our\s+)?[\w'-]+"#,
+        options: [.caseInsensitive])
+
+    /// A role the user named as the one doing it ("the maid should", "ask the driver to"), not one the task is about ("pay the maid").
     private static func roleAssignee(in text: String) -> String? {
-        guard let who = Assignee.detect(in: text), who != Assignee.me else { return nil }
+        var t = text
+        if let re = roleAsObject { t = re.stringByReplacingMatches(in: t, range: NSRange(t.startIndex..., in: t), withTemplate: "$1") }
+        guard let who = Assignee.detect(in: t), who != Assignee.me else { return nil }
         return who
     }
 
@@ -274,18 +296,24 @@ enum LongTurnAnalyzer {
                 turn.clauses.append(Clause(text: lower, kind: .action))
                 let bodyText = body.joined(separator: " ")
                 let segments = BulkDetector.actionSegments(bodyText)
-                let datesInSegments = segments.compactMap { TaskValidator.relativeDate(in: $0, ctx: ctx) }
-                let clauseDate = TaskValidator.relativeDate(in: bodyText, ctx: ctx)
-                let clauseLabel = dayLabel(in: bodyText.lowercased())
+                // "every Sunday" is a schedule, not a day: a routine has no due day and keeps its words, and its weekday never
+                // becomes the day of the one-off actions next to it.
+                let oneOffs = segments.filter { !BulkDetector.hasSchedule($0) }
+                let datesInSegments = oneOffs.compactMap { TaskValidator.relativeDate(in: $0, ctx: ctx) }
+                let clauseText = oneOffs.joined(separator: " ")
+                let clauseDate = TaskValidator.relativeDate(in: clauseText, ctx: ctx)
+                let clauseLabel = dayLabel(in: clauseText.lowercased())
                 let single = Set(datesInSegments).count <= 1
                 let who = roleAssignee(in: piece)
                 for seg in segments {
-                    let own = TaskValidator.relativeDate(in: seg, ctx: ctx)
-                    let day = own ?? (single ? clauseDate : nil)
-                    let label = own != nil ? dayLabel(in: seg.lowercased()) : (single ? clauseLabel : nil)
-                    let text = removingDay(seg)
+                    let routine = BulkDetector.hasSchedule(seg)
+                    let own = routine ? nil : TaskValidator.relativeDate(in: seg, ctx: ctx)
+                    // A segment with its own time ("for next week") never takes the day said for its neighbour.
+                    let inherits = single && !TaskValidator.mentionsDate(seg)
+                    let day = routine ? nil : (own ?? (inherits ? clauseDate : nil))
+                    let label = routine ? nil : (own != nil ? dayLabel(in: seg.lowercased()) : (inherits ? clauseLabel : nil))
+                    let text = routine ? seg : removingDay(seg)
                     guard !text.isEmpty else { continue }
-                    let routine = BulkDetector.hasSchedule(text)
                     let title = TaskPlanner.tidyTitle(text, removingDay: false)
                     turn.actions.append(ActionClause(text: text, title: title.isEmpty ? text : title, due: day, dueLabel: label,
                                                      assignee: who, clause: index, source: lower, scheduled: routine))
@@ -293,10 +321,12 @@ enum LongTurnAnalyzer {
                 continue
             }
 
-            let date = TaskValidator.relativeDate(in: lower, ctx: ctx)
+            // "so tired today" is chatter: "today" says when the user is talking, not a day for the tasks.
+            let dated = lower.replacingOccurrences(of: "today", with: " ").replacingOccurrences(of: "tonight", with: " ")
+            let date = TaskValidator.relativeDate(in: dated, ctx: ctx)
             let occ = occasion(in: lower)
             let person = roleAssignee(in: lower)
-            if date != nil || occ != nil || person != nil || TaskValidator.mentionsDate(lower) {
+            if date != nil || occ != nil || person != nil || TaskValidator.mentionsDate(dated) {
                 turn.clauses.append(Clause(text: lower, kind: .context))
                 if let d = date { dates.append(d); firstDateLabel = firstDateLabel ?? dayLabel(in: lower) }
                 if turn.context.occasion == nil { turn.context.occasion = occ }
