@@ -261,3 +261,100 @@ final class LongTurnPromptTests: XCTestCase {
     }
 }
 
+@MainActor
+final class LongTurnValidationTests: XCTestCase {
+    private let inLaws = LongTurnAnalyzerTests.inLaws
+    private let now = LongTurnAnalyzerTests.now
+    private func day(_ n: Int) -> Date { LongTurnAnalyzerTests.day(n) }
+
+    private func manager(_ engine: DecisionProviding) -> VoiceTurnManager {
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] }, knownAssignees: { [] })
+        m.ruleFallbackEnabled = false
+        return m
+    }
+
+    private let fourTitles = ["Clean bathrooms", "Mop living room", "Buy flowers and snacks", "Call the caterer"]
+
+    func testOwnDaysAndPeopleStayWithTheirTasksAndContextIsNotCopiedIn() async {
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(fourTitles)]))
+        let r = await m.decide(utterance: inLaws, now: now)
+        guard case .proposal = r else { return XCTFail("\(r)") }
+        let items = m.state.drafts.items
+        XCTAssertEqual(items.map(\.title), fourTitles)
+        XCTAssertEqual(items.map(\.due), [day(23), day(23), nil, nil])
+        XCTAssertEqual(items.map(\.assignee), [Assignee.househelp, Assignee.househelp, nil, nil])
+        XCTAssertEqual(items.map(\.notes), Array(repeating: "For in-laws", count: 4))
+    }
+
+    func testTheModelCannotSpreadAPersonOrADayToTasksThatDidNotSayIt() async {
+        var tasks = BulkQueueEngine.tasks(fourTitles)
+        for i in tasks.tasks.indices { tasks.tasks[i].assignee = "Househelp"; tasks.tasks[i].dueDate = "2026-10-24" }
+        let m = manager(BulkQueueEngine([tasks]))
+        _ = await m.decide(utterance: inLaws, now: now)
+        let items = m.state.drafts.items
+        XCTAssertEqual(items.map(\.assignee), [Assignee.househelp, Assignee.househelp, nil, nil])
+        XCTAssertEqual(items.map(\.due), [day(23), day(23), nil, nil])
+    }
+
+    func testAnInventedTaskIsDroppedAndAMissedOneComesBackWithItsOwnFields() async {
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(["Clean bathrooms", "Mop living room", "Buy flowers and snacks", "Walk the dog"])]))
+        _ = await m.decide(utterance: inLaws, now: now)
+        let items = m.state.drafts.items
+        XCTAssertEqual(items.map { $0.title.lowercased() }, ["clean bathrooms", "mop living room", "buy flowers and snacks", "call the caterer"])
+        XCTAssertFalse(items.contains { $0.title.lowercased().contains("dog") })
+    }
+
+    func testTheChatterIsNotAddedBack() async {
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(fourTitles)]))
+        _ = await m.decide(utterance: inLaws, now: now)
+        XCTAssertFalse(m.state.drafts.items.contains { $0.title.lowercased().contains("mess") })
+    }
+
+    // MARK: The due date is asked, not assumed
+
+    func testKittyAsksBeforeTaggingTheContextDay() async {
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(fourTitles)]))
+        let r = await m.decide(utterance: inLaws, now: now)
+        guard case .proposal(let p) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(p.prompt, "I picked these because of Saturday, for in-laws. Should I tag the ones without a date as due Saturday?")
+        XCTAssertFalse(p.autoConfirm)
+        XCTAssertEqual(m.state.pendingContextDue?.keys.count, 2)
+    }
+
+    func testYesTagsOnlyTheUndatedTasks() async {
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(fourTitles)]))
+        _ = await m.decide(utterance: inLaws, now: now)
+        let r = await m.decide(utterance: inLaws + " yes", now: now)
+        guard case .proposal(let p) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(m.state.drafts.items.map(\.due), [day(23), day(23), day(24), day(24)])
+        XCTAssertEqual(p.prompt, "Tagged 2 tasks as due Saturday. Should I save these?")
+        XCTAssertNil(m.state.pendingContextDue)
+    }
+
+    func testNoLeavesThemWithoutADate() async {
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(fourTitles)]))
+        _ = await m.decide(utterance: inLaws, now: now)
+        let r = await m.decide(utterance: inLaws + " no", now: now)
+        guard case .proposal(let p) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(m.state.drafts.items.map(\.due), [day(23), day(23), nil, nil])
+        XCTAssertEqual(p.prompt, "Okay, no due date for those. Should I save these?")
+    }
+
+    func testSayingSomethingElseDropsTheQuestionWithoutTagging() async {
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(fourTitles)]))
+        _ = await m.decide(utterance: inLaws, now: now)
+        _ = await m.decide(utterance: inLaws + " also add buy candles", now: now)
+        XCTAssertNil(m.state.pendingContextDue)
+        XCTAssertEqual(m.state.drafts.items.filter { $0.due == day(24) }.count, 0)
+    }
+
+    func testNoQuestionWhenEveryTaskHasItsOwnDayOrThereIsNoContextDay() async {
+        let said = "Okay so honestly it has been a long week but I need to call the plumber on Friday and wash the car on Saturday and buy the paint on Monday"
+        let m = manager(BulkQueueEngine([BulkQueueEngine.tasks(["Call the plumber", "Wash the car", "Buy the paint"])]))
+        let r = await m.decide(utterance: said, now: now)
+        guard case .proposal(let p) = r else { return XCTFail("\(r)") }
+        XCTAssertNotEqual(p.prompt?.hasPrefix("I picked these"), true)
+        XCTAssertNil(m.state.pendingContextDue)
+    }
+}
+

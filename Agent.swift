@@ -3200,6 +3200,14 @@ final class ConversationStateManager {
     let confirmation = ConfirmationManager()
     private(set) var pendingProposal: Proposal?
     private(set) var lastProcessed = ""         // the merged speech the pending draft or question was built from
+    /// A long turn named one day in its context ("in-laws coming this Saturday") and some tasks have no day of their own:
+    /// Kitty asked whether to tag those tasks with it. Never applied without a yes.
+    struct ContextDue: Equatable {
+        var date: Date
+        var label: String
+        var keys: Set<String>
+    }
+    var pendingContextDue: ContextDue?
     /// A spoken list has been heard and Kitty is asking about the parts that were unclear (its name, a missing number…).
     var pendingList: ListOutline.Outline?
 
@@ -3262,6 +3270,7 @@ final class ConversationStateManager {
         pendingProposal = nil
         lastProcessed = ""
         pendingList = nil
+        pendingContextDue = nil
         readBack = nil
         readBackUsed = false
         drafts.clear()
@@ -3575,6 +3584,20 @@ final class VoiceTurnManager {
             return .reply(await TaskAgent.askReply(delta, useModel: false, base: base))
         }
 
+        // 0c. "Should I tag the tasks without a date as due Saturday?" is waiting for its answer.
+        if let due = state.pendingContextDue {
+            if state.pendingProposal != nil, state.drafts.hasContent, let answer = Self.contextDueAnswer(delta, reply: reply) {
+                state.pendingContextDue = nil
+                lastTrace.route = answer ? "context-due-yes" : "context-due-no"
+                if answer {
+                    let n = state.drafts.applyDue(due.date, toKeys: due.keys)
+                    return draftProposal(ack: "Tagged \(n == 1 ? "1 task" : "\(n) tasks") as due \(due.label).")
+                }
+                return draftProposal(ack: "Okay, no due date for those.")
+            }
+            state.pendingContextDue = nil                  // they said something else: the question is dropped, not asked again
+        }
+
         // 1. Something is waiting for a yes or a no.
         if let p = state.pendingProposal {
             switch reply {
@@ -3702,6 +3725,15 @@ final class VoiceTurnManager {
         return await TaskAgent.propose(utterance)
     }
 
+    /// yes -> true, no -> false, anything else (including "discard") -> nil so the normal handling runs.
+    static func contextDueAnswer(_ delta: String, reply: ConfirmationManager.Reply) -> Bool? {
+        let l = delta.lowercased()
+        if l.contains("no due") || l.contains("leave") || l.contains("don't") || l.contains("do not") || l.contains("without") { return false }
+        if reply == .no { return false }
+        if reply == .yes || l.hasPrefix("tag") || l.contains("tag them") || l.contains("tag those") || l.contains("due") { return true }
+        return nil
+    }
+
     /// Up to three model calls of at most four actions each, merged into one draft. What the model leaves out (or what does not
     /// fit in three calls) is added back from the action clauses by `BulkValidator`, so nothing the user asked for is lost.
     private func longBulkTurn(_ turn: LongTurn, analysis: BulkDetector.Analysis, lines: [String], utterance: String,
@@ -3740,18 +3772,38 @@ final class VoiceTurnManager {
         }
         lastTrace.route = "model-bulk-long"
         if let q = readBackQuestion(bulk: merged, utterance: utterance) { lastTrace.route = "read-back"; return q }
-        let validated = BulkValidator.validate(merged, utterance: utterance, segments: analysis.segments, context: ctx)
+        let validated = BulkValidator.validate(merged, utterance: utterance, segments: analysis.segments, context: ctx, turn: turn)
         lastTrace.validation = "\(validated)"
         Breadcrumb.log("decision: long bulk, \(groups.count) chunk(s), \(answered) answered")
-        return await bulkResult(validated, spoken: merged.spokenResponse, utterance: utterance, ctx: ctx)
+        return await longBulkResult(validated, turn: turn, spoken: merged.spokenResponse, utterance: utterance, ctx: ctx)
+    }
+
+    /// The preview for a long turn. If its context named one day and some tasks have none of their own, the preview asks
+    /// whether to tag them with it (answered by voice: yes or no) instead of assuming.
+    private func longBulkResult(_ validated: BulkValidated, turn: LongTurn, spoken: String, utterance: String,
+                                ctx: ValidationContext) async -> TurnResult {
+        if case .items(let items) = validated, items.count > 1, !state.drafts.hasContent {
+            return startDraft(items, ctx: ctx, question: contextDueQuestion(items, turn: turn))
+        }
+        return await bulkResult(validated, spoken: spoken, utterance: utterance, ctx: ctx)
+    }
+
+    /// Remembers which drafts could take the context day and returns the question to ask, or nil when there is nothing to ask.
+    private func contextDueQuestion(_ items: [DraftItem], turn: LongTurn) -> String? {
+        guard let date = turn.context.due, let label = turn.context.dueLabel else { return nil }
+        let undated = items.filter { $0.kind == .task && $0.due == nil }
+        guard !undated.isEmpty else { return nil }
+        state.pendingContextDue = .init(date: date, label: label, keys: Set(undated.map(\.key)))
+        let because = turn.context.usedLine ?? label
+        return "I picked these because of \(because). Should I tag the \(undated.count == items.count ? "tasks" : "ones") without a date as due \(label)?"
     }
 
     /// No model at all: every action clause becomes a draft through the local rules.
     private func bulkFromClauses(_ turn: LongTurn, analysis: BulkDetector.Analysis, utterance: String, ctx: ValidationContext) -> TurnResult {
         let empty = BulkDecisionValue(action: "create_tasks")
-        let validated = BulkValidator.validate(empty, utterance: utterance, segments: analysis.segments, context: ctx)
+        let validated = BulkValidator.validate(empty, utterance: utterance, segments: analysis.segments, context: ctx, turn: turn)
         lastTrace.validation = "\(validated)"
-        if case .items(let items) = validated { return startDraft(items, ctx: ctx) }
+        if case .items(let items) = validated { return startDraft(items, ctx: ctx, question: contextDueQuestion(items, turn: turn)) }
         return .reply(AgentReply(message: "I couldn't work out the tasks. What would you like me to add?", didAdd: false))
     }
 
@@ -3826,8 +3878,9 @@ final class VoiceTurnManager {
             b.tasks = b.tasks.map { var t = $0; t.assignee = fix(t.assignee); return t }
             b.routines = b.routines.map { var r = $0; r.assignee = fix(r.assignee); return r }
             if var p = b.playbook { p.assignee = fix(p.assignee); b.playbook = p }
-            let segments = BulkDetector.analyze(utterance, now: now).segments
-            let validated = BulkValidator.validate(b, utterance: utterance, segments: segments, context: ctx)
+            let analysis = BulkDetector.analyze(utterance, now: now)
+            let segments = analysis.segments
+            let validated = BulkValidator.validate(b, utterance: utterance, segments: segments, context: ctx, turn: analysis.turn)
             lastTrace.validation = "\(validated)"
             return await bulkResult(validated, spoken: b.spokenResponse, utterance: utterance, ctx: ctx)
         }
@@ -3899,14 +3952,14 @@ final class VoiceTurnManager {
     }
 
     /// Several items: a pending bulk draft that waits for an explicit yes.
-    private func startDraft(_ items: [DraftItem], ctx: ValidationContext) -> TurnResult {
+    private func startDraft(_ items: [DraftItem], ctx: ValidationContext, question: String? = nil) -> TurnResult {
         state.setPending(titles: [], playbook: nil, planned: [])
         if state.drafts.hasContent, state.drafts.playbook == nil {
             let added = state.drafts.merge(items)
             return draftProposal(ack: added.isEmpty ? nil : "Added \(Words.list(added.map { $0.title.lowercased() })).")
         }
         state.drafts.setItems(items)
-        return draftProposal(ack: nil)
+        return draftProposal(ack: nil, question: question)
     }
 
     private func draftProposal(ack: String?, question: String? = nil) -> TurnResult {

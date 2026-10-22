@@ -456,6 +456,17 @@ final class BulkDraftManager {
     func setItems(_ new: [DraftItem]) { items = new; playbook = nil }
     func setPlaybook(_ p: PlaybookDraftState?) { playbook = p; if p != nil { items = [] } }
 
+    /// Gives a due date to the drafts that still have none (matched by key). Returns how many were tagged.
+    @discardableResult
+    func applyDue(_ date: Date, toKeys keys: Set<String>) -> Int {
+        var n = 0
+        for i in items.indices where keys.contains(items[i].key) && items[i].due == nil && items[i].kind == .task {
+            items[i].due = date
+            n += 1
+        }
+        return n
+    }
+
     /// Adds items that are not already pending. Returns the ones that were added.
     @discardableResult
     func merge(_ new: [DraftItem]) -> [DraftItem] {
@@ -1089,10 +1100,29 @@ enum BulkValidator {
         TaskValidator.mentionsDate(seg) || !TaskValidator.mentionsDate(head) ? seg : head + " " + seg
     }
 
+    /// The action clause a model title is about: the one it shares the most words with. Nil when it is about none of them.
+    private static func matchingAction(for title: String, in turn: LongTurn) -> ActionClause? {
+        let scored = turn.actions.map { ($0, Words.nounOverlap($0.text, title)) }
+        guard let best = scored.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
+        return best.0
+    }
+
     private static func make(title raw: String, category: String, dueDate: String, dueTime: String, priority: String, assignee: String,
-                             notes: String, segments: [String], utterance: String, ctx: ValidationContext) -> ValidatedTask? {
+                             notes: String, segments: [String], utterance: String, ctx: ValidationContext,
+                             matched: ActionClause? = nil, contextNotes: String? = nil) -> ValidatedTask? {
         let title = TaskPlanner.tidyTitle(raw, removingDay: false)
         guard TaskValidator.isActionable(title), title.count <= 80 else { return nil }
+        if let a = matched {
+            // A long turn: the day and the person come from this action's own clause, never from the intro or another task.
+            return ValidatedTask(
+                title: title,
+                categoryName: TaskValidator.resolveCategory(category, known: ctx.knownCategories),
+                due: a.due,
+                timeMinutes: TaskValidator.resolveTime(dueTime, utterance: a.text),
+                priority: TaskValidator.resolvePriority(priority, utterance: a.text),
+                assignee: TaskValidator.resolveAssignee(assignee, utterance: a.source, known: ctx.knownAssignees) ?? a.assignee,
+                notes: cleanNotes(notes) ?? contextNotes)
+        }
         let seg = segment(for: title, segments: segments, whole: utterance)
         let dates = dateText(segment: seg, head: BulkDetector.head(of: utterance, segments: segments))
         return ValidatedTask(
@@ -1110,7 +1140,8 @@ enum BulkValidator {
         return t.isEmpty ? "What would you like me to add?" : "What would you like me to do with \(t.lowercased())?"
     }
 
-    static func validate(_ d: BulkDecisionValue, utterance: String, segments: [String], context ctx: ValidationContext) -> BulkValidated {
+    static func validate(_ d: BulkDecisionValue, utterance: String, segments: [String], context ctx: ValidationContext,
+                         turn: LongTurn? = nil) -> BulkValidated {
         let action = d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         switch action {
         case "wait":
@@ -1145,8 +1176,15 @@ enum BulkValidator {
             for t in d.tasks {
                 // Never invent a task: it has to name something the user said.
                 if !t.title.isEmpty, Words.nounOverlap(t.title, utterance) == 0, !Words.nouns(t.title).isEmpty, !utterNouns.isEmpty { continue }
+                // In a long turn it has to name one of the action clauses, not the chatter around them.
+                var matched: ActionClause?
+                if let turn, !t.title.isEmpty {
+                    guard let a = matchingAction(for: t.title, in: turn) else { continue }
+                    matched = a
+                }
                 guard let v = make(title: t.title, category: t.category, dueDate: t.dueDate, dueTime: t.dueTime, priority: t.priority,
-                                   assignee: t.assignee, notes: t.notes, segments: segments, utterance: utterance, ctx: ctx) else {
+                                   assignee: t.assignee, notes: t.notes, segments: segments, utterance: utterance, ctx: ctx,
+                                   matched: matched, contextNotes: turn?.context.notes) else {
                     return .clarify(clarifyAbout(t.title))
                 }
                 items.append(DraftItem(v, kind: .task))
@@ -1154,8 +1192,14 @@ enum BulkValidator {
 
             for r in d.routines {
                 if !r.title.isEmpty, Words.nounOverlap(r.title, utterance) == 0, !Words.nouns(r.title).isEmpty, !utterNouns.isEmpty { continue }
+                var matched: ActionClause?
+                if let turn, !r.title.isEmpty {
+                    guard let a = matchingAction(for: r.title, in: turn) else { continue }
+                    matched = a
+                }
                 guard var v = make(title: r.title, category: r.category, dueDate: "", dueTime: "", priority: "", assignee: r.assignee,
-                                   notes: r.notes, segments: segments, utterance: utterance, ctx: ctx) else {
+                                   notes: r.notes, segments: segments, utterance: utterance, ctx: ctx,
+                                   matched: matched, contextNotes: turn?.context.notes) else {
                     return .clarify(clarifyAbout(r.title))
                 }
                 let freq = r.frequency.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1189,7 +1233,14 @@ enum BulkValidator {
             // covered when its words are in a title or in the notes, so a task the model split into title and notes is not lost.
             let made = items.map { (title: $0.title, notes: $0.notes) }
             for s in segments where !ListOutline.isContext(s) && !ListOutline.covered(s, by: made) {
-                if let local = BulkDraftManager.makeItem(from: s, context: ctx) { items.append(local) }
+                if var local = BulkDraftManager.makeItem(from: s, context: ctx) {
+                    if let turn, let a = turn.actions.first(where: { $0.text == s }) {           // its own day and person, and the occasion
+                        local.due = a.due ?? local.due
+                        local.assignee = a.assignee ?? local.assignee
+                        if local.notes == nil { local.notes = turn.context.notes }
+                    }
+                    items.append(local)
+                }
             }
 
             var seen = Set<String>()
