@@ -20,6 +20,64 @@ nonisolated enum Breadcrumb {
     static func clear() { UserDefaults.standard.removeObject(forKey: key) }
 }
 
+// MARK: - Spoken words (per-word confidence and timing)
+
+/// One recognised word with what the recogniser knows about it.
+/// Confidence is 0...1; it is often 0 on partial results, so treat 0 as "unknown".
+nonisolated struct SpokenWord: Equatable, Sendable {
+    var text: String
+    var confidence: Float
+    var timestamp: TimeInterval
+    var duration: TimeInterval
+    var alternatives: [String] = []
+
+    init(text: String, confidence: Float = 0, timestamp: TimeInterval = 0,
+         duration: TimeInterval = 0, alternatives: [String] = []) {
+        self.text = text
+        self.confidence = confidence
+        self.timestamp = timestamp
+        self.duration = duration
+        self.alternatives = alternatives
+    }
+}
+
+/// Phase 0 spike: what does SFSpeechRecognizer actually report for confidence?
+/// Collects stats per session and prints one summary line when the session ends.
+/// Read the "KITTY spike" lines in the console to decide how read-back is triggered.
+nonisolated struct ConfidenceSpike {
+    var onDevice = false
+    var partials = 0
+    var partialsWithConfidence = 0
+    var partialWords = 0
+    var partialWordsWithConfidence = 0
+    var finalWords = 0
+    var finalWordsWithConfidence = 0
+    var finalLowConfidence = 0        // 0 < confidence < 0.5
+    var finalWithAlternatives = 0
+    var lastLogged = Date.distantPast
+
+    mutating func record(_ words: [SpokenWord], isFinal: Bool) {
+        let withConf = words.filter { $0.confidence > 0 }.count
+        if isFinal {
+            finalWords += words.count
+            finalWordsWithConfidence += withConf
+            finalLowConfidence += words.filter { $0.confidence > 0 && $0.confidence < 0.5 }.count
+            finalWithAlternatives += words.filter { !$0.alternatives.isEmpty }.count
+        } else {
+            partials += 1
+            if withConf > 0 { partialsWithConfidence += 1 }
+            partialWords += words.count
+            partialWordsWithConfidence += withConf
+        }
+    }
+
+    var summary: String {
+        "spike(\(onDevice ? "on-device" : "server")): partials \(partialsWithConfidence)/\(partials) with confidence, "
+        + "words \(partialWordsWithConfidence)/\(partialWords); final words \(finalWordsWithConfidence)/\(finalWords) with confidence, "
+        + "\(finalLowConfidence) low, \(finalWithAlternatives) with alternatives"
+    }
+}
+
 // MARK: - Speech to text
 
 @MainActor
@@ -48,6 +106,11 @@ final class SpeechRecognizer: ObservableObject {
     /// Called with the live transcript as you speak (and with "" when a session starts).
     var onPartial: ((String) -> Void)?
 
+    /// Words of the latest result (partial or final), with confidence and timing.
+    private(set) var words: [SpokenWord] = []
+
+    private var spike = ConfidenceSpike()
+
     private let recognizer = SFSpeechRecognizer(locale: .current)
         ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let capture = AudioCapture()
@@ -65,6 +128,8 @@ final class SpeechRecognizer: ObservableObject {
         guard !isRecording else { return }
         errorMessage = nil
         transcript = ""
+        words = []
+        spike = ConfidenceSpike()
         onPartial?("")
         delivered = false
         sessionID += 1
@@ -108,6 +173,7 @@ final class SpeechRecognizer: ObservableObject {
                 request.requiresOnDeviceRecognition = true
             }
             self.request = request
+            spike.onDevice = request.requiresOnDeviceRecognition
 
             // Mic setup runs off the main thread so the UI never freezes.
             Breadcrumb.log("5 starting microphone")
@@ -115,11 +181,13 @@ final class SpeechRecognizer: ObservableObject {
             Breadcrumb.log("6 microphone running")
             guard sessionID == id else { capture.stop(); return }   // cancelled while starting
 
-            task = Self.startTask(recognizer: recognizer, request: request) { [weak self] text, done in
+            task = Self.startTask(recognizer: recognizer, request: request) { [weak self] text, words, isFinal, done in
                 guard let self else { return }
                 Task { @MainActor in
                     guard self.sessionID == id else { return }
                     if let text {
+                        self.words = words
+                        self.spike.record(words, isFinal: isFinal)
                         self.transcript = text
                         self.onPartial?(text)
                         if self.autoStopOnSilence && !text.isEmpty { self.armTimer(seconds: 1.6) }
@@ -172,6 +240,7 @@ final class SpeechRecognizer: ObservableObject {
         guard !delivered else { return }
         delivered = true
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        Breadcrumb.log(spike.summary)
         cleanup()
         onFinished?(text)
     }
@@ -199,10 +268,22 @@ final class SpeechRecognizer: ObservableObject {
 
     nonisolated private static func startTask(recognizer: SFSpeechRecognizer,
                                               request: SFSpeechAudioBufferRecognitionRequest,
-                                              onUpdate: @escaping @Sendable (String?, Bool) -> Void) -> SFSpeechRecognitionTask {
+                                              onUpdate: @escaping @Sendable (String?, [SpokenWord], Bool, Bool) -> Void) -> SFSpeechRecognitionTask {
         recognizer.recognitionTask(with: request) { result, error in
+            let isFinal = result?.isFinal ?? false
             onUpdate(result?.bestTranscription.formattedString,
-                     (result?.isFinal ?? false) || error != nil)
+                     result.map { spokenWords(from: $0.bestTranscription) } ?? [],
+                     isFinal,
+                     isFinal || error != nil)
+        }
+    }
+
+    /// Full-transcription view: every segment with confidence, timing and the recogniser's alternatives.
+    nonisolated static func spokenWords(from transcription: SFTranscription) -> [SpokenWord] {
+        transcription.segments.map { seg in
+            SpokenWord(text: seg.substring, confidence: seg.confidence,
+                       timestamp: seg.timestamp, duration: seg.duration,
+                       alternatives: seg.alternativeSubstrings)
         }
     }
 }

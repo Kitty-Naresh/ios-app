@@ -20,23 +20,9 @@ final class VoiceConversation: ObservableObject {
         let id = UUID()
         var role: Role
         var text: String
+        var struck: Set<Int> = []           // positions of words you took back ("um", "no wait"...): shown struck through
         var filter: PanelFilter? = nil      // show matching tasks under this reply
         var taskIDs: [UUID] = []            // tasks this reply created: shown as cards you can swipe to delete
-    }
-
-    /// Something Kitty can act on: a complete thought, or a yes/no. Not a trailing fragment like "milk and".
-    static func isMeaningful(_ text: String) -> Bool {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return false }
-        let words = t.lowercased().split(whereSeparator: { !$0.isLetter && $0 != "'" }).map(String.init)
-        if ConfirmationManager.interpret(t) != .other { return true }
-        if t.hasSuffix(".") || t.hasSuffix("?") || t.hasSuffix("!") { return !words.isEmpty }
-        let dangling: Set<String> = ["and", "then", "also", "but", "or", "so", "to", "for", "with", "every", "on", "at", "in", "the",
-                                     "a", "an", "my", "our", "um", "uh", "er", "like", "plus", "after", "before", "because", "if",
-                                     "when", "that", "of", "by", "from", "into", "about", "until", "till", "each", "all", "some",
-                                     "is", "should", "needs", "need", "will", "has", "have"]
-        if t.hasSuffix(",") || dangling.contains(words.last ?? "") { return false }
-        return words.count >= 2
     }
 
     static let autoAddDelay: Double = 2
@@ -166,7 +152,7 @@ final class VoiceConversation: ObservableObject {
     func micTapped() {
         if micOn {
             let text = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if stage == .listening, !text.isEmpty, norm(text) != norm(processedText) {
+            if stage == .listening, !text.isEmpty, norm(SpeechCleaner.clean(text).text) != norm(processedText) {
                 beginProcessing()          // don't wait for the pause
             } else if stage == .listening, text.isEmpty {
                 pauseListening()
@@ -185,7 +171,8 @@ final class VoiceConversation: ObservableObject {
         turnText = full
         lastChange = Date()
         armIdle()
-        let spoken = VoiceTurnManager.splitFinalizer(full).text      // "done" at the end is not new content
+        // "done" at the end is not new content, and cleaning means "um" or "no wait" alone don't count as new words either.
+        let spoken = SpeechCleaner.clean(VoiceTurnManager.splitFinalizer(full).text).text
         if stage == .thinking || stage == .preview || stage == .question, norm(spoken) != norm(processedText) {
             interrupt()                    // you kept talking
         }
@@ -269,14 +256,14 @@ final class VoiceConversation: ObservableObject {
         }
         if let q = turns.nudgeQuestion(for: raw) {
             lastActedRaw = turnText
-            processedText = turnText
+            processedText = SpeechCleaner.clean(turnText).text
             turns.state.markProcessed(turnText)
             showQuestion(q)
             Breadcrumb.log("question: \(q.prefix(60))")
             if speakReplies { Task { await speakAndResume(q) } }
         } else {
             // Nothing to ask. If there was real content before a trailing "and" or "the", act on that. Never just drop it.
-            let trimmed = VoiceTurnManager.dropTrailingFiller(raw)
+            let trimmed = VoiceTurnManager.dropTrailingFiller(SpeechCleaner.clean(raw).text)
             if trimmed.split(separator: " ").count >= 2, VoiceTurnManager.norm(trimmed) != VoiceTurnManager.norm(processedText) {
                 beginProcessing(text: trimmed, final: true)
             } else if trimmed.split(separator: " ").count >= 3 {
@@ -288,28 +275,11 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    /// How long a silence must last before Kitty starts working. Short after a finished sentence,
-    /// long when you trail off on "and", "then", "to the"...
-    static func pauseSeconds(for text: String) -> Double {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = t.lowercased().split(whereSeparator: { !$0.isLetter && $0 != "'" }).map(String.init)
-        let last = words.last ?? ""
-        if t.hasSuffix(".") || t.hasSuffix("?") || t.hasSuffix("!") { return 1.0 }
-        let quick: Set<String> = ["yes", "yeah", "yep", "no", "nope", "okay", "ok", "cancel", "discard", "confirm", "stop"]
-        if words.count <= 2, words.allSatisfy({ quick.contains($0) }) { return 0.8 }
-        let dangling: Set<String> = ["and", "then", "also", "but", "or", "so", "to", "for", "with", "every", "on", "at", "in", "the",
-                                     "a", "an", "my", "our", "um", "uh", "er", "like", "plus", "after", "before", "because", "if",
-                                     "when", "that", "of", "by", "from", "into", "about", "until", "till", "each", "all", "some",
-                                     "other", "one", "two", "three", "is", "should", "needs", "need", "will", "has", "have"]
-        if t.hasSuffix(",") || dangling.contains(last) { return 2.6 }
-        if words.count <= 2 { return 2.2 }
-        return 1.5
-    }
-
     // MARK: Working out what you meant
 
     private func beginProcessing(text override: String? = nil, typed: Bool = false, final: Bool = false) {
-        let text = (override ?? turnText).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Everything downstream works on the cleaned words. The chat keeps the raw ones (see `liveAttributed`).
+        let text = SpeechCleaner.clean((override ?? turnText).trimmingCharacters(in: .whitespacesAndNewlines)).text
         guard !text.isEmpty else { return }
 
         // "yes" after a preview saves it, "cancel" throws it away. A bare "no" is not a discard: Kitty asks what to change.
@@ -408,7 +378,7 @@ final class VoiceConversation: ObservableObject {
         processingTask?.cancel()
         generation += 1
         let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said)) }
+        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
         lines.append(ChatLine(role: .kitty, text: "Okay, I didn't change anything."))
         resetTurn()
         Task { if micWanted { await startMic() } }
@@ -431,7 +401,7 @@ final class VoiceConversation: ObservableObject {
 
     private func finishTurn(you: String, reply: AgentReply) async {
         let said = you.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said)) }
+        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
         lines.append(ChatLine(role: .kitty, text: reply.message, filter: reply.spec.map { PanelFilter(spec: $0) },
                               taskIDs: reply.created))
         let made = reply.created.compactMap { id in TaskStore.shared.tasks.first { $0.id == id } }.map { (title: $0.title, id: $0.id) }
@@ -494,10 +464,17 @@ final class VoiceConversation: ObservableObject {
         return words.dropFirst(min(committedWords, words.count)).joined(separator: " ")
     }
 
+    /// Which words of `liveText` the cleaner removed (fillers, repeats, taken-back clauses). The bubble strikes them through.
+    var liveRemoved: Set<Int> {
+        let removed = SpeechCleaner.clean(turnText).removed
+        let offset = committedWords
+        return Set(removed.compactMap { $0 >= offset ? $0 - offset : nil })
+    }
+
     /// Kitty asks a question: what you said so far and the question both go into the chat, so the whole exchange stays visible.
     private func showQuestion(_ q: String) {
         let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said)) }
+        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
         lines.append(ChatLine(role: .kitty, text: q))
         committedWords = turnText.split(whereSeparator: { $0.isWhitespace }).count
         question = q
@@ -743,10 +720,24 @@ struct ConversationView: View {
         .padding(.horizontal, 12)
     }
 
-    private func youBubbleView(_ text: String, live: Bool) -> some View {
+    /// Your words as you said them. Anything the cleaner took out stays visible, struck through and dimmed.
+    private func spoken(_ text: String, struck: Set<Int>) -> AttributedString {
+        var out = AttributedString()
+        for (i, w) in SpeechCleaner.words(of: text).enumerated() {
+            var part = AttributedString(i == 0 ? w : " " + w)
+            if struck.contains(i) {
+                part.strikethroughStyle = .single
+                part.foregroundColor = .secondary
+            }
+            out += part
+        }
+        return out
+    }
+
+    private func youBubbleView(_ text: String, struck: Set<Int> = [], live: Bool) -> some View {
         HStack {
             Spacer(minLength: 48)
-            (Text(text) + Text(live ? " …" : "").foregroundStyle(.secondary))
+            (Text(spoken(text, struck: struck)) + Text(live ? " …" : "").foregroundStyle(.secondary))
                 .font(.body)
                 .padding(12)
                 .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -754,14 +745,14 @@ struct ConversationView: View {
     }
 
     private var youBubble: some View {
-        youBubbleView(convo.liveText, live: convo.stage == .listening)
+        youBubbleView(convo.liveText, struck: convo.liveRemoved, live: convo.stage == .listening)
     }
 
     @ViewBuilder
     private func lineView(_ line: VoiceConversation.ChatLine) -> some View {
         switch line.role {
         case .you:
-            youBubbleView(line.text, live: false)
+            youBubbleView(line.text, struck: line.struck, live: false)
         case .kitty:
             VStack(alignment: .leading, spacing: 10) {
                 // The list comes first. The words follow, and the rest of them opens on tap.

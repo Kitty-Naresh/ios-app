@@ -246,10 +246,36 @@ enum BulkDetector {
         return s
     }
 
+    /// Words that are often nouns too ("buy bottled water", "book flights"): a new action only when a determiner follows.
+    private static let nounLikeVerbs: Set<String> = ["water", "iron", "book", "order", "plan", "set", "file", "label", "walk", "dust",
+                                                      "polish", "steam", "heat", "clear", "fill", "pack", "drink", "cook", "mop", "load"]
+
+    /// "clean bathroom buy milk water the plants" (no commas, no "and"): a new verb that follows a finished action
+    /// ("clean bathroom") starts the next one. A verb after "to", "the", "and"... is part of the current action, and a
+    /// word that is usually a noun only starts one when it is followed by "the", "my"...
+    static func splitRunOns(_ piece: String) -> [String] {
+        let words = piece.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard words.count >= 4, ActionLexicon.verbs.contains(SpeechLexicon.bare(words[0])) else { return [piece] }
+        var out: [[String]] = [[words[0]]]
+        for i in 1..<words.count {
+            let w = SpeechLexicon.bare(words[i])
+            let prev = SpeechLexicon.bare(words[i - 1])
+            let objectSoFar = out[out.count - 1].count >= 2          // "clean bathroom" already has its object
+            let hasObject = words.count - i >= 2                     // the new action has one too
+            var starts = ActionLexicon.verbs.contains(w) && objectSoFar && hasObject
+                && !SpeechLexicon.dangling.contains(prev) && !SpeechLexicon.determiners.contains(prev)
+            if starts, nounLikeVerbs.contains(w) {
+                starts = SpeechLexicon.determiners.contains(SpeechLexicon.bare(words[i + 1])) && !["to", "of", "in", "on", "at", "for", "with", "from"].contains(SpeechLexicon.bare(words[i + 1]))
+            }
+            if starts { out.append([words[i]]) } else { out[out.count - 1].append(words[i]) }
+        }
+        return out.map { $0.joined(separator: " ") }
+    }
+
     /// Splits an utterance into verb-led actions. A piece without its own verb belongs to the piece before it
     /// ("buy milk and bread" is one action), and a bare verb joins the piece after it ("wash and fold the laundry").
     static func actionSegments(_ text: String) -> [String] {
-        let pieces = splitList(text)
+        let pieces = splitList(text).flatMap(splitRunOns)
         var out: [String] = []
         var carryVerb: String?
         for piece in pieces {

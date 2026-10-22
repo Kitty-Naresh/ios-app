@@ -356,4 +356,64 @@ final class KittyVoiceTurnTests: XCTestCase {
         XCTAssertEqual(Speaker.sentences(of: said).count, 2)
         XCTAssertGreaterThan(Speaker.pause(after: "What should I clean?"), Speaker.pause(after: "Okay."))
     }
+
+    // MARK: Messy speech reaches the gate and the model already cleaned
+
+    func testTheGateJudgesTheCleanedWords() {
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Um, add a task to clean the bathroom", silence: 2, lastActed: ""),
+                       .evaluate("add a task to clean the bathroom"))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "um uh", silence: 2, lastActed: ""), .keepListening)
+        // "clean the... no wait, wash the car" is one complete request
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean the... no wait, wash the car", silence: 2, lastActed: ""),
+                       .evaluate("wash the car"))
+    }
+
+    func testARepairWithNoCorrectionYetKeepsListeningInsteadOfAskingWhatToClean() {
+        for silence in [2.0, 4.0, 6.0] {
+            if case .hold = VoiceTurnManager.gate(utterance: "clean the bathroom, no wait", silence: silence, lastActed: "") {} else {
+                XCTFail("should keep waiting for the correction at \(silence)s")
+            }
+        }
+    }
+
+    func testTheModelOnlyEverSeesTheCleanedWords() async {
+        let engine = ScriptedEngine([nil])
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] })
+        _ = await m.decide(utterance: "um, clean the... no wait, wash the car", final: true)
+        let prompt = engine.prompts.first ?? ""
+        XCTAssertTrue(prompt.contains("wash the car"), prompt)
+        XCTAssertFalse(prompt.lowercased().contains("no wait"), prompt)
+        XCTAssertEqual(m.lastTrace.utterance, "wash the car")
+    }
+
+    func testTheDeltaIgnoresWhatWasTakenBack() {
+        let state = ConversationStateManager()
+        state.markProcessed("um, add milk")
+        XCTAssertEqual(state.delta(for: "add milk, uh, and bread"), "and bread")
+        XCTAssertEqual(state.lastProcessed, "add milk")
+    }
+
+    // MARK: Run-ons without commas
+
+    func testRunOnsAreSplitAtEachNewAction() {
+        let cases: [(String, [String])] = [
+            ("clean bathroom buy milk wash the car", ["clean bathroom", "buy milk", "wash the car"]),
+            ("clean the bathroom buy milk water the plants", ["clean the bathroom", "buy milk", "water the plants"]),
+            ("wash the car fold laundry", ["wash the car", "fold laundry"]),
+            ("call mom ask her to buy milk", ["call mom", "ask her to buy milk"]),
+            ("clean the bathroom buy milk, wash the car", ["clean the bathroom", "buy milk", "wash the car"])
+        ]
+        for (text, expected) in cases {
+            let a = BulkDetector.analyze(text)
+            XCTAssertTrue(a.isBulk, text)
+            XCTAssertEqual(a.segments, expected, text)
+        }
+    }
+
+    func testSingleActionsAreNeverSplit() {
+        for text in ["add a task to clean the bathroom", "buy fresh water bottles", "buy bottled water filters", "remember to lock the door",
+                     "take out the trash", "clean the kitchen sink", "ask her to buy milk", "water the plants every morning"] {
+            XCTAssertFalse(BulkDetector.analyze(text).isBulk, text)
+        }
+    }
 }

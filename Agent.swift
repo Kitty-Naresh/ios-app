@@ -2639,38 +2639,13 @@ struct LocalSemanticPrechecker {
         case mayBeComplete
     }
 
-    static let fillers: Set<String> = ["um", "uh", "er", "erm", "hmm"]
-
-    static let dangling: Set<String> = [
-        "and", "but", "or", "then", "for", "about", "to", "um", "uh", "er", "erm", "hmm", "actually", "wait",
-        "the", "a", "an", "my", "our", "your", "this", "that", "these", "those", "some", "of", "in", "on", "at", "with",
-        "from", "into", "by", "every", "each", "if", "because", "so", "also", "plus", "like", "is", "should", "needs", "need",
-        "will", "has", "have", "let's", "lets", "after", "before", "until", "till"
-    ]
-
-    static let determiners: Set<String> = [
-        "the", "a", "an", "my", "our", "your", "this", "that", "these", "those", "some", "every", "each", "all", "any",
-        "of", "in", "on", "at", "to", "for", "with", "from"
-    ]
-
-    static let questionStarters: Set<String> = [
-        "what", "what's", "which", "show", "list", "tell", "who", "when", "how", "do", "did", "does", "is", "are", "any", "anything"
-    ]
-
-    static let frames: [[String]] = [
-        ["add", "a", "task", "to"], ["add", "a", "task", "for"], ["add", "a", "task"], ["add", "task", "to"], ["add", "task"],
-        ["create", "a", "task", "to"], ["create", "a", "task", "for"], ["create", "a", "task"],
-        ["create", "a", "routine", "to"], ["create", "a", "routine"],
-        ["create", "a", "playbook", "to"], ["create", "a", "playbook", "for"], ["create", "a", "playbook"],
-        ["make", "a", "task", "to"], ["make", "a", "task"], ["remind", "me", "to"],
-        ["i", "need", "to"], ["i", "want", "to"], ["i", "have", "to"], ["i", "should"], ["i'd", "like", "to"],
-        ["can", "you"], ["could", "you"], ["would", "you"], ["please"], ["let's"], ["lets"]
-    ]
-
-    static let acknowledgements: Set<String> = [
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "no", "nope", "done", "save it", "save", "go ahead", "confirm",
-        "that's all", "thats all", "that is all", "that's it", "thats it", "cancel", "discard", "never mind", "nevermind"
-    ]
+    // The word lists live in SpeechLexicon so the gate, the cleaner and this prechecker share one copy.
+    static let fillers = SpeechLexicon.fillers
+    static let dangling = SpeechLexicon.dangling
+    static let determiners = SpeechLexicon.determiners
+    static let questionStarters = SpeechLexicon.questionStarters
+    static let frames = SpeechLexicon.frames
+    static let acknowledgements = SpeechLexicon.acknowledgements
 
     static func tokens(_ text: String) -> [String] {
         text.lowercased()
@@ -3081,13 +3056,14 @@ final class ConversationStateManager {
         if !on, phase == .listening { move(to: .idle) }
     }
 
-    func markProcessed(_ utterance: String) { lastProcessed = utterance }
+    /// Stored cleaned, so "um, clean the... no wait, wash the car" and "wash the car" count as the same words.
+    func markProcessed(_ utterance: String) { lastProcessed = SpeechCleaner.clean(utterance).text }
 
     /// The words said since the pending draft or question was built. The whole utterance when there is none.
     func delta(for utterance: String) -> String {
-        let whole = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        let whole = SpeechCleaner.clean(utterance).text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !lastProcessed.isEmpty else { return whole }
-        let t = VoiceTurnManager.norm(utterance), p = VoiceTurnManager.norm(lastProcessed)
+        let t = VoiceTurnManager.norm(whole), p = VoiceTurnManager.norm(lastProcessed)
         guard !p.isEmpty, t.hasPrefix(p) else { return whole }
         let rest = String(t.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
         return rest.isEmpty ? whole : rest
@@ -3178,7 +3154,6 @@ struct TurnTrace {
 
 @MainActor
 final class VoiceTurnManager {
-    static let shortPause: TimeInterval = 0.8       // breathing: always keep listening
     static let longPause: TimeInterval = 1.6        // long enough to check whether the thought is finished
     static let finalizerDelay: TimeInterval = 0.5   // after "done"
     static let quickNudgeAfter: TimeInterval = 3.5  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
@@ -3240,11 +3215,18 @@ final class VoiceTurnManager {
     }
 
     /// Decides what to do about the speech so far. The model is never involved here.
+    /// The words are cleaned first (fillers, repeats, "no wait" repairs), so everything below judges what was meant.
+    /// `lastActed` is compared as raw speech: it is the unedited words Kitty last looked at.
     static func gate(utterance: String, silence: TimeInterval, lastActed: String) -> Gate {
-        let raw = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return .keepListening }
+        let said = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty else { return .keepListening }
         if silence >= nudgeAfter { return .nudge }
-        if norm(raw) == norm(lastActed) { return .keepListening }               // already looked at, nothing new said
+        if norm(said) == norm(lastActed) { return .keepListening }              // already looked at, nothing new said
+
+        let cleaned = SpeechCleaner.clean(said)
+        let raw = cleaned.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.isEmpty { return .keepListening }                                // only fillers, or everything was taken back
+        if cleaned.pendingRepair { return .hold("waiting for the correction") } // "clean the... no wait" and then nothing yet
 
         let (text, isFinal) = splitFinalizer(raw)
         if isFinal {
@@ -3293,7 +3275,8 @@ final class VoiceTurnManager {
         return nil
     }
 
-    func nudgeQuestion(for utterance: String) -> String? {
+    func nudgeQuestion(for spoken: String) -> String? {
+        let utterance = SpeechCleaner.clean(spoken).text
         if let p = state.pendingProposal, let q = p.prompt { return q }
         guard state.clarify.rounds < ClarificationStateManager.maxRounds else { return nil }
         let t = LocalSemanticPrechecker.tokens(utterance)
@@ -3313,7 +3296,8 @@ final class VoiceTurnManager {
 
     /// One model call at most for one likely-complete turn. The answer is validated before anything can be saved.
     /// `final` means the user has stopped (a long silence, or they typed it): a "wait" is no longer an answer.
-    func decide(utterance: String, now: Date = Date(), final: Bool = false) async -> TurnResult {
+    func decide(utterance spoken: String, now: Date = Date(), final: Bool = false) async -> TurnResult {
+        let utterance = SpeechCleaner.clean(spoken).text      // idempotent: already-clean text passes through unchanged
         lastTrace = TurnTrace(utterance: utterance)
         let result = await route(utterance: utterance, now: now, final: final)
             state.record(result)
