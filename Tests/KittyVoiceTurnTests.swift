@@ -440,4 +440,61 @@ final class KittyVoiceTurnTests: XCTestCase {
         guard case .wait = r else { return XCTFail("expected wait, got \(r)") }
         XCTAssertEqual(m.modelCalls, 1)
     }
+
+    // MARK: Stopping Kitty and narrowing a list
+
+    func testLongListRepliesAreSpokenShortAndInviteANarrowerQuestion() {
+        let message = "You have 8 open tasks. Call the dentist (Me), Renew passport (Me), Pay rent (Me)."
+        let spoken = Speaker.spokenForm(of: message, isList: true)
+        XCTAssertTrue(spoken.hasPrefix("You have 8 open tasks."))
+        XCTAssertFalse(spoken.contains("dentist"))
+        XCTAssertTrue(spoken.contains("narrow"))
+        XCTAssertEqual(Speaker.spokenForm(of: message, isList: false), message)
+        XCTAssertEqual(Speaker.spokenForm(of: "You have no open tasks.", isList: true), "You have no open tasks.")
+    }
+
+    func testWhichPhrasesNarrowTheLastList() {
+        for text in ["only tomorrow", "just today", "only overdue", "what about done ones", "and for tomorrow", "only the maid",
+                     "just personal", "now everyone", "only completed"] {
+            XCTAssertTrue(TaskAgent.isViewRefinement(text), text)
+        }
+        for text in ["wash the car tomorrow", "buy milk", "show tasks for tomorrow", "add a task for today", "yes", "remind me tomorrow",
+                     "what time is it", "clean the bathroom", "okay"] {
+            XCTAssertFalse(TaskAgent.isViewRefinement(text), text)
+        }
+    }
+
+    func testAFollowUpNarrowsTheListInsteadOfStartingOver() async {
+        let engine = ScriptedEngine([decision("view_tasks")])
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] })
+        m.ruleFallbackEnabled = false
+        m.state.setListening(true)
+        guard case .reply(let first) = await m.decide(utterance: "Show me personal tasks", now: now), let base = first.spec else {
+            return XCTFail("expected a list")
+        }
+        let calls = m.modelCalls
+
+        guard case .reply(let second) = await m.decide(utterance: "only tomorrow", now: now), let narrowed = second.spec else {
+            return XCTFail("expected a narrowed list")
+        }
+        XCTAssertEqual(m.lastTrace.route, "view-refine")
+        XCTAssertEqual(m.modelCalls, calls, "a refinement needs no model call")
+        XCTAssertEqual(narrowed.day, .tomorrow)
+        XCTAssertEqual(narrowed.assignees, base.assignees, "the person filter stays")
+
+        guard case .reply(let third) = await m.decide(utterance: "and only overdue", now: now), let overdue = third.spec else {
+            return XCTFail("expected another narrowed list")
+        }
+        XCTAssertTrue(overdue.overdueOnly)
+        XCTAssertEqual(overdue.assignees, base.assignees)
+    }
+
+    func testARefinementWithNoListOnScreenIsNotTreatedAsOne() async {
+        let engine = ScriptedEngine([decision("clarify", question: "What would you like to see?")])
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] })
+        m.ruleFallbackEnabled = false
+        m.state.setListening(true)
+        _ = await m.decide(utterance: "only tomorrow", now: now)
+        XCTAssertNotEqual(m.lastTrace.route, "view-refine")
+    }
 }

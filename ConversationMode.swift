@@ -37,6 +37,8 @@ final class VoiceConversation: ObservableObject {
     @Published private(set) var committedWords = 0
     @Published private(set) var countdownActive = false
     @Published private(set) var isStale = false         // you kept talking: the preview is out of date
+    /// Kitty is talking. The mic is off then, so tapping the mic button stops her and starts listening.
+    @Published private(set) var isSpeaking = false
     @Published private(set) var micOn = false { didSet { turns.state.setListening(micOn) } }
     @Published private(set) var errorMessage: String?
 
@@ -158,6 +160,7 @@ final class VoiceConversation: ObservableObject {
 
     /// Tap the mic: "I'm done" while you are talking, mute when there is nothing said, or start listening.
     func micTapped() {
+        if isSpeaking { stopSpeaking(); return }
         if micOn {
             let text = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
             if stage == .listening, !text.isEmpty, norm(SpeechCleaner.clean(text).text) != norm(processedText) {
@@ -397,6 +400,7 @@ final class VoiceConversation: ObservableObject {
     func submitTyped(_ text: String) {
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty else { return }
+        stopSpeaking()
         let wasListening = micOn
         interrupt()
         carry = join(turnText, typed)
@@ -417,7 +421,7 @@ final class VoiceConversation: ObservableObject {
         turns.state.noteCreated(made)
         resetTurn()
         if speakReplies {
-            await speakAndResume(reply.message)
+            await speakAndResume(Speaker.spokenForm(of: reply.message, isList: reply.spec != nil))
         } else if micWanted {
             await startMic()               // a fresh recognition session for the next thing you say
         }
@@ -449,9 +453,18 @@ final class VoiceConversation: ObservableObject {
     func speakAndResume(_ text: String) async {
         speech.cancel()
         micOn = false
+        isSpeaking = true
         await Speaker.shared.speakAndWait(text)
+        isSpeaking = false
         guard active, micWanted else { return }
         await startMic()
+    }
+
+    /// Cut Kitty off. The pending `speakAndResume` then carries on and opens the mic, so you can narrow the list or say the next thing.
+    func stopSpeaking() {
+        guard isSpeaking else { return }
+        Speaker.stopIfActive()
+        micWanted = true
     }
 
     func speak(_ text: String) { Task { await speakAndResume(text) } }
@@ -926,11 +939,12 @@ struct ConversationView: View {
 
     private var statusText: String {
         switch convo.stage {
+        case .listening where convo.isSpeaking: return "Kitty is speaking. Tap to stop and talk"
         case .listening: return convo.turnText.isEmpty ? "Listening…" : "Listening… tap the mic when you're done"
         case .thinking: return "Thinking…"
         case .preview: return convo.proposal?.autoConfirm == true && convo.autoAdd ? "Say “discard” to stop, or keep talking" : "Say “yes” to confirm, or keep talking"
         case .question: return "Go ahead, I'm listening"
-        case .idle: return convo.micOn ? "" : "Tap the mic to talk"
+        case .idle: return convo.isSpeaking ? "Kitty is speaking. Tap to stop and talk" : (convo.micOn ? "" : "Tap the mic to talk")
         }
     }
 
@@ -953,7 +967,7 @@ struct ConversationView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
                     .background(Color.cardBackground, in: Capsule())
-                MicButton(on: convo.micOn, busy: convo.stage == .thinking) { convo.micTapped() }
+                MicButton(on: convo.micOn, busy: convo.stage == .thinking, speaking: convo.isSpeaking) { convo.micTapped() }
             }
         }
         .padding(.horizontal, 16)
@@ -966,6 +980,7 @@ struct ConversationView: View {
 struct MicButton: View {
     let on: Bool
     var busy = false
+    var speaking = false           // Kitty is talking: the button becomes "stop"
     var action: () -> Void
     @State private var pulse = false
 
@@ -976,14 +991,15 @@ struct MicButton: View {
                     Circle().fill(Color.accentColor.opacity(0.18)).frame(width: 82, height: 82)
                         .scaleEffect(pulse ? 1.15 : 0.9)
                 }
-                Circle().fill(on ? Color.accentColor : Color.gray.opacity(0.55)).frame(width: 58, height: 58)
-                Image(systemName: on ? "mic.fill" : "mic.slash.fill")
+                Circle().fill(speaking ? Color.orange : (on ? Color.accentColor : Color.gray.opacity(0.55))).frame(width: 58, height: 58)
+                Image(systemName: speaking ? "stop.fill" : (on ? "mic.fill" : "mic.slash.fill"))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
             }
             .frame(width: 82, height: 82)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(speaking ? "Stop Kitty speaking" : (on ? "Microphone on" : "Microphone off"))
         .onAppear {
             withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { pulse = true }
         }

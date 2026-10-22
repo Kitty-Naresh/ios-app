@@ -505,6 +505,15 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// What Kitty says aloud for a reply. A list is long to listen to and is already on screen, so she says the headline and
+    /// invites a narrower question instead of reading every task.
+    nonisolated static func spokenForm(of message: String, isList: Bool) -> String {
+        guard isList else { return message }
+        let parts = sentences(of: speakable(message))
+        guard parts.count > 1, let headline = parts.first else { return message }
+        return headline + " The list is on screen. Say a day, a person or a category to narrow it."
+    }
+
     nonisolated static func sentences(of text: String) -> [String] {
         var out: [String] = []
         text.enumerateSubstrings(in: text.startIndex..., options: [.bySentences, .substringNotRequired]) { _, range, _, _ in

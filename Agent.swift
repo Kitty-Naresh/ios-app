@@ -1641,7 +1641,7 @@ extension TaskAgent {
     // MARK: Questions
 
     @MainActor
-    static func askReply(_ text: String, useModel: Bool = true) async -> AgentReply {
+    static func askReply(_ text: String, useModel: Bool = true, base: TaskLookupSpec? = nil) async -> AgentReply {
         if text.lowercased().contains("playbook") { return playbookReply(text) }
         if isRoutineQuestion(text) { return AgentReply(message: routinesSummary(), didAdd: false) }
         var spec = useModel ? await TaskPlanner.interpretQuery(text) : TaskPlanner.ruleQuery(text)
@@ -1678,6 +1678,7 @@ extension TaskAgent {
             spec.day = .anytime
             spec.overdueOnly = false
         }
+        if let base { spec = refine(base, with: spec, words: words, lower: lower) }
         let facts = answer(spec)
         var message = facts
         // Short answers are already fine. Longer ones get worded by the model, following the Kitty guide.
@@ -1686,6 +1687,53 @@ extension TaskAgent {
             message = worded
         }
         return AgentReply(message: message, didAdd: false, spec: spec)
+    }
+
+    /// A follow-up like "only tomorrow" or "just the maid" changes only what it mentions. Everything else stays as it was.
+    @MainActor
+    static func refine(_ base: TaskLookupSpec, with new: TaskLookupSpec, words: Set<String>, lower: String) -> TaskLookupSpec {
+        var out = base
+        if TaskCategory.mentioned(in: lower) != nil { out.category = new.category }
+        if words.contains("tomorrow") { out.day = .tomorrow }
+        else if !words.isDisjoint(with: ["today", "tonight"]) || lower.contains("this morning") { out.day = .today }
+        else if lower.contains("any day") || lower.contains("all days") || lower.contains("any date") || words.contains("anytime") { out.day = .anytime }
+        if words.contains("overdue") || lower.contains("backlog") || words.contains("late") || lower.contains("past due") {
+            out.overdueOnly = true; out.status = .open
+        } else if new.status != .open || !words.isDisjoint(with: ["open", "pending", "remaining", "outstanding", "incomplete", "unfinished"]) || lower.contains("all tasks") {
+            out.status = new.status; out.overdueOnly = false
+        }
+        if !words.isDisjoint(with: ["everyone", "anyone", "everybody"]) {
+            out.assignees = []
+        } else if mentionedAssignee(in: lower) != nil || isMyTasksQuestion(lower) || !words.isDisjoint(with: ["personal", "mine"]) {
+            out.assignees = new.assignees
+        }
+        if new.profileID != nil { out.profileID = new.profileID; out.assignees = []; out.category = nil; out.day = .anytime }
+        return out
+    }
+
+    /// Is this short phrase a change to the list just shown ("only tomorrow", "just plants", "what about the maid")?
+    @MainActor
+    static func isViewRefinement(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let words = lower.split(whereSeparator: { !$0.isLetter }).map(String.init)
+        guard let first = words.first, words.count <= 9 else { return false }
+        let doing: Set<String> = ["add", "create", "remind", "buy", "call", "clean", "delete", "remove", "complete", "mark", "rename", "assign",
+                                  "move", "reschedule", "schedule", "make", "teach", "clear", "finish", "wash", "fix", "pay", "book", "order",
+                                  "cook", "water", "send", "take", "bring", "pick", "cancel", "yes", "no", "okay", "thanks"]
+        guard words.allSatisfy({ !doing.contains($0) }) else { return false }
+        let lead: Set<String> = ["only", "just", "and", "also", "but", "now", "instead", "for", "what", "whats", "how", "show", "filter", "narrow",
+                                 "those", "them", "same", "with", "in", "on", "by", "any", "which", "not", "without", "except", "list"]
+        let daySignals: Set<String> = ["today", "tomorrow", "tonight", "overdue", "late", "done", "completed", "open", "pending", "personal",
+                                       "family", "mine", "everyone", "anyone", "everything", "all"]
+        let wordSignals = words.contains { daySignals.contains($0) } || lower.contains("this morning") || lower.contains("any day")
+        let signal = wordSignals || TaskCategory.mentioned(in: lower) != nil || mentionedAssignee(in: lower) != nil
+        guard signal else { return false }
+        guard lead.contains(first) || daySignals.contains(first) || TaskCategory.mentioned(in: first) != nil
+                || mentionedAssignee(in: first) != nil else { return false }
+        // "show tasks for tomorrow" is a whole new question; "only tomorrow" narrows the last one.
+        let namesTasks = words.contains { ["task", "tasks", "todo", "todos", "list"].contains($0) }
+        if namesTasks, !["only", "just", "and", "also", "now", "but", "instead", "same"].contains(first) { return false }
+        return true
     }
 
     // MARK: Adding
@@ -3102,6 +3150,9 @@ final class ConversationStateManager {
         pendingPlanned = planned
     }
 
+    /// The last list Kitty showed: "only personal", "just tomorrow" then narrow it instead of starting over.
+    var lastView: TaskLookupSpec?
+
     func clearPending() {
         pendingTitles = []
         pendingPlaybook = nil
@@ -3134,6 +3185,7 @@ final class ConversationStateManager {
 
     func reset() {
         clearPending()
+        lastView = nil
         recent = []
         lastCreatedID = nil
         lastCreatedAt = nil
@@ -3335,6 +3387,8 @@ final class VoiceTurnManager {
         let utterance = SpeechCleaner.clean(spoken).text      // idempotent: already-clean text passes through unchanged
         lastTrace = TurnTrace(utterance: utterance)
         let result = await route(utterance: utterance, now: now, final: final)
+        if case .reply(let r) = result, let shown = r.spec { state.lastView = shown }
+        else if case .wait = result {} else { state.lastView = nil }
             state.record(result)
         switch result {
         case .question, .proposal: state.markProcessed(utterance)
@@ -3377,6 +3431,13 @@ final class VoiceTurnManager {
             case .newSpeech:
                 state.readBack = nil                     // they moved on: this is a new request
             }
+        }
+
+        // 0b. "Only tomorrow", "just the maid": narrow the list Kitty just showed instead of starting a new request.
+        if let base = state.lastView, state.pendingProposal == nil, !state.drafts.hasContent, state.clarification == nil,
+           TaskAgent.isViewRefinement(delta) {
+            lastTrace.route = "view-refine"
+            return .reply(await TaskAgent.askReply(delta, useModel: false, base: base))
         }
 
         // 1. Something is waiting for a yes or a no.
