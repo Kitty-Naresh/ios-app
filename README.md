@@ -1,3 +1,32 @@
+# Kitty v31: long, noisy speech
+
+Someone who says "my in-laws are coming this Saturday and the house is a mess, so the maid should clean the bathrooms on Friday, oh and
+I need to buy flowers, also remind me to call the caterer" gets four tasks, not a story. The model still only classifies and extracts;
+Swift decides what is saved.
+
+- **Long turns** (LongTurn.swift). `LongTurnAnalyzer` splits the speech into clauses and tells the asks from the chatter. It keeps one
+  shared context (a day, an occasion) and one action clause per ask. A person (the maid, the driver) belongs to the clause that names
+  them as the one doing it, not to "pay the maid". The occasion goes into the notes ("For in-laws"). Chatter ("so tired today") never
+  becomes a task and its "today" is never a due date.
+- **Fewer, smaller model calls.** A long turn sends a digest (the context first, then one line per action) instead of the ramble: at most
+  4 actions per call and at most 3 calls. Whatever the model leaves out, or whenever it only says "wait", comes back from the clauses, so
+  nothing the user asked for is lost. `BulkValidator` drops what was invented, and a day or person the model spread to every task stays
+  only on the task that said it.
+- **A day nobody said is asked, never written.** After the preview Kitty asks: "I picked these because of Saturday, for in-laws. Should I
+  tag the ones without a date as due Saturday?" Yes tags only the undated tasks and shows the preview again. No leaves them dateless.
+  Anything else drops the question. A task with its own day ("Friday", "next week") keeps it.
+- **Preview** shows a "Used:" line (what was taken from the story) and a collapsed "Skipped (N)" list of what was heard but not made a
+  task. Tap to add one back; saying "also add ..." works too.
+- **Patience** (`PauseProfile`, in Agent.swift). Kitty measures the gaps between your words (median and 90th percentile, kept on the
+  device only) and waits longer for someone who talks slowly. After a comma or a connector ("... the bathrooms, and") and deep in a long
+  unfinished turn she waits longer still; a short "yes" after a long preview does not count as a long unfinished turn.
+- **Live "Hearing N tasks" chip** while you talk (`HearingChip`, throttled, from the partial words alone, no model call).
+- **Evals** (Tests/KittyEvals.swift, EVALS.md section K): 30 cases (108-137) with a scripted model. Four more metrics: K1 task recall,
+  K2 task precision, K3 chatter-as-task rate, K4 context-carry accuracy. `testFullSuiteAndMetrics` asserts K1, K2 and K4 are at least 90%
+  and K3 at most 5%. They measure the rules around the model, not Apple's model: `RealModelKTests` (set KITTY_REAL_MODEL=1) runs the
+  cases against the real model, and REAL_MODEL_RUNS.md says honestly that this has not run yet (the model was "not ready" on this Mac).
+  Note: the eval cases that use the local rules read the list names from UserDefaults, so the runner clears them first.
+
 # Kitty v30: bulk creation, slot-filling clarification, one-shot confirmation, eval suite
 
 Extends v29 (nothing replaced): the app still gates, the model still decides, Swift still validates.

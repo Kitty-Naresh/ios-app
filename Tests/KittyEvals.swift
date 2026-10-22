@@ -1501,6 +1501,17 @@ enum EvalCatalogue {
         6. Bulk-split accuracy  7. Duplicate rate  8. Invented-field rate  9. Confirmation-loop rate
         10. Clarification-loop rate  11. Save success rate  12. Completion rate  13. Response quality (judge)
 
+        For the long and noisy cases (K), four more, with the thresholds the test asserts:
+
+        K1. Task recall (long turns) at least 90%: of the tasks the speaker asked for, how many were made.
+        K2. Task precision (long turns) at least 90%: of the tasks made, how many were asked for.
+        K3. Chatter-as-task rate at most 5%: tasks whose title is the story, not an ask.
+        K4. Context-carry accuracy at least 90%: a shared day or person lands on the right tasks (and only those), and a day that
+        was not said is asked about, never written in.
+
+        The K cases use a scripted model, so these measure the rules around the model. `RealModelKTests` (opt in with
+        KITTY_REAL_MODEL=1) is the check against the real model; see REAL_MODEL_RUNS.md.
+
         """
         return out
     }
@@ -1577,6 +1588,7 @@ final class KittyEvals: XCTestCase {
         XCTAssertGreaterThanOrEqual(m.extractionAccuracy, 0.98)
         // Long and noisy turns, with the scripted model: what is asked for is made, the chatter is not, the context lands right.
         XCTAssertGreaterThanOrEqual(m.taskRecall, 0.90, "K recall")
+        XCTAssertGreaterThanOrEqual(m.taskPrecision, 0.90, "K precision")
         XCTAssertLessThanOrEqual(m.chatterAsTaskRate, 0.05, "K chatter-as-task")
         XCTAssertGreaterThanOrEqual(m.contextCarryAccuracy, 0.90, "K context carry")
     }
