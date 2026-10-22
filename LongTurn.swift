@@ -36,6 +36,7 @@ struct ActionClause: Equatable {
     var dueLabel: String? = nil
     var assignee: String? = nil      // "the maid should ..." -> Househelp
     var clause = 0                   // which clause it came from
+    var source = ""                  // that clause as said: where dates and names for this action may be looked for
     var scheduled = false            // "every morning": a routine, not a one-off
 }
 
@@ -287,7 +288,7 @@ enum LongTurnAnalyzer {
                     let routine = BulkDetector.hasSchedule(text)
                     let title = TaskPlanner.tidyTitle(text, removingDay: false)
                     turn.actions.append(ActionClause(text: text, title: title.isEmpty ? text : title, due: day, dueLabel: label,
-                                                     assignee: who, clause: index, scheduled: routine))
+                                                     assignee: who, clause: index, source: lower, scheduled: routine))
                 }
                 continue
             }
@@ -313,5 +314,47 @@ enum LongTurnAnalyzer {
         }
         if let o = turn.context.occasion { turn.context.notes = "For " + o }
         return turn
+    }
+}
+
+// MARK: The digest the model reads instead of the whole ramble
+
+extension LongTurnAnalyzer {
+    /// "Context: Saturday, for in-laws." then one line per action. Fits `budget` characters by shortening the longest lines'
+    /// wording, never by dropping the first action or cutting the front.
+    static func digest(context: SharedContext, actions: [ActionClause], budget: Int = 900) -> String {
+        func render(_ maxWords: Int) -> String {
+            var lines: [String] = []
+            if let used = context.usedLine { lines.append("Context: " + String(used.prefix(120)) + ".") }
+            for a in actions {
+                let words = a.text.split(whereSeparator: { $0.isWhitespace })
+                var text = words.prefix(maxWords).joined(separator: " ")
+                if words.count > maxWords { text += "…" }
+                var extra: [String] = []
+                if let d = a.dueLabel { extra.append(d) }
+                if let who = a.assignee { extra.append(who) }
+                lines.append("- " + text + (extra.isEmpty ? "" : " (" + extra.joined(separator: ", ") + ")"))
+            }
+            return lines.joined(separator: "\n")
+        }
+        var maxWords = 14
+        var out = render(maxWords)
+        while out.count > budget, maxWords > 3 {
+            maxWords -= 1
+            out = render(maxWords)
+        }
+        return out
+    }
+
+    /// Groups of at most `size` actions for separate model calls, at most `maxCalls` groups. What does not fit is returned
+    /// as `rest` and goes to the rule planner.
+    static func chunks(_ actions: [ActionClause], size: Int = 4, maxCalls: Int = 3) -> (groups: [[ActionClause]], rest: [ActionClause]) {
+        var groups: [[ActionClause]] = []
+        var i = 0
+        while i < actions.count, groups.count < maxCalls {
+            groups.append(Array(actions[i..<min(i + size, actions.count)]))
+            i += size
+        }
+        return (groups, i < actions.count ? Array(actions[i...]) : [])
     }
 }

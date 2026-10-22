@@ -2677,15 +2677,23 @@ final class DecisionEngine: DecisionProviding {
 
 /// The short per-turn prompt. It never carries the conversation history.
 enum PromptBuilder {
-    static let maxUtteranceCharacters = 600
+    /// An utterance with no clear actions that is still too long keeps its beginning and its end; the front is never cut off.
+    static let maxUtteranceCharacters = 900
     static let maxCategories = 12
 
     static let maxContextCharacters = 300
 
+    /// `digest`: for a long turn, the shared context and one line per action instead of the whole rambling utterance.
     static func build(utterance: String, pendingTask: String?, pendingPlaybook: String?,
-                      knownCategories: [String], now: Date, calendar: Calendar = .current, context: String = "") -> String {
+                      knownCategories: [String], now: Date, calendar: Calendar = .current, context: String = "",
+                      digest: String? = nil) -> String {
         var u = utterance.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "'")
-        if u.count > maxUtteranceCharacters { u = "…" + String(u.suffix(maxUtteranceCharacters)) }
+        if u.count > maxUtteranceCharacters {
+            let half = maxUtteranceCharacters / 2
+            u = String(u.prefix(half)) + " … " + String(u.suffix(half))
+        }
+        let said = digest.map { "Current utterance (a long turn, chatter removed; one action per line):\n" + $0.replacingOccurrences(of: "\"", with: "'") }
+            ?? "Current utterance: \"\(u)\""
         let categories = knownCategories.prefix(maxCategories).joined(separator: ", ")
         let pendingLabel = pendingTask.map { String($0.prefix(80)) } ?? "none"
         let playbookLabel = pendingPlaybook.map { String($0.prefix(80)) } ?? "none"
@@ -2695,7 +2703,7 @@ enum PromptBuilder {
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"
         return """
-        Current utterance: "\(u)"
+        \(said)
         Pending task: \(pendingLabel)
         Pending playbook: \(playbookLabel)
         Known categories: \(categories.isEmpty ? "none" : categories)
@@ -3326,6 +3334,8 @@ struct TurnTrace {
     var modelOutput: String?
     var validation: String?
     var result = ""
+    var modelCallCount = 0          // how many model calls this turn used (a long turn can use up to 3)
+    var chunks = 0                  // how many groups of actions a long turn was split into
 }
 
 @MainActor
@@ -3629,10 +3639,17 @@ final class VoiceTurnManager {
         } else if analysis.isBulk {
             lines.append("These look like \(analysis.segments.count) separate items: " + analysis.segments.joined(separator: " | ") + ".")
         }
+        // A long turn: the model reads a digest of the action clauses (a few at a time), never the whole ramble.
+        let longTurn: LongTurn? = answering ? nil : analysis.turn.flatMap { $0.actions.isEmpty ? nil : $0 }
+        if analysis.isBulk, let turn = longTurn {
+            return await longBulkTurn(turn, analysis: analysis, lines: lines, utterance: utterance, ctx: ctx, now: now)
+        }
         let prompt = PromptBuilder.build(utterance: utterance, pendingTask: state.pendingTaskLabel, pendingPlaybook: state.pendingPlaybook,
-                                         knownCategories: knownCategories(), now: now, context: lines.joined(separator: "\n"))
+                                         knownCategories: knownCategories(), now: now, context: lines.joined(separator: "\n"),
+                                         digest: longTurn.map { LongTurnAnalyzer.digest(context: $0.context, actions: $0.actions) })
         lastTrace.prompt = prompt
         modelCalls += 1
+        lastTrace.modelCallCount = 1
 
         if analysis.isBulk, let bulk = await engine.decideBulk(prompt: prompt) {
             lastTrace.route = "model-bulk"
@@ -3683,6 +3700,59 @@ final class VoiceTurnManager {
             return .reply(AgentReply(message: "I couldn't reach the on-device model.", didAdd: false))
         }
         return await TaskAgent.propose(utterance)
+    }
+
+    /// Up to three model calls of at most four actions each, merged into one draft. What the model leaves out (or what does not
+    /// fit in three calls) is added back from the action clauses by `BulkValidator`, so nothing the user asked for is lost.
+    private func longBulkTurn(_ turn: LongTurn, analysis: BulkDetector.Analysis, lines: [String], utterance: String,
+                              ctx: ValidationContext, now: Date) async -> TurnResult {
+        let (groups, _) = LongTurnAnalyzer.chunks(turn.actions)
+        lastTrace.chunks = groups.count
+        var merged = BulkDecisionValue(action: "create_tasks")
+        var answered = 0
+        var outputs: [String] = []
+        for (i, group) in groups.enumerated() {
+            var chunkLines = lines.filter { !$0.hasPrefix("These look like") }
+            chunkLines.append("These look like \(group.count) separate items: " + group.map(\.text).joined(separator: " | ") + ".")
+            let prompt = PromptBuilder.build(utterance: "", pendingTask: state.pendingTaskLabel, pendingPlaybook: state.pendingPlaybook,
+                                             knownCategories: knownCategories(), now: now, context: chunkLines.joined(separator: "\n"),
+                                             digest: LongTurnAnalyzer.digest(context: turn.context, actions: group))
+            if i == 0 { lastTrace.prompt = prompt }
+            modelCalls += 1
+            lastTrace.modelCallCount += 1
+            guard let b = await engine.decideBulk(prompt: prompt) else { continue }
+            outputs.append("\(b)")
+            switch b.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+            case "create_tasks", "create_routines", "create_task", "create_routine":
+                merged.tasks += b.tasks
+                merged.routines += b.routines
+                if merged.spokenResponse.isEmpty { merged.spokenResponse = b.spokenResponse }
+                answered += 1
+            default:
+                break                                           // wait / clarify on a chunk: its actions come back from the clauses
+            }
+        }
+        lastTrace.modelOutput = outputs.joined(separator: "\n")
+        guard !outputs.isEmpty else {
+            lastTrace.route = "no-model"
+            guard ruleFallbackEnabled else { return .reply(AgentReply(message: "I couldn't reach the on-device model.", didAdd: false)) }
+            return bulkFromClauses(turn, analysis: analysis, utterance: utterance, ctx: ctx)
+        }
+        lastTrace.route = "model-bulk-long"
+        if let q = readBackQuestion(bulk: merged, utterance: utterance) { lastTrace.route = "read-back"; return q }
+        let validated = BulkValidator.validate(merged, utterance: utterance, segments: analysis.segments, context: ctx)
+        lastTrace.validation = "\(validated)"
+        Breadcrumb.log("decision: long bulk, \(groups.count) chunk(s), \(answered) answered")
+        return await bulkResult(validated, spoken: merged.spokenResponse, utterance: utterance, ctx: ctx)
+    }
+
+    /// No model at all: every action clause becomes a draft through the local rules.
+    private func bulkFromClauses(_ turn: LongTurn, analysis: BulkDetector.Analysis, utterance: String, ctx: ValidationContext) -> TurnResult {
+        let empty = BulkDecisionValue(action: "create_tasks")
+        let validated = BulkValidator.validate(empty, utterance: utterance, segments: analysis.segments, context: ctx)
+        lastTrace.validation = "\(validated)"
+        if case .items(let items) = validated { return startDraft(items, ctx: ctx) }
+        return .reply(AgentReply(message: "I couldn't work out the tasks. What would you like me to add?", didAdd: false))
     }
 
     /// A wait that comes with a create action on a sentence the local gate judged finished: the model meant to create it.

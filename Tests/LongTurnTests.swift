@@ -156,3 +156,108 @@ final class LongTurnAnalyzerTests: XCTestCase {
         XCTAssertNil(BulkDetector.analyze("Please mark the laundry task as done and remove the milk task from my list and cancel the plumber visit", now: Self.now).turn)
     }
 }
+
+/// A model that answers bulk prompts one after another and keeps every prompt it was shown.
+@MainActor
+final class BulkQueueEngine: DecisionProviding {
+    var answers: [BulkDecisionValue?]
+    private(set) var prompts: [String] = []
+    init(_ answers: [BulkDecisionValue?]) { self.answers = answers }
+    func decide(prompt: String) async -> AgentDecisionValue? { nil }
+    func decideBulk(prompt: String) async -> BulkDecisionValue? {
+        prompts.append(prompt)
+        return answers.isEmpty ? nil : answers.removeFirst()
+    }
+    static func tasks(_ titles: [String]) -> BulkDecisionValue {
+        BulkDecisionValue(action: "create_tasks", tasks: titles.map { TaskDraftValue(title: $0) })
+    }
+}
+
+@MainActor
+final class LongTurnPromptTests: XCTestCase {
+    private func manager(_ engine: DecisionProviding, fallback: Bool = false) -> VoiceTurnManager {
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] }, knownAssignees: { [] })
+        m.ruleFallbackEnabled = fallback
+        return m
+    }
+
+    func testTheDigestListsContextThenOneLinePerAction() {
+        let t = LongTurnAnalyzer.analyze(LongTurnAnalyzerTests.inLaws, now: LongTurnAnalyzerTests.now)
+        let d = LongTurnAnalyzer.digest(context: t.context, actions: t.actions)
+        XCTAssertEqual(d, """
+        Context: Saturday, for in-laws.
+        - clean the bathrooms (Friday, Househelp)
+        - mop the living room (Friday, Househelp)
+        - buy flowers and snacks
+        - call the caterer
+        """)
+    }
+
+    func testTheDigestFitsItsBudgetByShorteningWordsNotDroppingActions() {
+        let actions = (1...12).map { ActionClause(text: "clean the very large dusty room number \($0) in the old house at the end of the road", title: "") }
+        let d = LongTurnAnalyzer.digest(context: SharedContext(), actions: actions, budget: 900)
+        XCTAssertLessThanOrEqual(d.count, 900)
+        XCTAssertEqual(d.split(separator: "\n").count, 12)
+        XCTAssertTrue(d.hasPrefix("- clean the very"), "the front of the first action is kept")
+    }
+
+    func testChunksOfFourWithAtMostThreeCalls() {
+        func acts(_ n: Int) -> [ActionClause] { (1...n).map { ActionClause(text: "do thing \($0)", title: "") } }
+        XCTAssertEqual(LongTurnAnalyzer.chunks(acts(4)).groups.map(\.count), [4])
+        XCTAssertEqual(LongTurnAnalyzer.chunks(acts(5)).groups.map(\.count), [4, 1])
+        let big = LongTurnAnalyzer.chunks(acts(14))
+        XCTAssertEqual(big.groups.map(\.count), [4, 4, 4])
+        XCTAssertEqual(big.rest.count, 2)
+    }
+
+    func testThePromptNoLongerCutsTheFrontOfALongUtterance() {
+        let said = "START " + String(repeating: "word ", count: 400) + "END"
+        let p = PromptBuilder.build(utterance: said, pendingTask: nil, pendingPlaybook: nil, knownCategories: [], now: LongTurnAnalyzerTests.now)
+        XCTAssertTrue(p.contains("Current utterance: \"START"))
+        XCTAssertTrue(p.contains("END\""))
+        XCTAssertFalse(p.contains("…START"))
+    }
+
+    func testALongTurnSendsTheModelADigestNotTheRamble() async {
+        let engine = BulkQueueEngine([BulkQueueEngine.tasks(["Clean bathrooms", "Mop living room", "Buy flowers and snacks", "Call the caterer"])])
+        let m = manager(engine)
+        _ = await m.decide(utterance: LongTurnAnalyzerTests.inLaws, now: LongTurnAnalyzerTests.now)
+        XCTAssertEqual(engine.prompts.count, 1)
+        let p = engine.prompts[0]
+        XCTAssertTrue(p.contains("Context: Saturday, for in-laws."), p)
+        XCTAssertTrue(p.contains("- clean the bathrooms (Friday, Househelp)"), p)
+        XCTAssertFalse(p.contains("honestly"), "the chatter is not sent")
+        XCTAssertEqual(m.lastTrace.modelCallCount, 1)
+        XCTAssertEqual(m.lastTrace.chunks, 1)
+    }
+
+    func testSixActionsUseTwoCallsAndAreMerged() async {
+        let said = "Okay so it is a busy week and honestly I am tired, but I need to call the plumber, buy milk, pay the rent, wash the car, book the vet, and email the landlord"
+        let engine = BulkQueueEngine([BulkQueueEngine.tasks(["Call the plumber", "Buy milk", "Pay the rent", "Wash the car"]),
+                                      BulkQueueEngine.tasks(["Book the vet", "Email the landlord"])])
+        let m = manager(engine)
+        let r = await m.decide(utterance: said, now: LongTurnAnalyzerTests.now)
+        XCTAssertEqual(engine.prompts.count, 2)
+        XCTAssertEqual(m.lastTrace.modelCallCount, 2)
+        XCTAssertTrue(engine.prompts[0].contains("- call the plumber"))
+        XCTAssertFalse(engine.prompts[0].contains("book the vet"), "the second group is a second call")
+        XCTAssertTrue(engine.prompts[1].contains("- book the vet"))
+        guard case .proposal(let p) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(p.rows.count, 6)
+    }
+
+    func testMoreThanTwelveActionsUseThreeCallsAndTheRestComesFromTheClauses() async {
+        let verbs = ["call the plumber", "buy milk", "pay the rent", "wash the car", "book the vet", "email the landlord", "clean the garage",
+                     "water the plants", "fix the tap", "order the cake", "print the tickets", "pack the bags", "renew the passport", "send the invoice"]
+        let said = "Okay so honestly it is a lot but I need to " + verbs.joined(separator: ", ")
+        let engine = BulkQueueEngine([BulkQueueEngine.tasks(Array(verbs[0..<4]).map { $0.capitalized }),
+                                      BulkQueueEngine.tasks(Array(verbs[4..<8]).map { $0.capitalized }),
+                                      BulkQueueEngine.tasks(Array(verbs[8..<12]).map { $0.capitalized })])
+        let m = manager(engine)
+        let r = await m.decide(utterance: said, now: LongTurnAnalyzerTests.now)
+        XCTAssertEqual(engine.prompts.count, 3, "never more than three calls")
+        guard case .proposal(let p) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(p.rows.count, 14, "the last two come from the rule planner")
+    }
+}
+
