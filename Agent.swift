@@ -2672,7 +2672,10 @@ struct LocalSemanticPrechecker {
 
         // "actually make it..." is only a correction once it says what to change.
         var correcting = false
-        for opener in [["actually"], ["no", "wait"], ["wait"], ["i", "mean"], ["scratch", "that"]] where w.starts(with: opener) {
+        // A bare "wait" opens a correction only as "wait, make it...". "Wait for the plumber" is a task.
+        let waitCorrects = text.lowercased().drop(while: { !$0.isLetter }).hasPrefix("wait,")
+        for opener in [["actually"], ["no", "wait"], ["wait"], ["i", "mean"], ["scratch", "that"]]
+        where w.starts(with: opener) && (opener != ["wait"] || waitCorrects) {
             w.removeFirst(opener.count)
             correcting = true
             break

@@ -40,7 +40,7 @@ final class EvalEngine: DecisionProviding {
 
 // MARK: - Fixtures
 
-enum Tag: String { case wait, clarify, bulk, metadata, task, routine, playbook, regression, quality }
+enum Tag: String { case wait, clarify, bulk, metadata, task, routine, playbook, regression, quality, messy }
 
 struct TaskExpect {
     var title: String
@@ -85,6 +85,7 @@ struct TurnExpect {
     var says: [String] = []                      // lower-case fragments Kitty's words must contain
     var draft: [String]? = nil                   // the pending draft after this turn (exact titles)
     var model: Bool? = nil                       // whether the model was called in this turn
+    var sees: String? = nil                      // the words the turn was worked out from (after cleaning), ignoring case and punctuation
 
     static func held() -> TurnExpect { TurnExpect(outcome: .held, phase: .listening, model: false) }
     static func ask(_ says: String..., model: Bool? = nil) -> TurnExpect {
@@ -165,7 +166,7 @@ private func yes(_ say: String = "Yes", _ expect: TurnExpect = .saved(model: fal
 enum EvalSuite {
     static let biryani = ["Chop onions", "Marinate the chicken", "Cook the rice", "Layer and steam"]
 
-    static let all: [EvalCase] = a + b + c + d + e + f + g + i
+    static let all: [EvalCase] = a + b + c + d + e + f + g + i + j
 
     // MARK: A. Turn completeness
 
@@ -499,12 +500,110 @@ enum EvalSuite {
                                             TaskExpect(title: "Water the plants")])),
     ]
 
+
+    // MARK: J. Messy speech (fillers, repeats, taking words back, run-ons)
+
+    private static func one(_ id: Int, _ name: String, _ say: String, sees: String, _ model: Script,
+                            tags: Set<Tag> = [.messy, .task], saved: SavedExpect) -> EvalCase {
+        EvalCase(id: id, category: "J", name: name, tags: tags,
+                 turns: [turn(say, model, TurnExpect.saved(model: true).seeing(sees))], saved: saved)
+    }
+
+    private static func list(_ id: Int, _ name: String, _ say: String, sees: String, _ items: [String]) -> EvalCase {
+        EvalCase(id: id, category: "J", name: name, tags: [.messy, .bulk, .task],
+                 turns: [turn(say, BT(items), TurnExpect.draft(items).seeing(sees)), yes()],
+                 saved: SavedExpect(tasks: items.map { TaskExpect(title: $0) }))
+    }
+
+    static let j: [EvalCase] = [
+        // Fillers
+        one(76, "A leading “Um,” is dropped", "Um, add a task to clean the bathroom", sees: "add a task to clean the bathroom",
+            S("create_task", "Clean the bathroom"), saved: SavedExpect(tasks: [TaskExpect(title: "Clean the bathroom")])),
+        one(77, "A mid-sentence “uh” is dropped", "Add a task uh to clean the bathroom", sees: "add a task to clean the bathroom",
+            S("create_task", "Clean the bathroom"), saved: SavedExpect(tasks: [TaskExpect(title: "Clean the bathroom")])),
+        one(78, "“you know” set off by commas is dropped, and “tomorrow” still resolves", "Buy milk, you know, tomorrow", sees: "buy milk tomorrow",
+            S("create_task", "Buy milk", due: "2026-10-22"), tags: [.messy, .task, .metadata],
+            saved: SavedExpect(tasks: [TaskExpect(title: "Buy milk", dueDays: 1)])),
+        one(79, "“Er” and a comma-set “like,” are dropped", "Er, so I need to, like, call the plumber", sees: "so I need to, call the plumber",
+            S("create_task", "Call the plumber"), saved: SavedExpect(tasks: [TaskExpect(title: "Call the plumber")])),
+        one(80, "A filler inside a routine request", "Water the plants um every morning", sees: "water the plants every morning",
+            S("create_routine", "Water the plants", freq: "daily"), tags: [.messy, .routine],
+            saved: SavedExpect(routines: [TaskExpect(title: "Water the plants", schedule: "every day")])),
+        one(81, "A leading “Basically,” is dropped", "Basically, clean the garage", sees: "clean the garage",
+            S("create_task", "Clean the garage"), saved: SavedExpect(tasks: [TaskExpect(title: "Clean the garage")])),
+
+        // Repeats
+        one(82, "“to to” collapses", "Add a task to to clean the bathroom", sees: "add a task to clean the bathroom",
+            S("create_task", "Clean the bathroom"), saved: SavedExpect(tasks: [TaskExpect(title: "Clean the bathroom")])),
+        one(83, "A two-word restart: “clean the clean the”", "Clean the clean the bathroom", sees: "clean the bathroom",
+            S("create_task", "Clean the bathroom"), saved: SavedExpect(tasks: [TaskExpect(title: "Clean the bathroom")])),
+        one(84, "“buy buy” collapses and it stays one grocery task", "Buy buy milk and bread", sees: "buy milk and bread",
+            S("create_task", "Buy milk and bread", category: "Groceries"),
+            saved: SavedExpect(tasks: [TaskExpect(title: "Buy milk and bread", category: "Groceries")])),
+        one(85, "“the the” collapses", "Call the the plumber about the leaking tap", sees: "call the plumber about the leaking tap",
+            S("create_task", "Call the plumber about the leaking tap"),
+            saved: SavedExpect(tasks: [TaskExpect(title: "Call the plumber about the leaking tap")])),
+
+        // Self-repairs
+        one(86, "“no wait” replaces the clause with a new action", "Clean the... no wait, wash the car", sees: "wash the car",
+            S("create_task", "Wash the car"), saved: SavedExpect(tasks: [TaskExpect(title: "Wash the car")])),
+        one(87, "The “add a task to” frame survives a repair", "Add a task to clean the bathroom, no wait, wash the car",
+            sees: "add a task to wash the car", S("create_task", "Wash the car"),
+            saved: SavedExpect(tasks: [TaskExpect(title: "Wash the car")])),
+        one(88, "“I mean” replaces the last noun phrase", "Buy milk, I mean bread", sees: "buy bread",
+            S("create_task", "Buy bread"), saved: SavedExpect(tasks: [TaskExpect(title: "Buy bread")])),
+        one(89, "“no wait, Friday” replaces the day", "Call mom tomorrow, no wait, Friday", sees: "call mom Friday",
+            S("create_task", "Call mom", due: "2026-10-23"), tags: [.messy, .task, .metadata],
+            saved: SavedExpect(tasks: [TaskExpect(title: "Call mom", dueDays: 2)])),
+        one(90, "“scratch that” drops the previous clause", "Buy milk, scratch that, call the plumber", sees: "call the plumber",
+            S("create_task", "Call the plumber"), saved: SavedExpect(tasks: [TaskExpect(title: "Call the plumber")])),
+        one(91, "“sorry,” replaces the action and keeps “remind me to”", "Remind me to pay rent, sorry, pay the electricity bill",
+            sees: "remind me to pay the electricity bill", S("create_task", "Pay the electricity bill"),
+            saved: SavedExpect(tasks: [TaskExpect(title: "Pay the electricity bill")])),
+        one(92, "“or rather” swaps one place for another", "Clean the bathroom or rather the kitchen", sees: "clean the kitchen",
+            S("create_task", "Clean the kitchen"), saved: SavedExpect(tasks: [TaskExpect(title: "Clean the kitchen")])),
+        one(93, "A repair changes a routine's day", "Water the plants every Monday, no wait, every Tuesday",
+            sees: "water the plants every Tuesday", S("create_routine", "Water the plants", freq: "weekly"), tags: [.messy, .routine],
+            saved: SavedExpect(routines: [TaskExpect(title: "Water the plants", schedule: "every Tuesday")])),
+
+        // Run-ons with no commas
+        list(94, "A comma-free run-on of three actions", "clean the bathroom buy milk water the plants",
+             sees: "clean the bathroom buy milk water the plants", three),
+        list(95, "A run-on of two actions", "wash the car fold laundry", sees: "wash the car fold laundry", ["Wash the car", "Fold laundry"]),
+        list(96, "A run-on whose second action contains “to buy”", "call mom ask her to buy milk", sees: "call mom ask her to buy milk",
+             ["Call mom", "Ask her to buy milk"]),
+        list(97, "A run-on of three short actions", "clean bathroom buy milk wash the car", sees: "clean bathroom buy milk wash the car",
+             ["Clean bathroom", "Buy milk", "Wash the car"]),
+        list(98, "A run-on starting with a phrasal verb", "take out the trash mop the floor", sees: "take out the trash mop the floor",
+             ["Take out the trash", "Mop the floor"]),
+
+        // Repairs in the middle of a list
+        list(99, "“no wait” inside a list only replaces its own item", "Clean the bathroom, buy milk, no wait, buy bread, and water the plants",
+             sees: "Clean the bathroom, buy bread, and water the plants", ["Clean the bathroom", "Buy bread", "Water the plants"]),
+        list(100, "“scratch that” inside a list drops only its item", "Clean the bathroom, buy milk, scratch that, water the plants",
+             sees: "Clean the bathroom, water the plants", ["Clean the bathroom", "Water the plants"]),
+        list(101, "“I mean” inside a list swaps only its noun", "Wash the car, buy milk, I mean bread, call mom",
+             sees: "Wash the car, buy bread, call mom", ["Wash the car", "Buy bread", "Call mom"]),
+
+        // Guards: ordinary speech is left exactly as said
+        one(102, "“say sorry to mom” is not a repair", "Say sorry to mom", sees: "say sorry to mom",
+            S("create_task", "Say sorry to mom"), saved: SavedExpect(tasks: [TaskExpect(title: "Say sorry to mom")])),
+        one(103, "“wait for the plumber” is a task, not a correction", "Wait for the plumber", sees: "wait for the plumber",
+            S("create_task", "Wait for the plumber"), saved: SavedExpect(tasks: [TaskExpect(title: "Wait for the plumber")])),
+        one(104, "“I would like to” keeps its “like”", "I would like to buy milk", sees: "I would like to buy milk",
+            S("create_task", "Buy milk"), saved: SavedExpect(tasks: [TaskExpect(title: "Buy milk")])),
+        EvalCase(id: 105, category: "J", name: "“it looks like rain” keeps its “like” and is asked about", tags: [.messy, .clarify],
+                 turns: [turn("It looks like rain", S("clarify", q: "What would you like me to do about the rain?"),
+                              TurnExpect.ask("what would you like", model: true).seeing("it looks like rain"))]),
+    ]
+
     /// The twelve to start with.
     static let minimal12: [Int] = [1, 2, 4, 41, 42, 17, 45, 24, 48, 31, 39, 75]
 }
 
 private extension TurnExpect {
     func with(model: Bool) -> TurnExpect { var c = self; c.model = model; return c }
+    func seeing(_ words: String) -> TurnExpect { var c = self; c.sees = words; return c }
 }
 
 // MARK: - Grading what Kitty says (category H)
@@ -547,6 +646,7 @@ struct TurnRecord {
     var phase = ConversationPhase.idle
     var transitions: [ConversationPhase] = []
     var modelCalled = false
+    var sees = ""
     var draft: [String] = []
     var failures: [String] = []
 }
@@ -714,6 +814,7 @@ final class EvalRunner {
                 let result = await manager.decide(utterance: text, now: Self.now)
                 let trace = manager.lastTrace
                 r.route = trace.route
+                r.sees = trace.utterance
                 r.prompt = trace.prompt
                 r.modelOutput = trace.modelOutput
                 r.validation = trace.validation
@@ -759,6 +860,7 @@ final class EvalRunner {
             if a != b { f.append("pending draft \(r.draft), expected \(want)") }
         }
         if let m = e.model, r.modelCalled != m { f.append("model called: \(r.modelCalled), expected \(m)") }
+        if let w = e.sees, VoiceTurnManager.norm(r.sees) != VoiceTurnManager.norm(w) { f.append("worked from “\(r.sees)”, expected “\(w)”") }
         return f
     }
 
@@ -986,6 +1088,124 @@ enum EvalReport {
     }
 }
 
+
+// MARK: - The catalogue (EVALS.md)
+
+/// Writes EVALS.md from the cases themselves, so the document can't drift from what the tests check.
+enum EvalCatalogue {
+    static let titles: [(String, String)] = [
+        ("A", "Turn completeness"), ("B", "Task validation"), ("C", "Routines"), ("D", "Playbooks"), ("E", "Bulk creation"),
+        ("F", "Clarification loops"), ("G", "Metadata extraction"), ("I", "Regression cases (from production failures) and extras"),
+        ("J", "Messy speech (fillers, repeats, taking words back, run-ons)")
+    ]
+
+    private static func scriptText(_ s: Script) -> String {
+        switch s {
+        case .none: return "no model call"
+        case .single(let d):
+            if d.action == "clarify" { return "model: `clarify` “\(d.clarifyingQuestion)”" }
+            return "model: `\(d.action)`" + (d.title.isEmpty ? "" : " “\(d.title)”")
+        case .bulk(let b):
+            let n = b.tasks.count + b.routines.count + (b.playbook?.steps.count ?? 0)
+            return "bulk `\(b.action)` (\(n) \(b.playbook != nil ? "steps" : "items"))"
+        }
+    }
+
+    private static func outcomeText(_ e: TurnExpect) -> String {
+        var parts: [String]
+        switch e.outcome {
+        case .held: parts = ["wait: held locally, no model call"]
+        case .modelWait: parts = ["wait: the model said wait"]
+        case .ask: parts = ["asks one question"]
+        case .preview: parts = ["preview" + (e.draft.map { ": " + $0.joined(separator: " / ") } ?? "")]
+        case .saved: parts = ["saved"]
+        case .reply: parts = ["replies"]
+        case .silent: parts = ["nothing"]
+        }
+        if !e.says.isEmpty { parts.append("says “\(e.says.joined(separator: " … "))”") }
+        if let w = e.sees { parts.append("worked from “\(w)”") }
+        if let p = e.phase { parts.append("state `\(p.rawValue)`") }
+        if e.model == true { parts.append("model called") }
+        if e.model == false { parts.append("model not called") }
+        return parts.joined(separator: "; ")
+    }
+
+    private static func taskText(_ t: TaskExpect) -> String {
+        var extras: [String] = []
+        if let c = t.category { extras.append(c) }
+        if t.noCategory { extras.append("no category") }
+        if let d = t.dueDays { extras.append("due +\(d)d") }
+        if let p = t.priority { extras.append("\(p) priority") }
+        if let a = t.assignee { extras.append("for \(a)") }
+        if let s = t.schedule { extras.append(s) }
+        return "“\(t.title)”" + (extras.isEmpty ? "" : " (\(extras.joined(separator: ", ")))")
+    }
+
+    private static func savedText(_ c: EvalCase) -> String {
+        var parts: [String] = []
+        if !c.saved.tasks.isEmpty {
+            parts.append("\(c.saved.tasks.count) task\(c.saved.tasks.count == 1 ? "" : "s"): " + c.saved.tasks.map(taskText).joined(separator: ", "))
+        }
+        if !c.saved.routines.isEmpty {
+            parts.append("\(c.saved.routines.count) routine\(c.saved.routines.count == 1 ? "" : "s"): " + c.saved.routines.map(taskText).joined(separator: ", "))
+        }
+        for p in c.saved.playbooks { parts.append("playbook “\(p.name)”, \(p.steps) steps") }
+        var text = parts.isEmpty ? "nothing saved" : parts.joined(separator: "; ")
+        if let d = c.finalDraft { text += "; still pending: " + d.joined(separator: " / ") }
+        return text
+    }
+
+    private static func behaviour(_ t: EvalTurn) -> String {
+        if t.expect.outcome == .held { return "no model call → " + outcomeText(t.expect) }
+        return scriptText(t.script) + " → " + outcomeText(t.expect)
+    }
+
+    private static func said(_ t: EvalTurn) -> String {
+        "“\(t.say)”" + (t.silence >= 10 ? " *(then a long silence)*" : "")
+    }
+
+    static func markdown() -> String {
+        let all = EvalSuite.all
+        var out = "# Kitty eval cases\n\n"
+        out += "Generated from `Tests/KittyEvals.swift` (`testWriteEvalCatalogue`). \(all.count) cases. Each case is a recorded utterance sequence replayed against a scripted model. “Today” is Wednesday 21 October 2026; “+1d” means tomorrow.\n\n"
+        out += "The 12 to start with: " + EvalSuite.minimal12.map { "#\($0)" }.joined(separator: ", ") + ".\n\n"
+        for (letter, title) in titles {
+            let cases = all.filter { $0.category == letter }
+            guard !cases.isEmpty else { continue }
+            out += "## \(letter). \(title)\n\n| # | Case | Input (each turn) | Expected behaviour (each turn) | Expected saved objects |\n|---|---|---|---|---|\n"
+            for c in cases {
+                let input = c.turns.count == 1 ? said(c.turns[0])
+                    : c.turns.enumerated().map { "\($0.offset + 1). \(said($0.element))" }.joined(separator: "<br>")
+                let expected = c.turns.count == 1 ? behaviour(c.turns[0])
+                    : c.turns.enumerated().map { "\($0.offset + 1). \(behaviour($0.element))" }.joined(separator: "<br>")
+                out += "| \(c.id) | \(c.name) | \(input) | \(expected) | \(savedText(c)) |\n"
+            }
+            out += "\n"
+        }
+        out += """
+        ## H. Conversation quality (graded on every case)
+
+        Every response Kitty speaks in every case above is graded by `Judge`, and the case fails on any issue:
+
+        - one short sentence or two: no more than 32 words
+        - at most one question per response
+        - no robotic wording ("Are you done?", "Shall I go ahead and create…", "Please provide…", "required field")
+        - no repeated question, and no more than three questions in a conversation
+        - a finished sentence
+        - plus, from the case checks: wait versus clarify is correct, interruption keeps the pending state,
+          bulk saves get one grouped confirmation, no invented metadata, no duplicate objects
+
+        ## Metrics reported after every run
+
+        1. Wait accuracy  2. Clarify precision  3. Clarify recall  4. Task extraction accuracy  5. Task-type accuracy
+        6. Bulk-split accuracy  7. Duplicate rate  8. Invented-field rate  9. Confirmation-loop rate
+        10. Clarification-loop rate  11. Save success rate  12. Completion rate  13. Response quality (judge)
+
+        """
+        return out
+    }
+}
+
 // MARK: - The tests
 
 @MainActor
@@ -1016,7 +1236,17 @@ final class KittyEvals: XCTestCase {
         XCTAssertEqual(Set(EvalSuite.all.map(\.id)).count, EvalSuite.all.count, "ids must be unique")
         XCTAssertEqual(Set(numbered.map(\.category)), ["A", "B", "C", "D", "E", "F", "G"])
         XCTAssertGreaterThanOrEqual(EvalSuite.all.filter { $0.category == "I" }.count, 12)
+        XCTAssertEqual(EvalSuite.all.filter { $0.category == "J" }.map(\.id), Array(76...105))
         XCTAssertEqual(EvalSuite.minimal12.count, 12)
+    }
+
+    /// Regenerate EVALS.md with KITTY_EVAL_CATALOGUE=$PWD/EVALS.md and -only-testing:KittyTests/KittyEvals/testWriteEvalCatalogue
+    func testWriteEvalCatalogue() throws {
+        let text = EvalCatalogue.markdown()
+        XCTAssertTrue(text.contains("## J. Messy speech"))
+        if let path = ProcessInfo.processInfo.environment["KITTY_EVAL_CATALOGUE"] {
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+        }
     }
 
     func testMinimalTwelve() async {

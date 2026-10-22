@@ -59,7 +59,7 @@ nonisolated enum SpeechLexicon {
     /// Words that make up a day or time phrase ("next Friday", "tomorrow morning", "at 5 pm").
     static let dayTimeWords: Set<String> = weekdays.union(Set([
         "today", "tomorrow", "tonight", "yesterday", "morning", "afternoon", "evening", "night", "noon", "midnight",
-        "next", "this", "coming", "on", "at", "by", "am", "pm", "o'clock", "oclock", "week", "weekend", "month"
+        "next", "this", "coming", "every", "each", "on", "at", "by", "am", "pm", "o'clock", "oclock", "week", "weekend", "month"
     ]))
 
     static let months: Set<String> = [
