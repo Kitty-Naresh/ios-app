@@ -443,14 +443,28 @@ final class KittyVoiceTurnTests: XCTestCase {
 
     // MARK: Stopping Kitty and narrowing a list
 
-    func testLongListRepliesAreSpokenShortAndInviteANarrowerQuestion() {
-        let message = "You have 8 open tasks. Call the dentist (Me), Renew passport (Me), Pay rent (Me)."
-        let spoken = Speaker.spokenForm(of: message, isList: true)
-        XCTAssertTrue(spoken.hasPrefix("You have 8 open tasks."))
-        XCTAssertFalse(spoken.contains("dentist"))
-        XCTAssertTrue(spoken.contains("narrow"))
+    func testAListIsReadAsItIsWithNoCannedSuffix() {
+        let message = "You have 3 open tasks. Call the dentist (Me), Renew passport (Me), Pay rent (Me)."
+        XCTAssertEqual(Speaker.spokenForm(of: message, isList: true), message)
+        XCTAssertFalse(Speaker.spokenForm(of: message, isList: true).lowercased().contains("narrow"))
+        XCTAssertEqual(Speaker.spokenForm(of: "You have 1 open task. Pay rent (Me).", isList: true), "You have 1 open task. Pay rent (Me).")
         XCTAssertEqual(Speaker.spokenForm(of: message, isList: false), message)
-        XCTAssertEqual(Speaker.spokenForm(of: "You have no open tasks.", isList: true), "You have no open tasks.")
+    }
+
+    func testAVeryLongListIsCutAtABreakWithoutAQuestion() {
+        let items = (1...60).map { "Task number \($0)" }.joined(separator: ", ")
+        let spoken = Speaker.spokenForm(of: "You have 60 open tasks. \(items).", isList: true)
+        XCTAssertTrue(spoken.hasSuffix("The rest are on the screen."))
+        XCTAssertFalse(spoken.contains("?"))
+        XCTAssertLessThan(spoken.split(separator: " ").count, 160)
+        XCTAssertFalse(spoken.contains("Task number 60"))
+    }
+
+    func testTheHintIsAlwaysTheLastThingSaid() {
+        let hint = "Want just today's?"
+        let spoken = Speaker.spokenForm(of: "You have 9 open tasks. A, B, C. \(hint)", isList: true, hint: hint)
+        XCTAssertTrue(spoken.hasSuffix(hint))
+        XCTAssertEqual(spoken.components(separatedBy: hint).count, 2, "said once")
     }
 
     func testWhichPhrasesNarrowTheLastList() {

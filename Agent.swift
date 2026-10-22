@@ -17,6 +17,7 @@ struct AgentReply {
     var expectsReply: Bool = false     // Kitty asked a yes/no question
     var spec: TaskLookupSpec? = nil    // set for questions: the lookup used, so the screen can show the same view
     var created: [UUID] = []           // tasks this reply created, shown as cards in the conversation
+    var hint: String? = nil            // an optional, one-time suggestion to narrow a long list (already part of `message`)
 }
 
 enum AgentAction { case add, ask, chat, complete, reopen, rename, delete, clear, teach, assign, reschedule, profile }
@@ -1686,7 +1687,52 @@ extension TaskAgent {
            let worded = await TaskPlanner.speakableSummary(question: text, facts: facts) {
             message = worded
         }
-        return AgentReply(message: message, didAdd: false, spec: spec)
+        let items = listItems(for: spec)
+        return AgentReply(message: message, didAdd: false, spec: spec, hint: narrowingHint(for: spec, items: items))
+    }
+
+    /// The tasks a lookup shows, in the same sense as `answer(_:)`.
+    @MainActor
+    static func listItems(for spec: TaskLookupSpec) -> [TaskItem] {
+        let store = TaskStore.shared
+        if spec.profileID != nil || spec.overdueOnly || spec.day == .anytime { return store.query(spec) }
+        let b = store.briefing(spec)
+        return b.onDay + b.earlier
+    }
+
+    /// A long, unfiltered list is the one case where a narrower view helps. Suggests the split that divides it most evenly
+    /// (by person, category or today) and says nothing for short lists or lists already narrowed.
+    @MainActor
+    static func narrowingHint(for spec: TaskLookupSpec, items: [TaskItem]) -> String? {
+        guard items.count > 8, spec.assignees.isEmpty, spec.category == nil, spec.day == .anytime, !spec.overdueOnly,
+              spec.profileID == nil, spec.status == .open else { return nil }
+        let total = Double(items.count)
+
+        func top(_ names: [String]) -> [(name: String, count: Int)] {
+            Dictionary(grouping: names, by: { $0 }).map { (name: $0.key, count: $0.value.count) }
+                .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+        }
+        var best: (balance: Double, text: String)?
+        func consider(_ balance: Double, _ text: String) {
+            if balance >= 0.2, balance > (best?.balance ?? 0) { best = (balance, text) }
+        }
+
+        let people = top(items.map(\.effectiveAssignee))
+        if people.count >= 2 {
+            func possessive(_ n: String) -> String { n == Assignee.me ? "yours" : "\(n)'s" }
+            consider(1 - Double(people[0].count) / total, "Want just \(possessive(people[0].name)), or \(possessive(people[1].name))?")
+        }
+        let categories = top(items.map(\.categoryLabel))
+        if categories.count >= 2 {
+            consider(1 - Double(categories[0].count) / total, "Want just \(categories[0].name.lowercased()), or \(categories[1].name.lowercased())?")
+        }
+        let cal = Calendar.current
+        let today = items.filter { cal.isDateInToday($0.effectiveDue) }.count
+        if today > 0, today < items.count {
+            let share = Double(today) / total
+            consider(min(share, 1 - share), "Want just today's?")
+        }
+        return best?.text
     }
 
     /// A follow-up like "only tomorrow" or "just the maid" changes only what it mentions. Everything else stays as it was.
@@ -3152,6 +3198,8 @@ final class ConversationStateManager {
 
     /// The last list Kitty showed: "only personal", "just tomorrow" then narrow it instead of starting over.
     var lastView: TaskLookupSpec?
+    /// A "want just today's?" suggestion is made at most once per conversation.
+    var hintOffered = false
 
     func clearPending() {
         pendingTitles = []
@@ -3186,6 +3234,7 @@ final class ConversationStateManager {
     func reset() {
         clearPending()
         lastView = nil
+        hintOffered = false
         recent = []
         lastCreatedID = nil
         lastCreatedAt = nil
@@ -3386,7 +3435,8 @@ final class VoiceTurnManager {
     func decide(utterance spoken: String, now: Date = Date(), final: Bool = false) async -> TurnResult {
         let utterance = SpeechCleaner.clean(spoken).text      // idempotent: already-clean text passes through unchanged
         lastTrace = TurnTrace(utterance: utterance)
-        let result = await route(utterance: utterance, now: now, final: final)
+        var result = await route(utterance: utterance, now: now, final: final)
+        if case .reply(let r) = result { result = .reply(offeringHintOnce(r)) }
         if case .reply(let r) = result, let shown = r.spec { state.lastView = shown }
         else if case .wait = result {} else { state.lastView = nil }
             state.record(result)
@@ -3397,6 +3447,14 @@ final class VoiceTurnManager {
         lastTrace.result = Self.describe(result)
             return result
         }
+
+    /// A narrowing suggestion is spoken at most once per conversation. Later ones are dropped.
+    func offeringHintOnce(_ reply: AgentReply) -> AgentReply {
+        guard let hint = reply.hint else { return reply }
+        var r = reply
+        if state.hintOffered { r.hint = nil } else { state.hintOffered = true; r.message += " " + hint }
+        return r
+    }
 
     static func describe(_ r: TurnResult) -> String {
         switch r {

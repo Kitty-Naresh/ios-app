@@ -97,6 +97,10 @@ final class SpeechRecognizer: ObservableObject {
     /// For the always-on "Hey Kitty" listener: recognise on the device when supported, and don't duck music.
     var lightweight = false
 
+    /// Listening while Kitty is talking (hands-free "stop"): a voice-chat session with echo cancellation, so she mostly does not
+    /// hear herself, and a session that is not shut off if the recogniser ends while she is still speaking.
+    var bargeIn = false
+
     /// With `lightweight`: try on-device recognition first. Turned off for good if it fails to start.
     var preferOnDevice = true
 
@@ -158,7 +162,9 @@ final class SpeechRecognizer: ObservableObject {
         do {
             // Off the main thread: activating the session on main can freeze the UI.
             Breadcrumb.log("4 configuring audio session")
-            if lightweight {
+            if bargeIn {
+                try await AudioSessionControl.configure(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            } else if lightweight {
                 // "Mix with others" is not allowed with the plain record category, so use play-and-record.
                 // (Asking for an invalid combination fails, and the listener would never start.)
                 try await AudioSessionControl.configure(.playAndRecord, mode: .default, options: [.mixWithOthers])
@@ -174,7 +180,7 @@ final class SpeechRecognizer: ObservableObject {
                 request.addsPunctuation = true
                 request.taskHint = .dictation
             }
-            if lightweight, preferOnDevice, recognizer.supportsOnDeviceRecognition {
+            if (lightweight && preferOnDevice || bargeIn), recognizer.supportsOnDeviceRecognition {
                 request.requiresOnDeviceRecognition = true
             }
             self.request = request
@@ -182,7 +188,7 @@ final class SpeechRecognizer: ObservableObject {
 
             // Mic setup runs off the main thread so the UI never freezes.
             Breadcrumb.log("5 starting microphone")
-            try await capture.start(feeding: request)
+            try await capture.start(feeding: request, voiceProcessing: bargeIn)
             Breadcrumb.log("6 microphone running")
             guard sessionID == id else { capture.stop(); return }   // cancelled while starting
 
@@ -258,7 +264,7 @@ final class SpeechRecognizer: ObservableObject {
         task = nil
         request = nil
         isRecording = false
-        AudioSessionControl.deactivate()
+        if !bargeIn { AudioSessionControl.deactivate() }      // the session is still needed for Kitty's voice
     }
 
     // Nonisolated so these system callbacks (which run on background queues)
@@ -305,12 +311,17 @@ nonisolated final class AudioCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "kitty.audiocapture")
     private var tapInstalled = false
 
-    func start(feeding request: SFSpeechAudioBufferRecognitionRequest) async throws {
+    func start(feeding request: SFSpeechAudioBufferRecognitionRequest, voiceProcessing: Bool = false) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             queue.async {
                 do {
                     Breadcrumb.log("  queue: touching input node")
                     let input = self.engine.inputNode
+                    // Echo cancellation while Kitty speaks. Not every device or the simulator supports it: carry on without.
+                    if input.isVoiceProcessingEnabled != voiceProcessing {
+                        do { try input.setVoiceProcessingEnabled(voiceProcessing) }
+                        catch { Breadcrumb.log("  queue: voice processing unavailable: \(error.localizedDescription)") }
+                    }
                     let format = input.outputFormat(forBus: 0)
                     guard format.sampleRate > 0, format.channelCount > 0 else { throw CaptureError.noMic }
                     if self.tapInstalled {
@@ -405,11 +416,16 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     /// Speak and wait until Kitty has finished talking (or was stopped).
-    func speakAndWait(_ text: String) async {
+    /// `duplex`: the microphone is open at the same time (hands-free "stop"), so keep the voice-chat session.
+    func speakAndWait(_ text: String, duplex: Bool = false) async {
         Breadcrumb.log("speak: begin")
         resolve()
         let g = generation
-        try? await AudioSessionControl.configure(.playback, mode: .spokenAudio)
+        if duplex {
+            try? await AudioSessionControl.configure(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+        } else {
+            try? await AudioSessionControl.configure(.playback, mode: .spokenAudio)
+        }
         guard g == generation else { return }   // stopped while waiting
         Breadcrumb.log("speak: starting synthesizer")
 
@@ -505,13 +521,22 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// What Kitty says aloud for a reply. A list is long to listen to and is already on screen, so she says the headline and
-    /// invites a narrower question instead of reading every task.
-    nonisolated static func spokenForm(of message: String, isList: Bool) -> String {
+    /// What Kitty says aloud for a reply. A list is read as it is. Only a very long one is cut at a natural break, with a
+    /// note that the rest is on screen, so she never talks for minutes. A narrowing `hint` is always the last thing said.
+    nonisolated static func spokenForm(of message: String, isList: Bool, hint: String? = nil, maxWords: Int = 140) -> String {
         guard isList else { return message }
-        let parts = sentences(of: speakable(message))
-        guard parts.count > 1, let headline = parts.first else { return message }
-        return headline + " The list is on screen. Say a day, a person or a category to narrow it."
+        var body = message
+        if let hint { body = body.replacingOccurrences(of: " " + hint, with: "") }
+        let words = body.split(whereSeparator: { $0.isWhitespace })
+        if words.count > maxWords {
+            var cut = words.prefix(maxWords).joined(separator: " ")
+            if let r = cut.range(of: "[,.;]", options: [.regularExpression, .backwards]),
+               cut.distance(from: cut.startIndex, to: r.lowerBound) > cut.count * 6 / 10 {
+                cut = String(cut[..<r.lowerBound])
+            }
+            body = cut + ". The rest are on the screen."
+        }
+        return [body, hint].compactMap { $0 }.joined(separator: " ")
     }
 
     nonisolated static func sentences(of text: String) -> [String] {

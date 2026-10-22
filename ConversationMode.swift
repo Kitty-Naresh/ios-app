@@ -39,6 +39,7 @@ final class VoiceConversation: ObservableObject {
     @Published private(set) var isStale = false         // you kept talking: the preview is out of date
     /// Kitty is talking. The mic is off then, so tapping the mic button stops her and starts listening.
     @Published private(set) var isSpeaking = false
+    private var spokenNow = ""          // what Kitty is saying right now, so her own voice is not mistaken for yours
     @Published private(set) var micOn = false { didSet { turns.state.setListening(micOn) } }
     @Published private(set) var errorMessage: String?
 
@@ -176,6 +177,7 @@ final class VoiceConversation: ObservableObject {
 
     private func heard(_ text: String) {
         guard active, !text.isEmpty else { return }
+        if isSpeaking { bargeInHeard(text); return }
         sessionText = text
         let full = join(carry, sessionText)
         guard full != turnText else { return }
@@ -191,7 +193,15 @@ final class VoiceConversation: ObservableObject {
 
     /// The recognizer ended on its own (time limit). Keep what was heard and listen again.
     private func sessionEnded(_ text: String) {
-        guard active, micOn else { return }
+        guard active else { return }
+        if isSpeaking {
+            // The recogniser ended while Kitty is still talking: open it again so "stop" keeps working.
+            restarts.append(Date())
+            restarts = restarts.filter { Date().timeIntervalSince($0) < 10 }
+            if restarts.count <= 4 { Task { _ = await startBargeInListening() } }
+            return
+        }
+        guard micOn else { return }
         if !text.isEmpty {
             carry = join(carry, text)
             sessionText = ""
@@ -421,7 +431,7 @@ final class VoiceConversation: ObservableObject {
         turns.state.noteCreated(made)
         resetTurn()
         if speakReplies {
-            await speakAndResume(Speaker.spokenForm(of: reply.message, isList: reply.spec != nil))
+            await speakAndResume(Speaker.spokenForm(of: reply.message, isList: reply.spec != nil, hint: reply.hint))
         } else if micWanted {
             await startMic()               // a fresh recognition session for the next thing you say
         }
@@ -454,10 +464,39 @@ final class VoiceConversation: ObservableObject {
         speech.cancel()
         micOn = false
         isSpeaking = true
-        await Speaker.shared.speakAndWait(text)
+        spokenNow = text
+        let duplex = await startBargeInListening()
+        await Speaker.shared.speakAndWait(text, duplex: duplex)
         isSpeaking = false
-        guard active, micWanted else { return }
-        await startMic()
+        spokenNow = ""
+        speech.bargeIn = false
+        guard active, micWanted else { speech.cancel(); return }
+        await startMic()               // a fresh session: nothing Kitty's voice left behind carries over
+    }
+
+    /// Opens the microphone while Kitty talks so "stop", or anything else you say, can cut her off. False if it cannot.
+    private func startBargeInListening() async -> Bool {
+        guard BargeIn.enabled, active, micWanted else { return false }
+        speech.bargeIn = true
+        await speech.start()
+        guard speech.isRecording, speech.errorMessage == nil else {
+            speech.bargeIn = false
+            speech.cancel()
+            return false
+        }
+        return true
+    }
+
+    /// What the microphone hears while Kitty is speaking. A stop word or real speech stops her and keeps your words.
+    private func bargeInHeard(_ text: String) {
+        guard case .interrupt(let rest) = BargeIn.decide(heard: text, spoken: spokenNow) else { return }
+        Breadcrumb.log("barge-in: “\(rest.prefix(40))”")
+        carry = rest
+        sessionText = ""
+        turnText = rest
+        committedWords = 0
+        lastChange = Date()
+        stopSpeaking()
     }
 
     /// Cut Kitty off. The pending `speakAndResume` then carries on and opens the mic, so you can narrow the list or say the next thing.
