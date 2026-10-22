@@ -80,3 +80,27 @@ nonisolated enum BargeIn {
         return user[i...].joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?"))
     }
 }
+
+/// When the microphone is retried and when it is left alone.
+nonisolated enum MicPolicy {
+    /// Quiet retries after a start-up failure that is not a permission problem.
+    static let retryDelays: [Double] = [0.3, 0.8, 1.5]
+
+    /// Seconds to wait before the next try, or nil to stop and tell the user (permission problems, or the retries ran out).
+    static func retryDelay(afterFailure attempt: Int, permanent: Bool) -> Double? {
+        guard !permanent, attempt >= 0, attempt < retryDelays.count else { return nil }
+        return retryDelays[attempt]
+    }
+
+    /// The recogniser ended by itself several times in a few seconds: wait a little before listening again.
+    static func restartDelay(restartsInWindow: Int) -> Double {
+        restartsInWindow <= 4 ? 0 : min(Double(restartsInWindow - 4) * 1.0, 5.0)
+    }
+
+    /// The watchdog: only an explicit mute, a permission problem, typing instead of talking, Kitty speaking, or a
+    /// start already under way keeps the mic off.
+    static func shouldRestart(active: Bool, micWanted: Bool, userMuted: Bool, blocked: Bool, micOn: Bool,
+                              isSpeaking: Bool, starting: Bool, thinking: Bool) -> Bool {
+        active && micWanted && !userMuted && !blocked && !micOn && !isSpeaking && !starting && !thinking
+    }
+}

@@ -108,3 +108,61 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(m.offeringHintOnce(reply).message, first.message, "a new conversation may offer it again")
     }
 }
+
+// MARK: - Keeping the mic on
+
+@MainActor
+final class MicPolicyTests: XCTestCase {
+
+    func testAStartUpHiccupIsRetriedQuietlyThenGivesUp() {
+        XCTAssertEqual(MicPolicy.retryDelay(afterFailure: 0, permanent: false), 0.3)
+        XCTAssertEqual(MicPolicy.retryDelay(afterFailure: 1, permanent: false), 0.8)
+        XCTAssertEqual(MicPolicy.retryDelay(afterFailure: 2, permanent: false), 1.5)
+        XCTAssertNil(MicPolicy.retryDelay(afterFailure: 3, permanent: false), "after three retries, tell the user")
+    }
+
+    func testAPermissionProblemIsNeverRetried() {
+        XCTAssertNil(MicPolicy.retryDelay(afterFailure: 0, permanent: true))
+    }
+
+    func testManyEndingsInARowBackOffInsteadOfGivingUp() {
+        XCTAssertEqual(MicPolicy.restartDelay(restartsInWindow: 1), 0)
+        XCTAssertEqual(MicPolicy.restartDelay(restartsInWindow: 4), 0)
+        XCTAssertGreaterThan(MicPolicy.restartDelay(restartsInWindow: 5), 0)
+        XCTAssertLessThanOrEqual(MicPolicy.restartDelay(restartsInWindow: 50), 5)
+    }
+
+    private func should(active: Bool = true, micWanted: Bool = true, userMuted: Bool = false, blocked: Bool = false, micOn: Bool = false,
+                        isSpeaking: Bool = false, starting: Bool = false, thinking: Bool = false) -> Bool {
+        MicPolicy.shouldRestart(active: active, micWanted: micWanted, userMuted: userMuted, blocked: blocked, micOn: micOn,
+                                isSpeaking: isSpeaking, starting: starting, thinking: thinking)
+    }
+
+    func testTheWatchdogTurnsAnUnexpectedlyOffMicBackOn() {
+        XCTAssertTrue(should())
+    }
+
+    func testOnlyAnExplicitReasonKeepsTheMicOff() {
+        XCTAssertFalse(should(userMuted: true), "you muted it")
+        XCTAssertFalse(should(blocked: true), "permission is off")
+        XCTAssertFalse(should(micWanted: false), "you typed instead of talking")
+        XCTAssertFalse(should(active: false), "the screen is closed")
+        XCTAssertFalse(should(micOn: true), "already listening")
+        XCTAssertFalse(should(isSpeaking: true), "Kitty is talking, her mic session is separate")
+        XCTAssertFalse(should(starting: true), "a start is already under way")
+        XCTAssertFalse(should(thinking: true))
+    }
+
+    func testRestartingRecognitionNeedsARunningMic() {
+        let speech = SpeechRecognizer()
+        XCTAssertFalse(speech.restartRecognition(), "nothing is recording: the caller must do a full start")
+    }
+
+    func testBreadcrumbsKeepEnoughHistoryToDiagnoseAFailure() {
+        Breadcrumb.clear()
+        for i in 0..<60 { Breadcrumb.log("step \(i)") }
+        XCTAssertEqual(Breadcrumb.lines.count, 40)
+        XCTAssertTrue(Breadcrumb.lines.last?.hasSuffix("step 59") ?? false)
+        Breadcrumb.clear()
+    }
+}

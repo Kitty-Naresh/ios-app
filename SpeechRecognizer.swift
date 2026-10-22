@@ -13,7 +13,7 @@ nonisolated enum Breadcrumb {
         let time = Date().formatted(date: .omitted, time: .standard)
         var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
         lines.append("\(time)  \(text)")
-        UserDefaults.standard.set(Array(lines.suffix(14)), forKey: key)
+        UserDefaults.standard.set(Array(lines.suffix(40)), forKey: key)
     }
 
     static var lines: [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
@@ -86,6 +86,9 @@ final class SpeechRecognizer: ObservableObject {
     @Published private(set) var isRecording = false
     @Published var errorMessage: String?
 
+    /// The last start-up failure cannot be fixed by trying again (permission off, recogniser unavailable).
+    private(set) var failureIsPermanent = false
+
     /// When true, listening stops by itself after a pause in speech
     /// (used by hands-free conversation mode).
     var autoStopOnSilence = false
@@ -134,6 +137,7 @@ final class SpeechRecognizer: ObservableObject {
     func start() async {
         guard !isRecording else { return }
         errorMessage = nil
+        failureIsPermanent = false
         transcript = ""
         words = []
         spike = ConfidenceSpike()
@@ -146,16 +150,22 @@ final class SpeechRecognizer: ObservableObject {
         recognizer = SpeechLocalePreference.makeRecognizer()
         guard let recognizer, recognizer.isAvailable else {
             errorMessage = "Speech recognition isn't available right now. Check your internet connection and try again."
+            failureIsPermanent = true
+            Breadcrumb.log("start failed: recogniser unavailable")
             return
         }
         Breadcrumb.log("2 asking for speech permission")
         guard await Self.speechAuthorized() else {
             errorMessage = "Speech Recognition is off for Kitty. Turn it on in Settings > Kitty."
+            failureIsPermanent = true
+            Breadcrumb.log("start failed: speech permission off")
             return
         }
         Breadcrumb.log("3 asking for microphone permission")
         guard await AVAudioApplication.requestRecordPermission() else {
             errorMessage = "Microphone is off for Kitty. Turn it on in Settings > Kitty."
+            failureIsPermanent = true
+            Breadcrumb.log("start failed: microphone permission off")
             return
         }
 
@@ -173,18 +183,7 @@ final class SpeechRecognizer: ObservableObject {
             }
             guard sessionID == id else { return }   // cancelled while waiting
 
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            request.shouldReportPartialResults = true
-            request.contextualStrings = vocabulary?() ?? []
-            if continuous {
-                request.addsPunctuation = true
-                request.taskHint = .dictation
-            }
-            if (lightweight && preferOnDevice || bargeIn), recognizer.supportsOnDeviceRecognition {
-                request.requiresOnDeviceRecognition = true
-            }
-            self.request = request
-            spike.onDevice = request.requiresOnDeviceRecognition
+            let request = makeRequest(for: recognizer)
 
             // Mic setup runs off the main thread so the UI never freezes.
             Breadcrumb.log("5 starting microphone")
@@ -192,28 +191,72 @@ final class SpeechRecognizer: ObservableObject {
             Breadcrumb.log("6 microphone running")
             guard sessionID == id else { capture.stop(); return }   // cancelled while starting
 
-            task = Self.startTask(recognizer: recognizer, request: request) { [weak self] text, words, isFinal, done in
-                guard let self else { return }
-                Task { @MainActor in
-                    guard self.sessionID == id else { return }
-                    if let text {
-                        self.words = words
-                        self.spike.record(words, isFinal: isFinal)
-                        self.transcript = text
-                        self.onPartial?(text)
-                        if self.autoStopOnSilence && !text.isEmpty { self.armTimer(seconds: 1.6) }
-                    }
-                    if done { self.finish() }
-                }
-            }
+            beginTask(recognizer: recognizer, request: request, id: id)
             isRecording = true
             Breadcrumb.log("7 listening")
             if autoStopOnSilence { armTimer(seconds: 8) }   // give up if nobody speaks
         } catch {
             errorMessage = "Couldn't start listening: \(error.localizedDescription)"
+            Breadcrumb.log("start failed: \(error.localizedDescription) [\(String(describing: type(of: error)))]")
             cleanup()
         }
     }
+
+    private func makeRequest(for recognizer: SFSpeechRecognizer) -> SFSpeechAudioBufferRecognitionRequest {
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.contextualStrings = vocabulary?() ?? []
+        if continuous {
+            request.addsPunctuation = true
+            request.taskHint = .dictation
+        }
+        if (lightweight && preferOnDevice || bargeIn), recognizer.supportsOnDeviceRecognition {
+            request.requiresOnDeviceRecognition = true
+        }
+        self.request = request
+        spike.onDevice = request.requiresOnDeviceRecognition
+        return request
+    }
+
+    private func beginTask(recognizer: SFSpeechRecognizer, request: SFSpeechAudioBufferRecognitionRequest, id: Int) {
+        task = Self.startTask(recognizer: recognizer, request: request) { [weak self] text, words, isFinal, done in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.sessionID == id else { return }
+                if let text {
+                    self.words = words
+                    self.spike.record(words, isFinal: isFinal)
+                    self.transcript = text
+                    self.onPartial?(text)
+                    if self.autoStopOnSilence && !text.isEmpty { self.armTimer(seconds: 1.6) }
+                }
+                if done { self.finish() }
+            }
+        }
+    }
+
+    /// Ends the current recognition and starts a fresh one on the microphone that is already running. The audio session and
+    /// engine are not touched, so nothing can fail on the audio side and no speech is missed. False if the mic is not running.
+    @discardableResult
+    func restartRecognition() -> Bool {
+        guard isRecording, let recognizer, recognizer.isAvailable else { return false }
+        sessionID += 1
+        let id = sessionID
+        task?.cancel()
+        task = nil
+        request?.endAudio()
+        transcript = ""
+        words = []
+        delivered = false
+        let request = makeRequest(for: recognizer)
+        capture.swap(to: request)
+        beginTask(recognizer: recognizer, request: request, id: id)
+        Breadcrumb.log("recognition restarted on the running mic")
+        return true
+    }
+
+    /// A fresh audio engine for the next start (used by the last retry after a failure).
+    func resetAudioEngine() { capture.recreateEngine() }
 
     func stop() {
         guard isRecording else { return }
@@ -307,11 +350,28 @@ nonisolated enum CaptureError: LocalizedError {
 }
 
 nonisolated final class AudioCapture: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private let queue = DispatchQueue(label: "kitty.audiocapture")
     private var tapInstalled = false
 
+    /// Where the microphone buffers go. It can be swapped while the engine keeps running (see `swap(to:)`).
+    private let lock = NSLock()
+    private var sink: SFSpeechAudioBufferRecognitionRequest?
+
+    private func setSink(_ request: SFSpeechAudioBufferRecognitionRequest?) {
+        lock.lock(); sink = request; lock.unlock()
+    }
+
+    private func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock(); let target = sink; lock.unlock()
+        target?.append(buffer)
+    }
+
+    /// Point the running microphone at a new recognition request. No engine or session change.
+    func swap(to request: SFSpeechAudioBufferRecognitionRequest) { setSink(request) }
+
     func start(feeding request: SFSpeechAudioBufferRecognitionRequest, voiceProcessing: Bool = false) async throws {
+        setSink(request)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             queue.async {
                 do {
@@ -328,8 +388,8 @@ nonisolated final class AudioCapture: @unchecked Sendable {
                         input.removeTap(onBus: 0)
                         self.tapInstalled = false
                     }
-                    input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-                        request.append(buffer)
+                    input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+                        self?.append(buffer)
                     }
                     self.tapInstalled = true
                     Breadcrumb.log("  queue: starting engine")
@@ -338,6 +398,7 @@ nonisolated final class AudioCapture: @unchecked Sendable {
                     Breadcrumb.log("  queue: engine started")
                     cont.resume()
                 } catch {
+                    Breadcrumb.log("  queue: engine failed: \(error.localizedDescription)")
                     cont.resume(throwing: error)
                 }
             }
@@ -346,12 +407,26 @@ nonisolated final class AudioCapture: @unchecked Sendable {
 
     /// Safe to call any time, even if nothing was started.
     func stop() {
+        setSink(nil)
         queue.async {
             if self.engine.isRunning { self.engine.stop() }
             if self.tapInstalled {
                 self.engine.inputNode.removeTap(onBus: 0)
                 self.tapInstalled = false
             }
+        }
+    }
+
+    /// A brand new engine for the next start, in case the old one is stuck after a route or session change.
+    func recreateEngine() {
+        queue.async {
+            if self.engine.isRunning { self.engine.stop() }
+            if self.tapInstalled {
+                self.engine.inputNode.removeTap(onBus: 0)
+                self.tapInstalled = false
+            }
+            self.engine = AVAudioEngine()
+            Breadcrumb.log("  queue: audio engine recreated")
         }
     }
 }
@@ -375,6 +450,7 @@ nonisolated enum AudioSessionControl {
                     Breadcrumb.log("  queue: audio session active")
                     cont.resume()
                 } catch {
+                    Breadcrumb.log("  queue: audio session failed: \(error.localizedDescription)")
                     cont.resume(throwing: error)
                 }
             }

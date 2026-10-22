@@ -40,6 +40,11 @@ final class VoiceConversation: ObservableObject {
     /// Kitty is talking. The mic is off then, so tapping the mic button stops her and starts listening.
     @Published private(set) var isSpeaking = false
     private var spokenNow = ""          // what Kitty is saying right now, so her own voice is not mistaken for yours
+    private var userMuted = false       // you (or the idle timeout) turned the mic off: the watchdog leaves it off
+    private var micBlocked = false      // a permission problem: only you can fix it, so do not keep retrying
+    private var startingMic = false
+    private var bargeRestarts: [Date] = []
+    private var watchdogTicks = 0
     @Published private(set) var micOn = false { didSet { turns.state.setListening(micOn) } }
     @Published private(set) var errorMessage: String?
 
@@ -86,8 +91,9 @@ final class VoiceConversation: ObservableObject {
 
     init() {
         speech.continuous = true
+        // Called on the main actor, in order, so a late partial of the old session can never slip in after a restart.
         speech.onPartial = { [weak self] text in
-            Task { @MainActor in self?.heard(text) }
+            MainActor.assumeIsolated { self?.heard(text) }
         }
         speech.onFinished = { [weak self] text in
             Task { @MainActor in self?.sessionEnded(text) }
@@ -100,6 +106,9 @@ final class VoiceConversation: ObservableObject {
     func open(seed: String?) {
         active = true
         errorMessage = nil
+        userMuted = false
+        micBlocked = false
+        speech.bargeIn = BargeIn.enabled        // one duplex audio setup for the whole conversation
         lines = []
         turns.state.reset()
         resetTurn()
@@ -126,6 +135,7 @@ final class VoiceConversation: ObservableObject {
         watcherTask?.cancel()
         idleTask?.cancel()
         countdownActive = false
+        speech.bargeIn = false                  // let the audio session shut down with the screen
         speech.cancel()
         Speaker.stopIfActive()
         micOn = false
@@ -135,16 +145,37 @@ final class VoiceConversation: ObservableObject {
     // MARK: Listening
 
     private func startMic() async {
-        guard active else { return }
+        guard active, !startingMic else { return }
+        startingMic = true
+        defer { startingMic = false }
         speech.cancel()
-        await speech.start()
-        guard active else { speech.cancel(); return }
-        if let message = speech.errorMessage {
+        var attempt = 0
+        while true {
+            await speech.start()
+            guard active else { speech.cancel(); return }
+            guard let message = speech.errorMessage else { break }
+            // A start-up hiccup (audio session or engine busy after a route change) is retried quietly. Only a permission
+            // problem is shown, because only you can fix it.
+            if let delay = MicPolicy.retryDelay(afterFailure: attempt, permanent: speech.failureIsPermanent) {
+                Breadcrumb.log("mic start failed (try \(attempt + 1)): \(message)")
+                speech.cancel()
+                if attempt == MicPolicy.retryDelays.count - 1 { speech.resetAudioEngine() }
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard active, micWanted, !userMuted else { return }
+                attempt += 1
+                continue
+            }
             errorMessage = message
             micOn = false
+            micBlocked = speech.failureIsPermanent
             if proposal == nil { stage = .idle }
             return
         }
+        micBlocked = false
+        micMarkedOn()
+    }
+
+    private func micMarkedOn() {
         micOn = speech.isRecording
         if micOn {
             errorMessage = nil
@@ -153,7 +184,16 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
+    /// Back to listening after a turn: a fresh recognition on the microphone that is already running (no audio change),
+    /// or a full start if it is not running.
+    private func resumeListening() async {
+        guard active, micWanted, !userMuted else { return }
+        if speech.isRecording, speech.restartRecognition() { micMarkedOn(); return }
+        await startMic()
+    }
+
     func pauseListening() {
+        userMuted = true                        // an explicit mute (or the idle timeout): the watchdog respects it
         speech.cancel()
         micOn = false
         if stage == .listening { stage = .idle }
@@ -161,7 +201,12 @@ final class VoiceConversation: ObservableObject {
 
     /// Tap the mic: "I'm done" while you are talking, mute when there is nothing said, or start listening.
     func micTapped() {
-        if isSpeaking { stopSpeaking(); return }
+        if isSpeaking {
+            micWanted = true                    // tapping the mic is asking to talk
+            userMuted = false
+            stopSpeaking()
+            return
+        }
         if micOn {
             let text = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
             if stage == .listening, !text.isEmpty, norm(SpeechCleaner.clean(text).text) != norm(processedText) {
@@ -171,6 +216,8 @@ final class VoiceConversation: ObservableObject {
             }
         } else {
             micWanted = true
+            userMuted = false
+            micBlocked = false
             Task { await startMic() }
         }
     }
@@ -195,10 +242,11 @@ final class VoiceConversation: ObservableObject {
     private func sessionEnded(_ text: String) {
         guard active else { return }
         if isSpeaking {
-            // The recogniser ended while Kitty is still talking: open it again so "stop" keeps working.
-            restarts.append(Date())
-            restarts = restarts.filter { Date().timeIntervalSince($0) < 10 }
-            if restarts.count <= 4 { Task { _ = await startBargeInListening() } }
+            // The recogniser ended while Kitty is still talking: open it again so "stop" keeps working. This has its own
+            // budget, so it can never use up the one for normal listening.
+            bargeRestarts.append(Date())
+            bargeRestarts = bargeRestarts.filter { Date().timeIntervalSince($0) < 10 }
+            if bargeRestarts.count <= 6 { Task { _ = await startBargeInListening() } }
             return
         }
         guard micOn else { return }
@@ -209,13 +257,13 @@ final class VoiceConversation: ObservableObject {
         }
         restarts.append(Date())
         restarts = restarts.filter { Date().timeIntervalSince($0) < 10 }
-        if restarts.count > 4 {
-            micOn = false
-            errorMessage = "Listening stopped. Tap the mic to continue."
-            if stage == .listening { stage = .idle }
-            return
+        let delay = MicPolicy.restartDelay(restartsInWindow: restarts.count)
+        Task {
+            // Many endings in a row: wait a little longer each time instead of giving up and asking for a tap.
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            guard self.active, self.micWanted, !self.userMuted else { return }
+            await self.startMic()
         }
-        Task { await startMic() }
     }
 
     /// You spoke again: stop the current work, keep the words, and wait for the next pause.
@@ -236,9 +284,20 @@ final class VoiceConversation: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 120_000_000)
                 guard let self else { return }
+                self.watchdog()
                 self.tick()
             }
         }
+    }
+
+    /// About once a second: if the mic is off and nobody turned it off, turn it back on.
+    private func watchdog() {
+        watchdogTicks += 1
+        guard watchdogTicks % 8 == 0 else { return }
+        guard MicPolicy.shouldRestart(active: active, micWanted: micWanted, userMuted: userMuted, blocked: micBlocked, micOn: micOn,
+                                      isSpeaking: isSpeaking, starting: startingMic, thinking: stage == .thinking) else { return }
+        Breadcrumb.log("watchdog: mic was off, restarting it")
+        Task { await startMic() }
     }
 
     private func tick() {
@@ -403,7 +462,7 @@ final class VoiceConversation: ObservableObject {
         if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
         lines.append(ChatLine(role: .kitty, text: "Okay, I didn't change anything."))
         resetTurn()
-        Task { if micWanted { await startMic() } }
+        Task { await resumeListening() }
     }
 
     /// Type instead of speaking: counts as part of the same turn and starts working right away.
@@ -432,8 +491,8 @@ final class VoiceConversation: ObservableObject {
         resetTurn()
         if speakReplies {
             await speakAndResume(Speaker.spokenForm(of: reply.message, isList: reply.spec != nil, hint: reply.hint))
-        } else if micWanted {
-            await startMic()               // a fresh recognition session for the next thing you say
+        } else {
+            await resumeListening()        // a fresh recognition for the next thing you say
         }
     }
 
@@ -461,26 +520,28 @@ final class VoiceConversation: ObservableObject {
 
     /// The microphone is off while Kitty talks, so she never hears herself.
     func speakAndResume(_ text: String) async {
-        speech.cancel()
         micOn = false
         isSpeaking = true
         spokenNow = text
         let duplex = await startBargeInListening()
+        if !duplex { speech.cancel() }          // no hands-free stop: the mic stays off while she talks
         await Speaker.shared.speakAndWait(text, duplex: duplex)
         isSpeaking = false
         spokenNow = ""
-        speech.bargeIn = false
-        guard active, micWanted else { speech.cancel(); return }
-        await startMic()               // a fresh session: nothing Kitty's voice left behind carries over
+        guard active, micWanted, !userMuted else { speech.cancel(); return }
+        // The audio session and microphone stay as they are (see `restartRecognition`); only the recognition starts afresh,
+        // so nothing of Kitty's voice carries over and a stop never touches the audio setup.
+        if duplex, speech.restartRecognition() { micMarkedOn(); return }
+        await startMic()
     }
 
-    /// Opens the microphone while Kitty talks so "stop", or anything else you say, can cut her off. False if it cannot.
+    /// Keeps the microphone open while Kitty talks so "stop", or anything else you say, can cut her off. False if it cannot.
     private func startBargeInListening() async -> Bool {
-        guard BargeIn.enabled, active, micWanted else { return false }
+        guard BargeIn.enabled, active, micWanted, !userMuted else { return false }
         speech.bargeIn = true
+        if speech.isRecording { return speech.restartRecognition() }
         await speech.start()
         guard speech.isRecording, speech.errorMessage == nil else {
-            speech.bargeIn = false
             speech.cancel()
             return false
         }
@@ -503,7 +564,6 @@ final class VoiceConversation: ObservableObject {
     func stopSpeaking() {
         guard isSpeaking else { return }
         Speaker.stopIfActive()
-        micWanted = true
     }
 
     func speak(_ text: String) { Task { await speakAndResume(text) } }
@@ -513,7 +573,7 @@ final class VoiceConversation: ObservableObject {
     private func armIdle() {
         idleTask?.cancel()
         idleTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 25_000_000_000)
+            try? await Task.sleep(nanoseconds: 90_000_000_000)
             guard !Task.isCancelled, let self else { return }
             if self.stage == .listening, self.turnText.isEmpty { self.pauseListening() }   // nobody is talking: stop listening
         }
