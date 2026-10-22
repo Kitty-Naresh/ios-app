@@ -523,3 +523,48 @@ final class PauseProfileTests: XCTestCase {
         XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 1.7, lastActed: "", profile: PauseProfile(median: 1.2, p90: 2.0)), .keepListening)
     }
 }
+
+// MARK: The live "Hearing N tasks" chip
+
+final class HearingChipTests: XCTestCase {
+    private let now = LongTurnAnalyzerTests.now
+
+    func testTheInLawsTurnShowsFourTasks() {
+        XCTAssertEqual(HearingChip.count(in: LongTurnAnalyzerTests.inLaws, now: now), 4)
+        XCTAssertEqual(HearingChip.label(4), "Hearing 4 tasks")
+        XCTAssertEqual(HearingChip.label(1), "Hearing 1 task")
+    }
+
+    func testTheCountGrowsAsTheSpeechDoes() {
+        let said = "I want to get ready for the weekend so first clean the bathrooms and then mop the living room and also call the caterer"
+        let words = said.split(separator: " ").map(String.init)
+        var counts: [Int] = []
+        for n in stride(from: 13, through: words.count, by: 3) {
+            counts.append(HearingChip.count(in: words.prefix(n).joined(separator: " "), now: now) ?? 0)
+        }
+        XCTAssertEqual(counts, counts.sorted(), "\(counts)")
+        XCTAssertGreaterThanOrEqual(counts.last ?? 0, 3)
+    }
+
+    func testHiddenForShortTurnsAndForChatterOnly() {
+        XCTAssertNil(HearingChip.count(in: "Buy milk and bread", now: now))
+        XCTAssertNil(HearingChip.count(in: "Honestly the house is such a mess right now and I am so tired of all of it you know", now: now))
+    }
+
+    func testTheChipNeverShowsAnythingFromTheModel() {
+        // It is computed from text alone: the same words give the same count with or without any engine.
+        XCTAssertEqual(HearingChip.count(in: LongTurnAnalyzerTests.inLaws, now: now), HearingChip.count(in: LongTurnAnalyzerTests.inLaws, now: now))
+    }
+
+    func testTheThrottleAllowsOneCheckEveryHalfSecond() {
+        var t = HearingThrottle()
+        let start = Date()
+        XCTAssertTrue(t.allow(at: start))
+        XCTAssertFalse(t.allow(at: start.addingTimeInterval(0.2)))
+        XCTAssertFalse(t.allow(at: start.addingTimeInterval(0.49)))
+        XCTAssertTrue(t.allow(at: start.addingTimeInterval(0.5)))
+        XCTAssertFalse(t.allow(at: start.addingTimeInterval(0.7)))
+        t.reset()
+        XCTAssertTrue(t.allow(at: start.addingTimeInterval(0.7)))
+    }
+}

@@ -358,3 +358,34 @@ extension LongTurnAnalyzer {
         return (groups, i < actions.count ? Array(actions[i...]) : [])
     }
 }
+
+// MARK: - Live "Hearing N tasks" chip
+
+/// What the faint chip near the transcript says while someone is still talking. Computed from the speech so far with
+/// `LongTurnAnalyzer` alone: no model call, and nothing the model said is ever shown here.
+nonisolated enum HearingChip {
+    /// The number of tasks heard so far, or nil when the chip should stay hidden (short turn, or no action yet).
+    static func count(in text: String, words: [SpokenWord] = [], now: Date = Date()) -> Int? {
+        let cleaned = SpeechCleaner.clean(text).text
+        guard LongTurnAnalyzer.isLong(cleaned) else { return nil }
+        let n = LongTurnAnalyzer.analyze(cleaned, words: words, now: now).actions.count
+        return n >= 1 ? n : nil
+    }
+
+    static func label(_ n: Int) -> String { n == 1 ? "Hearing 1 task" : "Hearing \(n) tasks" }
+}
+
+/// At most one analysis per interval: partials arrive many times a second.
+nonisolated struct HearingThrottle: Equatable, Sendable {
+    var interval: TimeInterval = 0.5
+    private(set) var last: Date? = nil
+
+    /// True (and remembers the time) when enough time has passed since the last allowed call.
+    mutating func allow(at now: Date) -> Bool {
+        if let last, now.timeIntervalSince(last) < interval { return false }
+        last = now
+        return true
+    }
+
+    mutating func reset() { last = nil }
+}

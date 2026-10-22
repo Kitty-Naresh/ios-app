@@ -30,6 +30,9 @@ final class VoiceConversation: ObservableObject {
     // What the screen shows
     @Published private(set) var stage: Stage = .idle
     @Published private(set) var turnText = ""          // everything you said in this turn, across pauses
+    @Published private(set) var hearingTasks: Int?      // live "Hearing N tasks" chip: from the words so far, never from the model
+    private var hearingThrottle = HearingThrottle()
+    private var hearingTask: Task<Void, Never>?
     @Published private(set) var proposal: Proposal?
     @Published private(set) var question = ""
     @Published private(set) var lines: [ChatLine] = []
@@ -257,11 +260,36 @@ final class VoiceConversation: ObservableObject {
         turnText = full
         lastChange = Date()
         armIdle()
+        updateHearingChip()
         // "done" at the end is not new content, and cleaning means "um" or "no wait" alone don't count as new words either.
         let spoken = SpeechCleaner.clean(VoiceTurnManager.splitFinalizer(full).text).text
         if stage == .thinking || stage == .preview || stage == .question, norm(spoken) != norm(processedText) {
             interrupt()                    // you kept talking
         }
+    }
+
+    /// At most every 0.5 s. A partial skipped by the throttle is looked at once the interval has passed, so the last words count.
+    private func updateHearingChip() {
+        guard stage == .listening else { return }
+        if hearingThrottle.allow(at: Date()) {
+            hearingTask?.cancel()
+            hearingTask = nil
+            hearingTasks = HearingChip.count(in: liveText, words: speech.words)
+        } else if hearingTask == nil {
+            hearingTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 550_000_000)
+                guard !Task.isCancelled, let self else { return }
+                self.hearingTask = nil
+                if self.stage == .listening { self.hearingTasks = HearingChip.count(in: self.liveText, words: self.speech.words) }
+            }
+        }
+    }
+
+    private func hideHearingChip() {
+        hearingTask?.cancel()
+        hearingTask = nil
+        hearingThrottle.reset()
+        hearingTasks = nil
     }
 
     /// The recognizer ended on its own (time limit). Keep what was heard and listen again.
@@ -398,6 +426,7 @@ final class VoiceConversation: ObservableObject {
             }
         }
 
+        hideHearingChip()
         Breadcrumb.log("pause: working on “\(text.prefix(60))”")
         if !typed, !speech.words.isEmpty { pauseProfile = PauseProfile.record(words: speech.words) }
         lastActedRaw = turnText
@@ -537,6 +566,7 @@ final class VoiceConversation: ObservableObject {
     }
 
     private func resetTurn() {
+        hideHearingChip()
         turns.state.clearPending()
         sessionEchoLead = 0
         lastActedRaw = ""
@@ -921,7 +951,19 @@ struct ConversationView: View {
     }
 
     private var youBubble: some View {
-        youBubbleView(convo.liveText, struck: convo.liveRemoved, live: convo.stage == .listening)
+        VStack(alignment: .trailing, spacing: 6) {
+            youBubbleView(convo.liveText, struck: convo.liveRemoved, live: convo.stage == .listening)
+            if let n = convo.hearingTasks, convo.stage == .listening {
+                Label(HearingChip.label(n), systemImage: "ear")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .transition(.opacity)
+                    .accessibilityLabel(HearingChip.label(n))
+            }
+        }
     }
 
     @ViewBuilder
