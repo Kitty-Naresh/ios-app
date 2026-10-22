@@ -603,6 +603,12 @@ enum EvalSuite {
                     EvalTurn(say: "And the first task is, to write a strategy document.", script: .none, silence: 3.0,
                              expect: TurnExpect.ask("project called", model: false)),
                  ]),
+        // A numbered list with a number missing: one specific question, no guessing, and no model call.
+        EvalCase(id: 107, category: "J", name: "A numbered list skips a number: asks if there is a number three", tags: [.messy, .clarify],
+                 turns: [
+                    EvalTurn(say: "I want to make a list of tasks for the Garden project. Number one buy soil. Number two plant tomatoes. Number four water the plants.",
+                             script: .none, silence: 3.5, expect: TurnExpect.ask("number three", model: false)),
+                 ]),
     ]
 
     /// The twelve to start with.
@@ -1244,7 +1250,7 @@ final class KittyEvals: XCTestCase {
         XCTAssertEqual(Set(EvalSuite.all.map(\.id)).count, EvalSuite.all.count, "ids must be unique")
         XCTAssertEqual(Set(numbered.map(\.category)), ["A", "B", "C", "D", "E", "F", "G"])
         XCTAssertGreaterThanOrEqual(EvalSuite.all.filter { $0.category == "I" }.count, 12)
-        XCTAssertEqual(EvalSuite.all.filter { $0.category == "J" }.map(\.id), Array(76...106))
+        XCTAssertEqual(EvalSuite.all.filter { $0.category == "J" }.map(\.id), Array(76...107))
         XCTAssertEqual(EvalSuite.minimal12.count, 12)
     }
 

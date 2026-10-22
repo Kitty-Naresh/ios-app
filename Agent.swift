@@ -1943,7 +1943,7 @@ extension TaskAgent {
                     let made = store.ensureProfile(plan.name)
                     var count = 0
                     for p in plan.items {
-                        let items = store.addItems([p.title], to: made.profile, due: p.due, assignee: p.assignee)
+                        let items = store.addItems([p.title], to: made.profile, due: p.due, assignee: p.assignee, notes: [p.notes])
                         count += items.count
                         created += items.map(\.id)
                     }
@@ -2723,7 +2723,9 @@ enum ActionLexicon {
         "wipe", "wrap", "book", "meet", "pickup", "dispose", "restock", "spray", "steam", "peel", "chop", "boil", "heat", "wake",
         "test", "inspect", "weigh", "submit", "file", "register", "apply", "donate", "recycle", "throw", "bleach", "descale",
         "write", "draft", "review", "research", "build", "develop", "launch", "outline", "analyze", "analyse", "finalize", "finalise",
-        "brainstorm", "evaluate", "assess", "define", "publish", "approve", "negotiate", "design"
+        "brainstorm", "evaluate", "assess", "define", "publish", "approve", "negotiate", "design",
+        "validate", "verify", "implement", "deploy", "release", "ship", "improve", "optimize", "optimise", "investigate", "discuss",
+        "align", "share"
     ]
 }
 
@@ -2984,6 +2986,13 @@ enum TaskValidator {
         guard !normalized.isEmpty else { return nil }
         let said = Set(LocalSemanticPrechecker.tokens(utterance))
         let raw = value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        // "for Kitty project" names a project, never the person the work is for.
+        let tokens = LocalSemanticPrechecker.tokens(utterance)
+        let parts = LocalSemanticPrechecker.tokens(raw)
+        if let last = parts.last, !parts.isEmpty {
+            for (i, w) in tokens.enumerated() where w == last && i + 1 < tokens.count
+                && ["project", "app", "list", "board", "workspace", "folder", "channel"].contains(tokens[i + 1]) { return nil }
+        }
         let stated = raw.contains(" ") ? utterance.lowercased().contains(raw) : said.contains(raw)
         if stated {
             if !ReadBackCheck.isRole(normalized),
@@ -3183,8 +3192,8 @@ final class ConversationStateManager {
     let confirmation = ConfirmationManager()
     private(set) var pendingProposal: Proposal?
     private(set) var lastProcessed = ""         // the merged speech the pending draft or question was built from
-    /// A project's tasks have been heard, and Kitty is waiting to hear what the project is called.
-    var projectTasks: [String]?
+    /// A spoken list has been heard and Kitty is asking about the parts that were unclear (its name, a missing number…).
+    var pendingList: ListOutline.Outline?
 
     /// "Did you say Rani?": what Kitty is waiting to hear back, and what to do with the answer.
     struct ReadBack {
@@ -3244,7 +3253,7 @@ final class ConversationStateManager {
         clarification = nil
         pendingProposal = nil
         lastProcessed = ""
-        projectTasks = nil
+        pendingList = nil
         readBack = nil
         readBackUsed = false
         drafts.clear()
@@ -3576,7 +3585,7 @@ final class VoiceTurnManager {
         } else if state.phase == .awaitingClarification, reply == .cancel {
             lastTrace.route = "cancel"
             return .reply(AgentReply(message: "Okay, never mind.", didAdd: false))
-        } else if !state.drafts.hasContent, reply == .yes || reply == .no {
+        } else if !state.drafts.hasContent, state.pendingList == nil, reply == .yes || reply == .no {
             lastTrace.route = "nothing-pending"          // a stray "yes": nothing to confirm, and nothing to ask
             return .reply(AgentReply(message: "All set.", didAdd: false))
         }
@@ -3587,9 +3596,9 @@ final class VoiceTurnManager {
             return applyEdit(edit, ctx: ctx)
         }
 
-        // 2b. A project and its tasks ("I'm working on a project… the first task is…"): the project is a list.
-        if state.pendingProposal == nil, !state.drafts.hasContent, let project = projectTurn(utterance: utterance, delta: delta, ctx: ctx) {
-            return project
+        // 2b. A spoken list ("a list of tasks for the Kitty project, number one…, number two…"): read in Swift, never guessed.
+        if state.pendingProposal == nil, !state.drafts.hasContent, let list = listTurn(utterance: utterance, delta: delta, ctx: ctx) {
+            return list
         }
 
         // 3. The model decides what it means.
@@ -3856,38 +3865,44 @@ final class VoiceTurnManager {
         return t.contains { ActionLexicon.verbs.contains($0) } || t.count >= 3
     }
 
-    /// A project and its tasks become items on a named list. The project's name is asked for only when it was not said.
-    private func projectTurn(utterance: String, delta: String, ctx: ValidationContext) -> TurnResult? {
-        var tasks: [String]
-        var name: String?
-        if let waiting = state.projectTasks {
-            tasks = waiting
-            if ProjectOutline.hasMarker(delta), let more = ProjectOutline.parse("project " + delta) {
-                tasks += more.tasks                                     // more tasks came before the name did
-                name = more.name
-            } else {
-                name = ProjectOutline.name(fromAnswer: delta)
-            }
-        } else if let outline = ProjectOutline.parse(utterance) {
-            tasks = outline.tasks
-            name = outline.name
+    /// A spoken list becomes tasks: each numbered part is one task, the intro is not a task, and anything unclear is asked
+    /// about, one specific question at a time, instead of being guessed.
+    private func listTurn(utterance: String, delta: String, ctx: ValidationContext) -> TurnResult? {
+        var outline: ListOutline.Outline
+        if var waiting = state.pendingList {
+            ListOutline.apply(answer: delta, to: &waiting)
+            outline = waiting
+        } else if let parsed = ListOutline.parse(utterance, knownPeople: knownAssignees()) {
+            outline = parsed
         } else {
             return nil
         }
-        guard let project = name.map({ TaskStore.cleanProfileName($0) }), !project.isEmpty else {
-            state.projectTasks = tasks
-            lastTrace.route = "project-name"
-            let q = "What's the project called?"
-            switch state.clarify.register(question: q, field: ClarificationStateManager.field(for: q, action: "create_task")) {
-            case .ask(let asked): return .question(asked)
+        while let q = outline.questions.first {
+            switch state.clarify.register(question: q.text, field: ClarificationStateManager.field(for: q.text, action: "create_task")) {
+            case .ask(let asked):
+                state.pendingList = outline
+                lastTrace.route = "list-question"
+                return .question(asked)
             case .exhausted:
-                state.projectTasks = nil
-                return .question("Sorry, I couldn't get the project's name. What would you like me to add?")
+                ListOutline.finalize(&outline)                      // out of rounds: the most careful reading, then go on
             }
         }
-        state.projectTasks = nil
-        lastTrace.route = "project-list"
-        let planned = tasks.map { PlannedTask(title: $0, category: .guess(from: $0), due: nil, profile: project) }
+        state.pendingList = nil
+        outline.items.removeAll { $0.title.isEmpty }
+        guard !outline.items.isEmpty else {
+            return .question("Sorry, I couldn't make out the tasks. What would you like me to add?")
+        }
+        lastTrace.route = "list"
+        let list = outline.name.map { TaskStore.cleanProfileName($0) }.flatMap { $0.isEmpty ? nil : $0 }
+        let planned = outline.items.map { item -> PlannedTask in
+            let due = TaskPlanner.ruleDue(item.title)
+            let title = TaskPlanner.tidyTitle(item.title, removingDay: due != nil)
+            let who = outline.assignee ?? Assignee.detect(in: item.title)
+            var p = PlannedTask(title: title.isEmpty ? item.title : title, category: .guess(from: item.title), due: due, profile: list)
+            p.notes = item.notes
+            p.assignee = who
+            return p
+        }
         return TaskAgent.buildAddProposal(planned, usedAI: false, text: utterance, sink: sink)
     }
 

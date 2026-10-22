@@ -247,7 +247,7 @@ enum BulkDetector {
     }
 
     /// Words that are often nouns too ("buy bottled water", "book flights"): a new action only when a determiner follows.
-    private static let nounLikeVerbs: Set<String> = ["water", "iron", "book", "order", "plan", "set", "file", "label", "walk", "dust",
+    private static let nounLikeVerbs: Set<String> = ["release", "share", "water", "iron", "book", "order", "plan", "set", "file", "label", "walk", "dust",
                                                       "polish", "steam", "heat", "clear", "fill", "pack", "drink", "cook", "mop", "load"]
 
     /// "clean bathroom buy milk water the plants" (no commas, no "and"): a new verb that follows a finished action
@@ -1162,7 +1162,10 @@ enum BulkValidator {
             }
 
             // The detector found pieces the model left out: keep them as the user said them.
-            for s in segments where !items.contains(where: { Words.nounOverlap($0.title, s) > 0 }) {
+            // A piece that only sets the scene ("I want to create a list of tasks") is never added as a task. A piece counts as
+            // covered when its words are in a title or in the notes, so a task the model split into title and notes is not lost.
+            let made = items.map { (title: $0.title, notes: $0.notes) }
+            for s in segments where !ListOutline.isContext(s) && !ListOutline.covered(s, by: made) {
                 if let local = BulkDraftManager.makeItem(from: s, context: ctx) { items.append(local) }
             }
 
@@ -1181,85 +1184,382 @@ enum BulkValidator {
 }
 
 
-// MARK: A project and its tasks, spoken over several sentences
+// MARK: A list spoken over several sentences
 
-/// "I'm working on a project and I'd like a list of tasks for it. The first task is to write a strategy document."
-/// The project is a list, and each "first task is…", "second task is…" is an item on it.
-enum ProjectOutline {
-    struct Outline: Equatable {
-        var name: String?
-        var tasks: [String]
+/// "I want to create a list of tasks for the Kitty project. Number one, create a strategy document. Number two…"
+///
+/// Reads the list in Swift, so nothing depends on how the model happens to cut the speech:
+///  - every sentence is classed by what it says: setup or context (never a task), a task, or a sign-off;
+///  - list markers (number one, task two, first, 1.) make the text between them one task each;
+///  - without markers, each verb-led sentence is a task;
+///  - anything unclear becomes one specific question, never a guess.
+enum ListOutline {
+    struct Item: Equatable {
+        var title: String
+        var notes: String? = nil
+        var number: Int? = nil              // the number the speaker gave it, if any
     }
 
-    private static let ordinals = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|next|last|final"
-    private static let marker = #"\b(?:the |my |our )?(?:"# + ordinals + #")\s+(?:(?:task|one|thing|item|step|to-do|todo)\b(?:\s+(?:is|would be|will be))?|(?:is|would be|will be)\b)"#
+    enum Question: Equatable {
+        case name(isProject: Bool)
+        case kind(String)                               // the project's name is also a known person
+        case gap(missing: Int, heard: [Int])            // "one, two, four": is there a three?
+        case empty(label: String, index: Int)           // a marker with nothing after it
+        case split(index: Int)                          // one long item with a second action in it
+        case separate(text: String, after: Int)         // a new action inside a numbered item
+        case sentence(text: String, at: Int)            // a sentence that could be a task or context
+
+        var text: String {
+            switch self {
+            case .name(let project): return project ? "What's the project called?" : "What should I call the list?"
+            case .kind(let n): return "Is \(n.prefix(1).uppercased() + n.dropFirst()) the project, or a person?"
+            case .gap(let missing, let heard):
+                let names = heard.map { ListOutline.numberWord($0) }
+                let said = names.count > 1 ? names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1] : names.joined()
+                return "I heard numbers \(said). Is there a number \(ListOutline.numberWord(missing))?"
+            case .empty(let label, _): return "What is \(label)?"
+            case .split: return "Should that be one task or two?"
+            case .separate(let t, _): return "Is “\(t)” a separate task, or part of the one before?"
+            case .sentence(let t, _): return "Is “\(t)” a task, or just context?"
+            }
+        }
+    }
+
+    struct Outline: Equatable {
+        var name: String?
+        var projectMentioned = false
+        var assignee: String?
+        var items: [Item] = []
+        var context: [String] = []
+        var questions: [Question] = []
+        var contextText: String { context.joined(separator: " ") }
+    }
+
+    enum Role: Equatable { case context, task, outro, unsure }
+
+    // MARK: Words
+
+    private static let numberWords = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+    private static let ordinalWords = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
+
+    static func numberWord(_ n: Int) -> String { (1...10).contains(n) ? numberWords[n - 1] : String(n) }
+
+    private static func value(of word: String) -> Int? {
+        let w = word.lowercased()
+        if let n = Int(w) { return n }
+        if let i = numberWords.firstIndex(of: w) { return i + 1 }
+        if let i = ordinalWords.firstIndex(of: w) { return i + 1 }
+        return nil
+    }
 
     private static func regex(_ pattern: String) -> NSRegularExpression? {
         try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }
 
-    private static func matches(_ re: NSRegularExpression?, in text: String) -> [NSTextCheckingResult] {
-        guard let re else { return [] }
-        return re.matches(in: text, range: NSRange(text.startIndex..., in: text))
+    // MARK: List markers
+
+    private struct Marker { var range: Range<String.Index>; var number: Int? }
+
+    private static let nums = numberWords.joined(separator: "|")
+    private static let ords = ordinalWords.joined(separator: "|")
+    private static let nouns = #"task|one|thing|item|step|point|to-?do"#
+    private static let markerPatterns: [String] = [
+        // "number two", "no. 2", "task three", "item 4", "step one", "point 2"
+        #"\b(?:number|no\.?|task|item|step|point)\s+(\d{1,2}|"# + nums + #")\b[\s:,)-]*(?:(?:is|would be|will be)\b)?"#,
+        // "the first task is", "second one", "first is"; "next" and "last" need the noun or "is" ("last week" is not a marker)
+        #"\b(?:the |my |our )?("# + ords + #"|next|last|final)\s+(?:(?:"# + nouns + #")\b(?:\s+(?:is|would be|will be)\b)?|(?:is|would be|will be)\b)"#,
+        // "First, buy soil. Second, plant tomatoes."
+        #"\b("# + ords + #")\b\s*[,:]"#,
+        // "1." "2)" the way dictation writes a numbered list
+        #"(?:^|(?<=\s))(\d{1,2})[.)](?=\s)"#,
+    ]
+
+    private static func markers(in text: String) -> [Marker] {
+        var found: [Marker] = []
+        for pattern in markerPatterns {
+            guard let re = regex(pattern) else { continue }
+            for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let r = Range(m.range, in: text) else { continue }
+                let n = m.numberOfRanges > 1 ? Range(m.range(at: 1), in: text).flatMap { value(of: String(text[$0])) } : nil
+                found.append(Marker(range: r, number: n))
+            }
+        }
+        found.sort { $0.range.lowerBound < $1.range.lowerBound }
+        var kept: [Marker] = []
+        for m in found where kept.last.map({ m.range.lowerBound >= $0.range.upperBound }) ?? true { kept.append(m) }
+        return kept
     }
 
-    static func hasMarker(_ text: String) -> Bool { !matches(regex(marker), in: text).isEmpty }
+    static func hasMarker(_ text: String) -> Bool { !markers(in: text).isEmpty }
 
-    /// Only a turn that talks about a project or a list of tasks counts, so a plain "first task is…" is left to the model.
-    private static func hasProjectCue(_ lower: String) -> Bool {
+    // MARK: Sentences and what each one is
+
+    static func sentences(_ text: String) -> [String] {
+        var out: [String] = []
+        var current = ""
+        let chars = Array(text)
+        for (i, c) in chars.enumerated() {
+            if ".!?;\n".contains(c), i + 1 >= chars.count || chars[i + 1].isWhitespace {
+                if !current.trimmingCharacters(in: .whitespaces).isEmpty { out.append(current.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                current = ""
+            } else {
+                current.append(c)
+            }
+        }
+        if !current.trimmingCharacters(in: .whitespaces).isEmpty { out.append(current.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return out
+    }
+
+    private static let connectors: Set<String> = ["okay", "ok", "alright", "right", "so", "now", "and", "then", "also", "next", "um", "uh", "well", "yeah"]
+    private static let frames: [[String]] = [["i", "want", "to"], ["i", "need", "to"], ["i", "have", "to"], ["i'd", "like", "to"], ["i", "would", "like", "to"],
+                                             ["we", "need", "to"], ["we", "have", "to"], ["we", "should"], ["i", "should"], ["please"], ["can", "you"],
+                                             ["could", "you"], ["to"]]
+    private static let selfWords: Set<String> = ["i", "im", "i'm", "i'd", "id", "i've", "ive", "i'll", "ill", "we", "we're", "were", "let", "let's", "lets",
+                                                 "this", "these", "here", "there", "it", "its", "it's"]
+    private static let finalizers: [[String]] = [["that's", "all"], ["thats", "all"], ["that", "is", "all"], ["that's", "it"], ["thats", "it"],
+                                                 ["that", "is", "it"], ["done"], ["thank", "you"], ["thanks"]]
+
+    private static func leadWords(_ t: [String]) -> [String] {
+        var w = t
+        var changed = true
+        while changed, !w.isEmpty {
+            changed = false
+            if connectors.contains(w[0]) { w.removeFirst(); changed = true; continue }
+            for f in frames where w.count > f.count && Array(w.prefix(f.count)) == f { w.removeFirst(f.count); changed = true; break }
+        }
+        return w
+    }
+
+    private static func hasSetupPhrase(_ t: [String]) -> Bool {
+        for phrase in LocalSemanticPrechecker.announcements where phrase.count <= t.count {
+            for start in 0...(t.count - phrase.count) where Array(t[start..<(start + phrase.count)]) == phrase { return true }
+        }
+        return false
+    }
+
+    /// What a sentence is, by what it says and not by where it sits.
+    static func role(of sentence: String) -> Role {
+        let t = LocalSemanticPrechecker.tokens(sentence)
+        guard !t.isEmpty else { return .context }
+        if t.count <= 3, finalizers.contains(where: { t.starts(with: $0) }) { return .outro }
+        let w = leadWords(t)
+        guard let first = w.first else { return .context }
+        let setup = hasSetupPhrase(t)
+        if ActionLexicon.verbs.contains(first), !setup { return .task }
+        if setup { return .context }
+        if selfWords.contains(t[0]) || t.contains("project") { return .context }        // "I'm working on Kitty project", "this is for…"
+        if w.count > 4 { return .context }
+        return w.count >= 2 ? .unsure : .context
+    }
+
+    /// A sentence about the situation, not an action: used to keep it from being added as a task.
+    static func isContext(_ sentence: String) -> Bool {
+        let r = role(of: sentence)
+        return r == .context || r == .outro
+    }
+
+    // MARK: Cleaning one item
+
+    private static let leadIns = ["i would say ", "i'd say ", "i would say, ", "let's say ", "let us say ", "which is ", "is to ", "it should be ", "it is ",
+                                  "it's ", "so ", "um ", "uh ", "okay ", "to "]
+
+    private static func clean(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-!?\n"))
+        var changed = true
+        while changed {
+            changed = false
+            for l in leadIns where s.lowercased().hasPrefix(l) {
+                s = String(s.dropFirst(l.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-"))
+                changed = true
+            }
+        }
+        for tail in [" and", " then", " also", " so"] where s.lowercased().hasSuffix(tail) { s = String(s.dropLast(tail.count)) }
+        return s.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-!?"))
+    }
+
+    private static func sentenceCase(_ s: String) -> String {
+        guard let f = s.first else { return s }
+        return f.uppercased() + s.dropFirst()
+    }
+
+    /// "Create a strategy document, full strategy document" -> title "Create a strategy document", notes "Full strategy document".
+    /// A clause that starts with "and"/"then" continues the title instead ("…robust, and bring a closure").
+    static func titleAndNotes(_ raw: String, number: Int? = nil) -> Item {
+        let cleaned = clean(raw)
+        var parts = cleaned.components(separatedBy: ",").map { clean($0) }.filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return Item(title: "", notes: nil, number: number) }
+        var title = parts.removeFirst()
+        var notes: [String] = []
+        for p in parts {
+            let first = p.split(separator: " ").first.map { $0.lowercased() } ?? ""
+            if ["and", "then", "also", "but", "plus"].contains(first) { title += " " + p } else { notes.append(p) }
+        }
+        let tidy = TaskPlanner.tidyTitle(title, removingDay: false)
+        return Item(title: tidy.isEmpty ? sentenceCase(title) : tidy,
+                    notes: notes.isEmpty ? nil : sentenceCase(notes.joined(separator: ". ")), number: number)
+    }
+
+    private static func contentWords(_ s: String) -> Set<String> { Set(Words.nouns(s)) }
+
+    // MARK: Parsing
+
+    static func hasProjectCue(_ lower: String) -> Bool {
         lower.contains("project") || lower.contains("list of task") || lower.contains("task list") || lower.contains("list of to")
             || lower.contains("to do list") || lower.contains("todo list")
     }
 
-    static func parse(_ raw: String) -> Outline? {
+    /// Reads a spoken list. Nil when it is not one (a normal request is left to the rest of the agent).
+    static func parse(_ raw: String, knownPeople: [String] = []) -> Outline? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard hasProjectCue(text.lowercased()) else { return nil }
-        let found = matches(regex(marker), in: text)
-        guard !found.isEmpty else { return nil }
+        let lower = text.lowercased()
+        let cue = hasProjectCue(lower)
+        if BulkDetector.hasSchedule(text) { return nil }                // routines and schedules are the model's job
+        let marks = markers(in: text)
+        var outline = Outline()
+        outline.projectMentioned = lower.contains("project")
+        outline.name = projectName(in: text)
 
-        var tasks: [String] = []
-        for (i, m) in found.enumerated() {
-            guard let after = Range(m.range, in: text)?.upperBound else { continue }
-            let end = i + 1 < found.count ? (Range(found[i + 1].range, in: text)?.lowerBound ?? text.endIndex) : text.endIndex
-            var span = String(text[after..<end]).trimmingCharacters(in: CharacterSet(charactersIn: " ,:;-"))
-            if let stop = span.firstIndex(where: { ".!?".contains($0) }) { span = String(span[..<stop]) }   // the sentence ends the task
-            for piece in span.components(separatedBy: " and then ").flatMap({ $0.components(separatedBy: ", then ") }) {
-                if let title = tidy(piece) { tasks.append(title) }
+        if marks.count >= 2 || (marks.count == 1 && cue) {
+            parseNumbered(text, marks: marks, into: &outline)
+        } else if cue {
+            parseSentences(text, into: &outline)
+        } else {
+            return nil
+        }
+        guard !outline.items.isEmpty else { return nil }
+
+        // The questions, one at a time and in this order.
+        var qs: [Question] = []
+        let heard = marks.compactMap(\.number)
+        if heard.count >= 2 {
+            let set = Set(heard)
+            if let missing = (1...(heard.max() ?? 1)).first(where: { !set.contains($0) }), heard.max()! - heard.min()! < 12 {
+                qs.append(.gap(missing: missing, heard: heard.sorted()))
             }
         }
-        guard !tasks.isEmpty else { return nil }
-        return Outline(name: name(in: text), tasks: tasks)
-    }
-
-    private static func tidy(_ piece: String) -> String? {
-        var s = piece.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-"))
-        for lead in ["to ", "and ", "then ", "also ", "i need to ", "i want to ", "we need to "] where s.lowercased().hasPrefix(lead) {
-            s = String(s.dropFirst(lead.count)).trimmingCharacters(in: .whitespaces)
+        for (i, item) in outline.items.enumerated() where item.title.isEmpty {
+            let label = item.number.map { "number \(numberWord($0))" } ?? "the \(i < ordinalWords.count ? ordinalWords[i] : "next") one"
+            qs.append(.empty(label: label, index: i))
         }
-        for tail in [" and", " then", " also"] where s.lowercased().hasSuffix(tail) { s = String(s.dropLast(tail.count)) }
-        s = s.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-"))
-        guard !s.isEmpty else { return nil }
-        let title = TaskPlanner.tidyTitle(s, removingDay: false)
-        return title.isEmpty ? nil : title
+        qs += outline.questions                                          // separate / sentence questions found while parsing
+        for (i, item) in outline.items.enumerated() where item.title.split(separator: " ").count > 12 && hasSecondAction(item.title) {
+            qs.append(.split(index: i))
+        }
+        if let n = outline.name, knownPeople.contains(where: { $0.lowercased() == n.lowercased() }) { qs.append(.kind(n)) }
+        if outline.projectMentioned, outline.name == nil { qs.append(.name(isProject: true)) }
+        outline.questions = qs
+        return outline
     }
 
-    private static let notNames: Set<String> = ["that", "this", "it", "a", "an", "the", "new", "next", "big", "some", "one", "another", "my", "our",
-                                                "your", "same", "and", "for", "to", "i", "would", "like", "list", "of", "tasks", "task"]
+    private static func hasSecondAction(_ title: String) -> Bool {
+        let t = LocalSemanticPrechecker.tokens(title)
+        for (i, w) in t.enumerated() where w == "and" && i + 1 < t.count {
+            if t[i + 1] == "then" { return true }                       // "…and then dig the bed"
+            if ActionLexicon.verbs.contains(t[i + 1]) { return true }
+        }
+        return false
+    }
 
-    /// The project's name when it was said: "a project called Goa trip", "working on the website redesign project".
-    static func name(in text: String) -> String? {
-        let patterns = [
-            #"(?:project|list)\s+(?:called|named)\s+(.+?)(?=[.,;!?]|\s+and\s|\s+so\s|\s+the\s+first|\s+my\s+first|$)"#,
-            #"working on\s+(?:the |my |our |a |an )?(\w+(?:\s\w+){0,3}?)\s+project\b"#,
-            #"\bfor\s+(?:the |my |our )(\w+(?:\s\w+){0,3}?)\s+project\b"#,
-        ]
-        for p in patterns {
-            guard let m = matches(regex(p), in: text).first, m.numberOfRanges > 1, let r = Range(m.range(at: 1), in: text) else { continue }
-            var words = text[r].split(whereSeparator: { $0.isWhitespace }).map(String.init)
-            while let f = words.first, ["new", "a", "an", "the", "my", "our"].contains(f.lowercased()) { words.removeFirst() }
-            if words.isEmpty || words.count > 5 { continue }
-            if words.contains(where: { notNames.contains($0.lowercased()) }) { continue }
-            return words.joined(separator: " ")
+    private static func parseNumbered(_ text: String, marks: [Marker], into o: inout Outline) {
+        // Before the first marker: setup, context, or tasks said without a number.
+        let prefix = String(text[..<marks[0].range.lowerBound])
+        for s in sentences(prefix) {
+            switch role(of: s) {
+            case .task: o.items.append(titleAndNotes(s))
+            case .context, .unsure: o.context.append(s)
+            case .outro: break
+            }
+        }
+        for (i, m) in marks.enumerated() {
+            let end = i + 1 < marks.count ? marks[i + 1].range.lowerBound : text.endIndex
+            let span = String(text[m.range.upperBound..<end])
+            let sents = sentences(span)
+            guard var item = sents.first.map({ titleAndNotes($0, number: m.number) }) else {
+                o.items.append(Item(title: "", notes: nil, number: m.number))
+                continue
+            }
+            let index = o.items.count
+            var pendingQuestions: [Question] = []
+            for s in sents.dropFirst() {
+                let first = LocalSemanticPrechecker.tokens(s).first ?? ""
+                if ["and", "also", "then", "plus", "but"].contains(first) {
+                    item.title += " " + clean(s)                          // the same thought, carried on
+                    continue
+                }
+                switch role(of: s) {
+                case .task:
+                    pendingQuestions.append(.separate(text: clean(s), after: index))
+                case .outro: break
+                case .context, .unsure:
+                    if !contentWords(s).isDisjoint(with: contentWords(item.title)) {      // "…strategy document. Full strategy document."
+                        item.notes = [item.notes, sentenceCase(clean(s))].compactMap { $0 }.joined(separator: ". ")
+                    } else {
+                        o.context.append(s)
+                    }
+                }
+            }
+            o.items.append(item)
+            // A separate action is only added once the speaker says so; until then it waits as a question.
+            o.questions += pendingQuestions
+        }
+        // The last span can end with "that's all".
+        if let last = o.items.indices.last { o.items[last] = stripSignOff(o.items[last]) }
+    }
+
+    private static func stripSignOff(_ item: Item) -> Item {
+        var out = item
+        var t = out.title
+        for f in ["that's all", "thats all", "that is all", "that's it", "thats it", "thank you", "thanks"] where t.lowercased().hasSuffix(f) {
+            t = String(t.dropLast(f.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ,.-"))
+        }
+        if !t.isEmpty { out.title = t }
+        return out
+    }
+
+    private static func parseSentences(_ text: String, into o: inout Outline) {
+        var tasks = 0
+        for s in sentences(text) {
+            switch role(of: s) {
+            case .task:
+                o.items.append(titleAndNotes(s))
+                tasks += 1
+            case .context: o.context.append(s)
+            case .outro: break
+            case .unsure:
+                o.questions.append(.sentence(text: clean(s), at: o.items.count))
+            }
+        }
+        if tasks < 2 { o.items = []; o.questions = [] }              // one sentence is not a list: leave it to the model
+    }
+
+    // MARK: The project's name
+
+    private static let nameStops: Set<String> = ["for", "the", "my", "our", "a", "an", "on", "in", "to", "of", "and", "is", "that", "this", "it", "i", "i'm",
+                                                 "working", "new", "next", "big", "another", "some", "your", "same", "would", "like", "create", "list",
+                                                 "tasks", "task", "with", "at", "about", "from", "by", "make", "add", "start", "have", "has", "had",
+                                                 "got", "under", "one", "first", "second", "third", "number", "no", "also", "then", "so"]
+
+    /// "a project called Goa trip", "working on the website redesign project", "tasks for kitty project".
+    static func projectName(in text: String) -> String? {
+        if let re = regex(#"(?:project|list)\s+(?:called|named)\s+(.+?)(?=[.,;!?]|\s+and\s|\s+so\s|\s+(?:number|the|my)\b|$)"#),
+           let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)), m.numberOfRanges > 1,
+           let r = Range(m.range(at: 1), in: text) {
+            let words = text[r].split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            if !words.isEmpty, words.count <= 5, !words.contains(where: { nameStops.contains($0.lowercased()) }) { return words.joined(separator: " ") }
+        }
+        let words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        func bare(_ w: String) -> String { w.trimmingCharacters(in: .punctuationCharacters) }
+        for (i, w) in words.enumerated() where bare(w).lowercased() == "project" {
+            var collected: [String] = []
+            var j = i - 1
+            while j >= 0, collected.count < 3 {
+                let b = bare(words[j])
+                if b.isEmpty || nameStops.contains(b.lowercased()) { break }
+                collected.insert(b, at: 0)
+                if let l = words[j].last, ".!?,;".contains(l) { collected.removeFirst(); break }      // that was the end of an earlier sentence
+                j -= 1
+            }
+            if !collected.isEmpty { return collected.joined(separator: " ") }
         }
         return nil
     }
@@ -1280,5 +1580,125 @@ enum ProjectOutline {
         let words = s.split(whereSeparator: { $0.isWhitespace })
         guard !words.isEmpty, words.count <= 6 else { return nil }
         return s
+    }
+
+    // MARK: Answers to the questions
+
+    private static func first(_ s: String) -> String {
+        s.lowercased().trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+            .split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+    }
+
+    private static func isNo(_ s: String) -> Bool {
+        let l = s.lowercased()
+        return ["no", "nope", "nah", "nothing", "none"].contains(first(s)) || l.contains("that's all") || l.contains("thats all")
+            || l.contains("that is all") || l.contains("there isn't") || l.contains("there is no") || l.contains("no there")
+    }
+
+    private static func stripAnswerLead(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        let leads = ["yes ", "yeah ", "yep ", "yup ", "sure ", "there is ", "there's ", "it's ", "it is ", "it was ", "i missed ", "um ", "uh "]
+        var changed = true
+        while changed {
+            changed = false
+            for l in leads where s.lowercased().hasPrefix(l) { s = String(s.dropFirst(l.count)); changed = true }
+        }
+        return s
+    }
+
+    /// Applies the spoken answer to the first open question and drops that question.
+    static func apply(answer raw: String, to o: inout Outline) {
+        guard !o.questions.isEmpty else { return }
+        let q = o.questions.removeFirst()
+        let l = raw.lowercased()
+        switch q {
+        case .name:
+            if let n = name(fromAnswer: raw), !isNo(raw) { o.name = n }
+
+        case .kind(let n):
+            if ["person", "someone", "somebody", "assign", "for him", "for her", "he ", "she "].contains(where: { l.contains($0) }) {
+                o.assignee = n
+                o.name = nil
+            }
+
+        case .gap(let missing, _):
+            if isNo(raw) { break }
+            let body = stripAnswerLead(raw)
+            var content = body
+            if let found = markers(in: body).first { content = String(body[found.range.upperBound...]) }
+            let item = titleAndNotes(content, number: missing)
+            if !item.title.isEmpty, !["yes", "yeah", "yep", "yup", "sure"].contains(item.title.lowercased()) { insert(item, into: &o) }
+
+        case .empty(_, let index):
+            guard o.items.indices.contains(index) else { break }
+            let item = titleAndNotes(stripAnswerLead(raw), number: o.items[index].number)
+            if item.title.isEmpty || isNo(raw) { o.items.remove(at: index) } else { o.items[index] = item }
+
+        case .split(let index):
+            guard o.items.indices.contains(index) else { break }
+            if ["two", "separate", "split", "both", "2"].contains(where: { l.contains($0) }) && !l.contains("one task") {
+                let t = o.items[index].title
+                let words = t.split(separator: " ").map(String.init)
+                if let at = words.firstIndex(where: { $0.lowercased() == "and" }), at > 0, at + 1 < words.count {
+                    let a = words[..<at].joined(separator: " "), b = words[(at + 1)...].joined(separator: " ")
+                    o.items[index].title = a
+                    o.items.insert(Item(title: sentenceCase(b), notes: nil, number: nil), at: index + 1)
+                }
+            }
+
+        case .separate(let text, let after):
+            if ["part", "same", "together", "one task", "with"].contains(where: { l.contains($0) }), !l.contains("separate") {
+                if o.items.indices.contains(after) { o.items[after].title += " and " + text.lowercased() }
+                else if let last = o.items.indices.last { o.items[last].title += " and " + text.lowercased() }
+            } else {
+                insertAfter(titleAndNotes(text), index: after, in: &o)
+            }
+
+        case .sentence(let text, let at):
+            if ["task", "yes", "yeah", "yep", "add"].contains(where: { first(raw) == $0 }) || l.contains("a task") {
+                o.items.insert(titleAndNotes(text), at: min(at, o.items.count))
+            } else {
+                o.context.append(text)
+            }
+        }
+    }
+
+    private static func insert(_ item: Item, into o: inout Outline) {
+        let n = item.number ?? Int.max
+        let at = o.items.firstIndex(where: { ($0.number ?? Int.max) > n }) ?? o.items.count
+        o.items.insert(item, at: at)
+    }
+
+    private static func insertAfter(_ item: Item, index: Int, in o: inout Outline) {
+        let at = min(max(index + 1, 0), o.items.count)
+        o.items.insert(item, at: at)
+    }
+
+    /// Questions that could not be asked (three rounds used): take the most careful reading and go on.
+    static func finalize(_ o: inout Outline) {
+        while !o.questions.isEmpty {
+            let q = o.questions[0]
+            switch q {
+            case .separate(let text, let after):
+                o.questions.removeFirst()
+                insertAfter(titleAndNotes(text), index: after, in: &o)
+            case .empty(_, let index):
+                o.questions.removeFirst()
+                if o.items.indices.contains(index) { o.items.remove(at: index) }
+            default:
+                o.questions.removeFirst()
+            }
+        }
+        o.items.removeAll { $0.title.isEmpty }
+    }
+
+    /// Is `segment` (a piece the detector cut out) already in what was made? Every content word of a task counts, in the
+    /// title or in the notes.
+    static func covered(_ segment: String, by items: [(title: String, notes: String?)]) -> Bool {
+        let need = contentWords(segment)
+        guard !need.isEmpty else { return true }
+        var have = Set<String>()
+        for i in items { have.formUnion(contentWords(i.title)); if let n = i.notes { have.formUnion(contentWords(n)) } }
+        return Double(need.intersection(have).count) / Double(need.count) >= 0.5
     }
 }

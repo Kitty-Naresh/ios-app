@@ -1036,12 +1036,16 @@ final class TaskStore: ObservableObject {
 
     /// Adds items to a list. They have no due date unless one is given.
     @discardableResult
-    func addItems(_ titles: [String], to profile: TaskProfile, due: Date? = nil, assignee: String? = nil) -> [TaskItem] {
-        let items = titles
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .map { TaskItem(title: $0, category: .guess(from: $0), dueDate: due.map { Calendar.current.startOfDay(for: $0) },
-                            group: profile.name, assignee: assignee, profileID: profile.id) }
+    func addItems(_ titles: [String], to profile: TaskProfile, due: Date? = nil, assignee: String? = nil, notes: [String?] = []) -> [TaskItem] {
+        var items: [TaskItem] = []
+        for (i, raw) in titles.enumerated() {
+            let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { continue }
+            var item = TaskItem(title: title, category: .guess(from: title), dueDate: due.map { Calendar.current.startOfDay(for: $0) },
+                                group: profile.name, assignee: assignee, profileID: profile.id)
+            if i < notes.count, let n = notes[i]?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty { item.notes = n }
+            items.append(item)
+        }
         tasks.insert(contentsOf: items, at: 0)
         save()
         return items

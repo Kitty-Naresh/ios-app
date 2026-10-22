@@ -1,6 +1,6 @@
 # Kitty eval cases
 
-Generated from `Tests/KittyEvals.swift` (`testWriteEvalCatalogue`). 106 cases. Each case is a recorded utterance sequence replayed against a scripted model. “Today” is Wednesday 21 October 2026; “+1d” means tomorrow.
+Generated from `Tests/KittyEvals.swift` (`testWriteEvalCatalogue`). 107 cases. Each case is a recorded utterance sequence replayed against a scripted model. “Today” is Wednesday 21 October 2026; “+1d” means tomorrow.
 
 The 12 to start with: #1, #2, #4, #41, #42, #17, #45, #24, #48, #31, #39, #75.
 
@@ -154,6 +154,7 @@ The 12 to start with: #1, #2, #4, #41, #42, #17, #45, #24, #48, #31, #39, #75.
 | 104 | “I would like to” keeps its “like” | “I would like to buy milk” | model: `create_task` “Buy milk” → saved; worked from “I would like to buy milk”; state `listening`; model called | 1 task: “Buy milk” |
 | 105 | “it looks like rain” keeps its “like” and is asked about | “It looks like rain” | model: `clarify` “What would you like me to do about the rain?” → asks one question; says “what would you like”; worked from “it looks like rain”; state `awaitingClarification`; model called | nothing saved |
 | 106 | A project over two sentences: held, then only the project's name is asked | 1. “I'm working on a project and I would like to create list of tasks for that project.”<br>2. “And the first task is, to write a strategy document.” | 1. no model call → wait: held locally, no model call; state `listening`; model not called<br>2. no model call → asks one question; says “project called”; state `awaitingClarification`; model not called | nothing saved |
+| 107 | A numbered list skips a number: asks if there is a number three | “I want to make a list of tasks for the Garden project. Number one buy soil. Number two plant tomatoes. Number four water the plants.” | no model call → asks one question; says “number three”; state `awaitingClarification`; model not called | nothing saved |
 
 ## H. Conversation quality (graded on every case)
 
