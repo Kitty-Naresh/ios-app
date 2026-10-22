@@ -207,6 +207,10 @@ enum BulkDetector {
     struct Analysis: Equatable {
         var kind: Kind = .none
         var segments: [String] = []
+        /// A long, rambling turn read clause by clause (nil for short turns): what is shared, and what was chatter.
+        var turn: LongTurn? = nil
+        var context: SharedContext { turn?.context ?? SharedContext() }
+        var skipped: [String] { turn?.skipped ?? [] }
         var isBulk: Bool { kind != .none }
     }
 
@@ -305,7 +309,10 @@ enum BulkDetector {
         return out
     }
 
-    static func analyze(_ raw: String) -> Analysis {
+    /// Verbs that change or look at what is already on the list: a long sentence with one of these is not a list of new tasks.
+    private static let managingVerbs: Set<String> = ["mark", "complete", "delete", "remove", "cancel", "change", "update", "rename", "show", "read", "move"]
+
+    static func analyze(_ raw: String, words: [SpokenWord] = [], now: Date = Date()) -> Analysis {
         let text = raw.lowercased().replacingOccurrences(of: "’", with: "'")
         let tokens = LocalSemanticPrechecker.tokens(text)
         guard !tokens.isEmpty else { return Analysis() }
@@ -329,6 +336,22 @@ enum BulkDetector {
                 }
                 let items = splitList(tail)
                 if items.count >= 2 { return Analysis(kind: hasSchedule(text) ? .routines : .tasks, segments: items) }
+            }
+        }
+
+        // A long turn with an intro, asides and several asks: only the action clauses count, so chatter cannot defeat detection.
+        if LongTurnAnalyzer.isLong(text) {
+            let turn = LongTurnAnalyzer.analyze(raw, words: words, now: now)
+            let leads = turn.actions.compactMap { LocalSemanticPrechecker.tokens($0.text).first }
+            let asksQuestion = turn.clauses.contains { c in
+                LocalSemanticPrechecker.tokens(c.text).first.map { LocalSemanticPrechecker.questionStarters.contains($0) } ?? false
+            }
+            if !turn.actions.isEmpty, !asksQuestion, !leads.contains(where: { managingVerbs.contains($0) }) {
+                let scheduled = turn.actions.contains { $0.scheduled }
+                if turn.actions.count >= 2 {
+                    return Analysis(kind: scheduled ? .routines : .tasks, segments: turn.actions.map(\.text), turn: turn)
+                }
+                return Analysis(kind: .none, segments: [], turn: turn)      // one ask in a long turn: the single path, with the clean digest
             }
         }
 

@@ -124,4 +124,35 @@ final class LongTurnAnalyzerTests: XCTestCase {
         XCTAssertFalse(LongTurnAnalyzer.isLong("buy milk and bread tomorrow"))
         XCTAssertTrue(LongTurnAnalyzer.isLong(Self.inLaws))
     }
+
+    // MARK: BulkDetector uses the action clauses of a long turn
+
+    func testAnIntroNoLongerDefeatsBulkDetection() {
+        let a = BulkDetector.analyze(Self.inLaws, now: Self.now)
+        XCTAssertEqual(a.kind, .tasks)
+        XCTAssertEqual(a.segments, ["clean the bathrooms", "mop the living room", "buy flowers and snacks", "call the caterer"])
+        XCTAssertEqual(a.context.usedLine, "Saturday, for in-laws")
+        XCTAssertEqual(a.skipped, ["the house is a mess"])
+    }
+
+    func testShortUtterancesKeepTheVerbLedRule() {
+        XCTAssertNil(BulkDetector.analyze("So I need to clean the bathroom and buy milk").turn, "12 words or fewer: no long-turn reading")
+        XCTAssertFalse(BulkDetector.analyze("Okay so honestly the house is a mess").isBulk)
+    }
+
+    func testOneAskInALongTurnIsNotBulkButKeepsTheReading() {
+        let a = BulkDetector.analyze("So last week the plumber came and he said the tap was leaking, anyway call the plumber about the leaking tap tomorrow morning", now: Self.now)
+        XCTAssertFalse(a.isBulk)
+        XCTAssertEqual(a.turn?.actions.map(\.text), ["call the plumber about the leaking tap"])
+    }
+
+    func testAScheduledActionMakesTheLongTurnRoutines() {
+        let a = BulkDetector.analyze("Um so it's been a crazy week you know but add milk eggs and bread to my Blinkit order and water the plants every morning", now: Self.now)
+        XCTAssertEqual(a.kind, .routines)
+    }
+
+    func testLongQuestionsAndManagementRequestsAreNotReadAsNewTasks() {
+        XCTAssertNil(BulkDetector.analyze("What do I have for tomorrow and also remind me what I wanted to buy for the party on Saturday", now: Self.now).turn)
+        XCTAssertNil(BulkDetector.analyze("Please mark the laundry task as done and remove the milk task from my list and cancel the plumber visit", now: Self.now).turn)
+    }
 }

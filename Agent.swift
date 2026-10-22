@@ -3611,7 +3611,7 @@ final class VoiceTurnManager {
             lastTrace.route = "bare-action"
             return .question(asked)
         }
-        let analysis = BulkDetector.analyze(answering ? delta : utterance)
+        let analysis = BulkDetector.analyze(answering ? delta : utterance, words: answering ? [] : heardWords, now: now)
 
         var lines: [String] = []
         let sentenceCount = utterance.filter { ".?!".contains($0) }.count
@@ -3756,7 +3756,7 @@ final class VoiceTurnManager {
             b.tasks = b.tasks.map { var t = $0; t.assignee = fix(t.assignee); return t }
             b.routines = b.routines.map { var r = $0; r.assignee = fix(r.assignee); return r }
             if var p = b.playbook { p.assignee = fix(p.assignee); b.playbook = p }
-            let segments = BulkDetector.analyze(utterance).segments
+            let segments = BulkDetector.analyze(utterance, now: now).segments
             let validated = BulkValidator.validate(b, utterance: utterance, segments: segments, context: ctx)
             lastTrace.validation = "\(validated)"
             return await bulkResult(validated, spoken: b.spokenResponse, utterance: utterance, ctx: ctx)
