@@ -1555,6 +1555,8 @@ struct Proposal {
     var pendingTitle: String? = nil // what the conversation should call this while it waits to be saved
     var pendingPlaybook: String? = nil
     var prompt: String? = nil       // the one short question Kitty asks for this preview, "Should I save these?"
+    var used: String? = nil         // long turns: what the tasks were built from, "Saturday, for in-laws"
+    var skipped: [String] = []      // long turns: what was heard but not made into a task; tapping one says "also add …"
     var apply: @MainActor () async -> AgentReply
 }
 
@@ -3799,7 +3801,8 @@ final class VoiceTurnManager {
     private func longBulkResult(_ validated: BulkValidated, turn: LongTurn, spoken: String, utterance: String,
                                 ctx: ValidationContext) async -> TurnResult {
         if case .items(let items) = validated, items.count > 1, !state.drafts.hasContent {
-            return startDraft(items, ctx: ctx, question: contextDueQuestion(items, turn: turn))
+            return startDraft(items, ctx: ctx, question: contextDueQuestion(items, turn: turn),
+                             used: turn.context.usedLine, skipped: turn.skipped)
         }
         return await bulkResult(validated, spoken: spoken, utterance: utterance, ctx: ctx)
     }
@@ -3819,7 +3822,8 @@ final class VoiceTurnManager {
         let empty = BulkDecisionValue(action: "create_tasks")
         let validated = BulkValidator.validate(empty, utterance: utterance, segments: analysis.segments, context: ctx, turn: turn)
         lastTrace.validation = "\(validated)"
-        if case .items(let items) = validated { return startDraft(items, ctx: ctx, question: contextDueQuestion(items, turn: turn)) }
+        if case .items(let items) = validated { return startDraft(items, ctx: ctx, question: contextDueQuestion(items, turn: turn),
+                             used: turn.context.usedLine, skipped: turn.skipped) }
         return .reply(AgentReply(message: "I couldn't work out the tasks. What would you like me to add?", didAdd: false))
     }
 
@@ -3968,19 +3972,22 @@ final class VoiceTurnManager {
     }
 
     /// Several items: a pending bulk draft that waits for an explicit yes.
-    private func startDraft(_ items: [DraftItem], ctx: ValidationContext, question: String? = nil) -> TurnResult {
+    private func startDraft(_ items: [DraftItem], ctx: ValidationContext, question: String? = nil,
+                            used: String? = nil, skipped: [String] = []) -> TurnResult {
         state.setPending(titles: [], playbook: nil, planned: [])
         if state.drafts.hasContent, state.drafts.playbook == nil {
             let added = state.drafts.merge(items)
             return draftProposal(ack: added.isEmpty ? nil : "Added \(Words.list(added.map { $0.title.lowercased() })).")
         }
         state.drafts.setItems(items)
+        state.drafts.setContext(used: used, skipped: skipped)
         return draftProposal(ack: nil, question: question)
     }
 
     private func draftProposal(ack: String?, question: String? = nil) -> TurnResult {
         if let pb = state.drafts.playbook { return .proposal(DraftProposals.playbook(pb, ack: ack, sink: sink)) }
-        return .proposal(DraftProposals.bulk(state.drafts.items, question: question, ack: ack, sink: sink))
+        return .proposal(DraftProposals.bulk(state.drafts.items, question: question, ack: ack, used: state.drafts.used,
+                                             skipped: state.drafts.skipped, sink: sink))
     }
 
     private func applyEdit(_ edit: DraftEdit, ctx: ValidationContext) -> TurnResult {

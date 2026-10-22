@@ -452,7 +452,12 @@ final class BulkDraftManager {
         return items.map(\.title).joined(separator: "; ")
     }
 
-    func clear() { items = []; playbook = nil }
+    /// Long turns: what the tasks came from, and what was heard but left out (offered back as "Skipped (N)").
+    private(set) var used: String?
+    private(set) var skipped: [String] = []
+    func setContext(used: String?, skipped: [String]) { self.used = used; self.skipped = skipped }
+
+    func clear() { items = []; playbook = nil; used = nil; skipped = [] }
     func setItems(_ new: [DraftItem]) { items = new; playbook = nil }
     func setPlaybook(_ p: PlaybookDraftState?) { playbook = p; if p != nil { items = [] } }
 
@@ -498,9 +503,24 @@ final class BulkDraftManager {
 
     private func label(_ item: DraftItem) -> String { item.title }
 
+    /// The same words, ignoring case, punctuation and "the/a/an".
+    private static func sameWords(_ a: String, _ b: String) -> Bool {
+        func key(_ s: String) -> [String] { LocalSemanticPrechecker.tokens(s).filter { !["the", "a", "an"].contains($0) } }
+        let x = key(a), y = key(b)
+        return !x.isEmpty && x == y
+    }
+
     func apply(_ edit: DraftEdit, context ctx: ValidationContext) -> EditOutcome {
         switch edit {
         case .addItem(let text):
+            // Something Kitty skipped as chatter, now asked for by name: it becomes a task as said.
+            if let i = skipped.firstIndex(where: { Self.sameWords($0, text) }) {
+                let said = skipped.remove(at: i)
+                var title = said.trimmingCharacters(in: .whitespacesAndNewlines)
+                title = title.prefix(1).uppercased() + title.dropFirst()
+                let item = DraftItem(ValidatedTask(title: title), kind: .task)
+                return merge([item]).isEmpty ? .applied("That's already on the list.") : .applied("Added \(title.lowercased()).")
+            }
             guard let item = Self.makeItem(from: text, context: ctx) else {
                 return .question("What should I do with \(Words.trim(text).lowercased())?")
             }
@@ -1012,7 +1032,8 @@ enum DraftProposals {
     }
 
     /// Several tasks and routines: always an explicit "yes", never a countdown.
-    static func bulk(_ items: [DraftItem], question: String? = nil, ack: String? = nil, sink: SaveSink) -> Proposal {
+    static func bulk(_ items: [DraftItem], question: String? = nil, ack: String? = nil, used: String? = nil,
+                     skipped: [String] = [], sink: SaveSink) -> Proposal {
         let rows = items.map { PreviewRow(icon: $0.kind == .routine ? "repeat" : "circle", title: $0.title, tags: tags($0)) }
         let prompt = question ?? DraftSummary.question(for: items)
         let once = Once()
@@ -1040,6 +1061,8 @@ enum DraftProposals {
                 return AgentReply(message: message, didAdd: true, didChange: true, created: created)
             })
         p.prompt = (ack.map { $0 + " " } ?? "") + (ack == nil ? prompt : "Should I save these?")
+        p.used = used
+        p.skipped = skipped
         return p
     }
 

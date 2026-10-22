@@ -1040,6 +1040,30 @@ struct ConversationView: View {
                 Text(note).font(.footnote).foregroundStyle(.secondary)
             }
 
+            if let used = p.used, !dimmed {
+                Text("Used: \(used)").font(.footnote).foregroundStyle(.secondary)
+            }
+
+            if !p.skipped.isEmpty, !dimmed {
+                DisclosureGroup("Skipped (\(p.skipped.count))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(p.skipped, id: \.self) { text in
+                            Button { convo.submitTyped("also add \(text)") } label: {
+                                Label(text.prefix(1).uppercased() + text.dropFirst(), systemImage: "plus.circle")
+                                    .font(.footnote)
+                                    .multilineTextAlignment(.leading)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                        }
+                        Text("Tap one to add it as a task.").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+
             if let prompt = p.prompt, !dimmed {
                 Text(prompt).font(.callout.weight(.medium))
             }

@@ -407,3 +407,43 @@ final class LongTurnWaitTests: XCTestCase {
         if case .wait = r {} else { XCTFail("\(r)") }
     }
 }
+
+// MARK: The preview shows what it used and what it skipped
+
+@MainActor
+final class LongTurnPreviewTests: XCTestCase {
+    private let inLaws = LongTurnAnalyzerTests.inLaws
+    private let now = LongTurnAnalyzerTests.now
+    private func manager() -> VoiceTurnManager {
+        let m = VoiceTurnManager(engine: BulkQueueEngine([BulkQueueEngine.tasks(["Clean bathrooms", "Mop living room", "Buy flowers and snacks", "Call the caterer"])]),
+                                 sink: InMemorySaveSink(), knownCategories: { [] }, knownAssignees: { [] })
+        m.ruleFallbackEnabled = false
+        return m
+    }
+
+    func testThePreviewSaysWhatItUsedAndWhatItSkipped() async {
+        let m = manager()
+        let r = await m.decide(utterance: inLaws, now: now)
+        guard case .proposal(let p) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(p.used, "Saturday, for in-laws")
+        XCTAssertTrue(p.skipped.contains { $0.contains("mess") }, "\(p.skipped)")
+        XCTAssertFalse(p.skipped.isEmpty)
+    }
+
+    func testAlsoAddWorksForTheSkippedText() {
+        guard case .addItem(let t)? = DraftEditParser.parse("also add the house is a mess", hasPlaybook: false) else { return XCTFail("not parsed") }
+        XCTAssertEqual(t, "the house is a mess")
+    }
+
+    func testSayingAlsoAddWithASkippedLineMakesItATaskAndRemovesItFromSkipped() async {
+        let m = manager()
+        let first = await m.decide(utterance: inLaws, now: now)
+        guard case .proposal(let p) = first, let mess = p.skipped.first(where: { $0.contains("mess") }) else { return XCTFail("\(first)") }
+        let r = await m.decide(utterance: inLaws + " also add " + mess, now: now)
+        guard case .proposal(let after) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(m.state.drafts.items.count, 5)
+        XCTAssertTrue(m.state.drafts.items.last?.title.lowercased().contains("mess") == true)
+        XCTAssertFalse(after.skipped.contains(mess))
+        XCTAssertEqual(after.used, "Saturday, for in-laws")
+    }
+}
