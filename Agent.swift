@@ -3448,11 +3448,27 @@ final class VoiceTurnManager {
             Breadcrumb.log("decision: bulk \(bulk.action)")
             return await bulkResult(validated, spoken: bulk.spokenResponse, utterance: utterance, ctx: ctx)
         }
-        if let decision = await engine.decide(prompt: prompt) {
+        if var decision = await engine.decide(prompt: prompt) {
             lastTrace.route = "model-single"
             lastTrace.modelOutput = "\(decision)"
-        Breadcrumb.log("decision: \(decision.action) wait=\(decision.wait)")
-            let validated = TaskValidator.validate(decision, utterance: utterance, context: ctx)
+            Breadcrumb.log("decision: \(decision.action) wait=\(decision.wait)")
+            var validated = TaskValidator.validate(decision, utterance: utterance, context: ctx)
+            if case .wait = validated, !final, Self.modelMeantToCreate(decision, utterance: utterance) {
+                // The on-device model sometimes sets wait=true on a plain, finished "Buy bread" while still choosing create_task
+                // with an empty title (seen in real-model runs, and it varies run to run). The local gate already judged the
+                // sentence finished, so ask once more; if it still waits, the rule-based path answers.
+                modelCalls += 1
+                if let again = await engine.decide(prompt: prompt) {
+                    decision = again
+                    lastTrace.route = "model-single-retry"
+                    lastTrace.modelOutput = "\(again)"
+                    validated = TaskValidator.validate(again, utterance: utterance, context: ctx)
+                }
+                if case .wait = validated, ruleFallbackEnabled {
+                    lastTrace.route = "wait-overridden-create"
+                    return await TaskAgent.propose(utterance)
+                }
+            }
             if case .wait = validated {} else if let q = readBackQuestion(single: decision, utterance: utterance) {
                 lastTrace.route = "read-back"
                 return q
@@ -3472,6 +3488,15 @@ final class VoiceTurnManager {
             return .reply(AgentReply(message: "I couldn't reach the on-device model.", didAdd: false))
         }
         return await TaskAgent.propose(utterance)
+    }
+
+    /// A wait that comes with a create action on a sentence the local gate judged finished: the model meant to create it.
+    static func modelMeantToCreate(_ d: AgentDecisionValue, utterance: String) -> Bool {
+        guard d.wait, LocalSemanticPrechecker.check(utterance) == .mayBeComplete else { return false }
+        switch d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "create_task", "create_routine": return true
+        default: return false
+        }
     }
 
     // MARK: Read-back: "Did you say Rani?"

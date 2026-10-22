@@ -416,4 +416,28 @@ final class KittyVoiceTurnTests: XCTestCase {
             XCTAssertFalse(BulkDetector.analyze(text).isBulk, text)
         }
     }
+
+    // MARK: A model that waits on a finished sentence (seen in real-model runs)
+
+    func testAWaitWithACreateActionOnAFinishedSentenceIsAskedAgainOnce() async {
+        let confused = decision("create_task", wait: true)
+        let engine = ScriptedEngine([confused, decision("create_task", title: "Buy bread")])
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] })
+        m.ruleFallbackEnabled = false
+        m.state.setListening(true)
+        let r = await m.decide(utterance: "Buy bread", now: now)
+        guard case .proposal(let p) = r else { return XCTFail("expected a proposal, got \(r)") }
+        XCTAssertEqual(p.rows.map(\.title), ["Buy bread"])
+        XCTAssertEqual(m.modelCalls, 2)
+    }
+
+    func testAGenuineWaitIsNotRetried() async {
+        let engine = ScriptedEngine([decision("wait", wait: true), decision("create_task", title: "Buy bread")])
+        let m = VoiceTurnManager(engine: engine, sink: InMemorySaveSink(), knownCategories: { [] })
+        m.ruleFallbackEnabled = false
+        m.state.setListening(true)
+        let r = await m.decide(utterance: "Buy bread", now: now)
+        guard case .wait = r else { return XCTFail("expected wait, got \(r)") }
+        XCTAssertEqual(m.modelCalls, 1)
+    }
 }
