@@ -41,6 +41,10 @@ final class VoiceConversation: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     /// Read Kitty's replies out loud. Off by default; remembered between launches.
+    /// Tunes the recogniser for Indian English. Takes effect the next time listening starts.
+    @Published var indianEnglish: Bool = SpeechLocalePreference.isIndianEnglish {
+        didSet { SpeechLocalePreference.isIndianEnglish = indianEnglish }
+    }
     @Published var speakReplies: Bool = UserDefaults.standard.bool(forKey: "kitty.speakReplies") {
         didSet {
             UserDefaults.standard.set(speakReplies, forKey: "kitty.speakReplies")
@@ -56,7 +60,11 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    private let speech = SpeechRecognizer()
+    private let speech: SpeechRecognizer = {
+        let r = SpeechRecognizer()
+        r.vocabulary = { VocabularyProvider.current() }
+        return r
+    }()
     /// Decides when speech might be a finished thought, and makes the one model call for it.
     private let turns = VoiceTurnManager()
     private var lastActedRaw = ""      // the speech Kitty last acted on, so the same words are not judged twice
@@ -300,6 +308,7 @@ final class VoiceConversation: ObservableObject {
         processingTask?.cancel()
         processingTask = Task { [weak self] in
             guard let self else { return }
+            self.turns.heardWords = typed ? [] : self.speech.words      // per-word confidence, for the "Did you say…?" check
             let result = await self.turns.decide(utterance: text, final: final || typed)
             guard !Task.isCancelled, g == self.generation else { return }
             self.finishProcessing(result, typed: typed)
@@ -657,6 +666,7 @@ struct ConversationView: View {
             Menu {
                 Toggle("Read replies aloud", isOn: $convo.speakReplies)
                 Toggle("Add automatically after 2 seconds", isOn: $convo.autoAdd)
+                Toggle("Listen for English (India)", isOn: $convo.indianEnglish)
             } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.title3)

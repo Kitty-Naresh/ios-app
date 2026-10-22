@@ -111,8 +111,11 @@ final class SpeechRecognizer: ObservableObject {
 
     private var spike = ConfidenceSpike()
 
-    private let recognizer = SFSpeechRecognizer(locale: .current)
-        ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    /// Asked for at the start of every recognition session, so names added a moment ago are expected right away.
+    var vocabulary: (@MainActor () -> [String])?
+
+    /// Created again at each start so the English (India) setting takes effect on the next listen.
+    private var recognizer = SpeechLocalePreference.makeRecognizer()
     private let capture = AudioCapture()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -136,6 +139,7 @@ final class SpeechRecognizer: ObservableObject {
         let id = sessionID
 
         Breadcrumb.log("1 start: checking recognizer")
+        recognizer = SpeechLocalePreference.makeRecognizer()
         guard let recognizer, recognizer.isAvailable else {
             errorMessage = "Speech recognition isn't available right now. Check your internet connection and try again."
             return
@@ -165,6 +169,7 @@ final class SpeechRecognizer: ObservableObject {
 
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true
+            request.contextualStrings = vocabulary?() ?? []
             if continuous {
                 request.addsPunctuation = true
                 request.taskHint = .dictation

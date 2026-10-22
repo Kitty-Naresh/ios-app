@@ -1066,7 +1066,7 @@ enum BulkValidator {
             due: TaskValidator.resolveDate(dueDate, utterance: dates, ctx: ctx),
             timeMinutes: TaskValidator.resolveTime(dueTime, utterance: dates),
             priority: TaskValidator.resolvePriority(priority, utterance: seg),
-            assignee: TaskValidator.resolveAssignee(assignee, utterance: utterance),
+            assignee: TaskValidator.resolveAssignee(assignee, utterance: utterance, known: ctx.knownAssignees),
             notes: cleanNotes(notes))
     }
 
@@ -1099,7 +1099,7 @@ enum BulkValidator {
             return .playbook(PlaybookDraftState(
                 name: name,
                 due: TaskValidator.resolveDate(p.dueDate, utterance: utterance, ctx: ctx),
-                assignee: TaskValidator.resolveAssignee(p.assignee, utterance: utterance),
+                assignee: TaskValidator.resolveAssignee(p.assignee, utterance: utterance, known: ctx.knownAssignees),
                 steps: steps.prefix(12).map { DraftItem(title: $0) },
                 stated: TaskValidator.stepsStated(utterance)))
 

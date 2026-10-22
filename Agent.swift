@@ -2764,6 +2764,8 @@ enum Validated: Equatable {
 
 struct ValidationContext {
     var knownCategories: [String] = []
+    /// People the household has named before (assignees on tasks, routines and playbook steps).
+    var knownAssignees: [String] = []
     var pendingTitles: [String] = []
     var recentTitles: [String] = []
     var now = Date()
@@ -2846,13 +2848,22 @@ enum TaskValidator {
         return list.contains { t.contains($0) } ? v : nil
     }
 
-    static func resolveAssignee(_ value: String, utterance: String) -> String? {
+    /// The assignee, only if the user actually said it. A name that is one close, sound-alike match for a known person
+    /// ("Priyah" for "Priya") becomes the known name; one that merely sounds alike ("Rainy" for "Rani") is left to the
+    /// read-back question in `ReadBackCheck`; a name that matches nobody is kept as it was heard.
+    static func resolveAssignee(_ value: String, utterance: String, known: [String] = []) -> String? {
         let normalized = Assignee.normalize(value)
         guard !normalized.isEmpty else { return nil }
         let said = Set(LocalSemanticPrechecker.tokens(utterance))
         let raw = value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let stated = raw.contains(" ") ? utterance.lowercased().contains(raw) : said.contains(raw)
-        if stated { return normalized }
+        if stated {
+            if !ReadBackCheck.isRole(normalized),
+               case .strong(let name) = VocabularyMatcher.match(normalized, in: known.filter { !ReadBackCheck.isRole($0) }) {
+                return Assignee.normalize(name)
+            }
+            return normalized
+        }
         if let detected = Assignee.detect(in: utterance), detected.lowercased() == normalized.lowercased() { return normalized }
         return nil
     }
@@ -2891,7 +2902,7 @@ enum TaskValidator {
             due: resolveDate(dueDate, utterance: utterance, ctx: ctx),
             timeMinutes: resolveTime(dueTime, utterance: utterance),
             priority: resolvePriority(priority, utterance: utterance),
-            assignee: resolveAssignee(assignee, utterance: utterance),
+            assignee: resolveAssignee(assignee, utterance: utterance, known: ctx.knownAssignees),
             notes: cleanNotes(notes))
     }
 
@@ -2942,7 +2953,7 @@ enum TaskValidator {
         case "update_task":
             var changes = ValidatedTask(title: "")
             changes.priority = resolvePriority(d.priority, utterance: utterance)
-            changes.assignee = resolveAssignee(d.assignee, utterance: utterance)
+            changes.assignee = resolveAssignee(d.assignee, utterance: utterance, known: ctx.knownAssignees)
             changes.due = resolveDate(d.dueDate, utterance: utterance, ctx: ctx)
             changes.timeMinutes = resolveTime(d.dueTime, utterance: utterance)
             changes.notes = cleanNotes(d.notes)
@@ -3045,6 +3056,19 @@ final class ConversationStateManager {
     private(set) var pendingProposal: Proposal?
     private(set) var lastProcessed = ""         // the merged speech the pending draft or question was built from
 
+    /// "Did you say Rani?": what Kitty is waiting to hear back, and what to do with the answer.
+    struct ReadBack {
+        var heard: String
+        var suggestion: String
+        var utterance: String               // the whole turn when the question was asked
+        var single: AgentDecisionValue?
+        var bulk: BulkDecisionValue?
+        var askedWho = false                // they said no: the next words are the name
+    }
+    var readBack: ReadBack?
+    /// One read-back per turn. Separate from the clarification rounds, and cleared when the turn ends.
+    var readBackUsed = false
+
     var pendingTaskLabel: String? { pendingTitles.first.map { String($0.prefix(80)) } }
 
     func move(to next: ConversationPhase) {
@@ -3085,6 +3109,8 @@ final class ConversationStateManager {
         clarification = nil
         pendingProposal = nil
         lastProcessed = ""
+        readBack = nil
+        readBackUsed = false
         drafts.clear()
         clarify.reset()
         confirmation.disarm()
@@ -3176,13 +3202,18 @@ final class VoiceTurnManager {
     private let engine: DecisionProviding
     let sink: SaveSink
     private let knownCategories: () -> [String]
+    private let knownAssignees: () -> [String]
+    /// What the recogniser reported for the speech being worked on (confidence per word). Empty when typed.
+    var heardWords: [SpokenWord] = []
     /// Off in evals: a missing model answer must show up as a failure, never fall back to the real task list.
     var ruleFallbackEnabled = true
 
-    init(engine: DecisionProviding? = nil, sink: SaveSink? = nil, knownCategories: (() -> [String])? = nil) {
+    init(engine: DecisionProviding? = nil, sink: SaveSink? = nil, knownCategories: (() -> [String])? = nil,
+         knownAssignees: (() -> [String])? = nil) {
         self.engine = engine ?? Self.makeEngine()
         self.sink = sink ?? StoreSaveSink()
         self.knownCategories = knownCategories ?? { TaskStore.shared.knownCategoryNames }
+        self.knownAssignees = knownAssignees ?? { VocabularyProvider.people() }
     }
 
     static func makeEngine() -> DecisionProviding {
@@ -3247,6 +3278,7 @@ final class VoiceTurnManager {
 
     private func context(now: Date) -> ValidationContext {
         ValidationContext(knownCategories: knownCategories(),
+                          knownAssignees: knownAssignees(),
                           pendingTitles: state.pendingTitles + state.drafts.items.map(\.title),
                           recentTitles: state.recentTitles(now: now),
                           now: now, calendar: .current)
@@ -3327,6 +3359,26 @@ final class VoiceTurnManager {
         let ctx = context(now: now)
         let reply = ConfirmationManager.interpret(delta)
 
+        // 0. "Did you say Rani?" is waiting for its answer.
+        if let rb = state.readBack {
+            switch readBackAnswer(rb, delta: delta, reply: reply) {
+            case .apply(let name):
+                state.readBack = nil
+                lastTrace.route = "read-back-applied"
+                return await applyReadBack(rb, name: name, now: now, final: final)
+            case .askWho:
+                state.readBack?.askedWho = true
+                lastTrace.route = "read-back-no"
+                return .question("Who did you mean?")
+            case .cancel:
+                state.readBack = nil
+                lastTrace.route = "cancel"
+                return .reply(AgentReply(message: "Okay, never mind.", didAdd: false))
+            case .newSpeech:
+                state.readBack = nil                     // they moved on: this is a new request
+            }
+        }
+
         // 1. Something is waiting for a yes or a no.
         if let p = state.pendingProposal {
             switch reply {
@@ -3390,6 +3442,7 @@ final class VoiceTurnManager {
         if analysis.isBulk, let bulk = await engine.decideBulk(prompt: prompt) {
             lastTrace.route = "model-bulk"
             lastTrace.modelOutput = "\(bulk)"
+            if let q = readBackQuestion(bulk: bulk, utterance: utterance) { lastTrace.route = "read-back"; return q }
             let validated = BulkValidator.validate(bulk, utterance: utterance, segments: analysis.segments, context: ctx)
             lastTrace.validation = "\(validated)"
             Breadcrumb.log("decision: bulk \(bulk.action)")
@@ -3400,6 +3453,10 @@ final class VoiceTurnManager {
             lastTrace.modelOutput = "\(decision)"
         Breadcrumb.log("decision: \(decision.action) wait=\(decision.wait)")
             let validated = TaskValidator.validate(decision, utterance: utterance, context: ctx)
+            if case .wait = validated {} else if let q = readBackQuestion(single: decision, utterance: utterance) {
+                lastTrace.route = "read-back"
+                return q
+            }
             lastTrace.validation = "\(validated)"
             if case .wait = validated, final {
                 // The user has stopped and the model still says "wait": the rule-based path answers instead of silence.
@@ -3415,6 +3472,76 @@ final class VoiceTurnManager {
             return .reply(AgentReply(message: "I couldn't reach the on-device model.", didAdd: false))
         }
         return await TaskAgent.propose(utterance)
+    }
+
+    // MARK: Read-back: "Did you say Rani?"
+
+    private enum ReadBackAnswer { case apply(String), askWho, cancel, newSpeech }
+
+    private func readBackAnswer(_ rb: ConversationStateManager.ReadBack, delta: String, reply: ConfirmationManager.Reply) -> ReadBackAnswer {
+        if rb.askedWho {
+            let name = ReadBackCheck.name(in: delta)
+            return name.isEmpty ? .newSpeech : .apply(name)
+        }
+        switch reply {
+        case .yes: return .apply(rb.suggestion)
+        case .no: return .askWho
+        case .cancel: return .cancel
+        case .other:
+            // Just the name, said again: "Rani".
+            let words = LocalSemanticPrechecker.tokens(delta)
+            if (1...2).contains(words.count), !ActionLexicon.verbs.contains(words[0]) { return .apply(ReadBackCheck.name(in: delta)) }
+            return .newSpeech
+        }
+    }
+
+    /// One question per turn, and only for names, numbers and dates.
+    private func readBackVerdict(assignees: [String], utterance: String) -> ReadBackCheck.Verdict {
+        guard !state.readBackUsed else { return .none }
+        for a in assignees {
+            let v = ReadBackCheck.assignee(a, utterance: utterance, known: knownAssignees(), words: heardWords)
+            if v != .none { return v }
+        }
+        return ReadBackCheck.fact(utterance: utterance, words: heardWords)
+    }
+
+    private func readBackQuestion(single d: AgentDecisionValue, utterance: String) -> TurnResult? {
+        guard case .ask(let heard, let suggestion) = readBackVerdict(assignees: [d.assignee], utterance: utterance) else { return nil }
+        state.readBackUsed = true
+        state.readBack = .init(heard: heard, suggestion: suggestion, utterance: utterance, single: d, bulk: nil)
+        return .question("Did you say \(suggestion)?")
+    }
+
+    private func readBackQuestion(bulk b: BulkDecisionValue, utterance: String) -> TurnResult? {
+        let people = b.tasks.map(\.assignee) + b.routines.map(\.assignee) + [b.playbook?.assignee ?? ""]
+        guard case .ask(let heard, let suggestion) = readBackVerdict(assignees: people, utterance: utterance) else { return nil }
+        state.readBackUsed = true
+        state.readBack = .init(heard: heard, suggestion: suggestion, utterance: utterance, single: nil, bulk: b)
+        return .question("Did you say \(suggestion)?")
+    }
+
+    /// Carries on with the model's answer from before the question, with the confirmed name in place of what was heard.
+    private func applyReadBack(_ rb: ConversationStateManager.ReadBack, name: String, now: Date, final: Bool) async -> TurnResult {
+        let utterance = ReadBackCheck.replacing(rb.heard, with: name, in: rb.utterance)
+        let ctx = context(now: now)
+        func fix(_ value: String) -> String { value.lowercased() == rb.heard.lowercased() ? name : value }
+        if var d = rb.single {
+            d.assignee = fix(d.assignee)
+            let validated = TaskValidator.validate(d, utterance: utterance, context: ctx)
+            lastTrace.validation = "\(validated)"
+            if case .wait = validated, final { return await TaskAgent.propose(utterance) }
+            return await singleResult(validated, decision: d, utterance: utterance, ctx: ctx)
+        }
+        if var b = rb.bulk {
+            b.tasks = b.tasks.map { var t = $0; t.assignee = fix(t.assignee); return t }
+            b.routines = b.routines.map { var r = $0; r.assignee = fix(r.assignee); return r }
+            if var p = b.playbook { p.assignee = fix(p.assignee); b.playbook = p }
+            let segments = BulkDetector.analyze(utterance).segments
+            let validated = BulkValidator.validate(b, utterance: utterance, segments: segments, context: ctx)
+            lastTrace.validation = "\(validated)"
+            return await bulkResult(validated, spoken: b.spokenResponse, utterance: utterance, ctx: ctx)
+        }
+        return .reply(AgentReply(message: "Okay.", didAdd: false))
     }
 
     // MARK: Results from the model
@@ -3440,7 +3567,7 @@ final class VoiceTurnManager {
         case .playbook(let name, let steps, let stated):
             let pb = PlaybookDraftState(name: name,
                                         due: TaskValidator.resolveDate(d.dueDate, utterance: utterance, ctx: ctx),
-                                        assignee: TaskValidator.resolveAssignee(d.assignee, utterance: utterance),
+                                        assignee: TaskValidator.resolveAssignee(d.assignee, utterance: utterance, known: ctx.knownAssignees),
                                         steps: steps.map { DraftItem(title: $0) }, stated: stated)
             state.setPending(titles: [], playbook: nil, planned: [])
             state.drafts.setPlaybook(pb)
