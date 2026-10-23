@@ -128,132 +128,6 @@ nonisolated final class FakeEngine: StreamingEngine, @unchecked Sendable {
     func unload() {}
 }
 
-@MainActor
-final class MoonshineRecognizerTests: XCTestCase {
-    private var engine = FakeEngine()
-    private var recognizer: MoonshineRecognizer!
-    private var partials: [String] = []
-
-    override func setUp() {
-        engine = FakeEngine()
-        recognizer = MoonshineRecognizer(engine: engine)
-        partials = []
-        recognizer.onPartial = { [unowned self] in partials.append($0) }
-        recognizer.vocabulary = { ["Rani", "Suresh"] }
-    }
-
-    private func line(_ id: UInt64, _ text: String, done: Bool = false) -> TranscriptLineUpdate {
-        TranscriptLineUpdate(id: id, text: text, isComplete: done)
-    }
-
-    private func feed(_ update: TranscriptLineUpdate) { recognizer.received(update, session: recognizer.sessionID) }
-
-    func testLineEventsBecomeTheLiveTranscript() throws {
-        try recognizer.beginWithoutAudio()
-        feed(line(1, "Buy milk"))
-        feed(line(1, "Buy milk and bread."))
-        feed(line(1, "Buy milk and bread.", done: true))
-        feed(line(2, "Then call"))
-        feed(line(2, "Then call the plumber."))
-        XCTAssertEqual(recognizer.transcript, "Buy milk and bread. Then call the plumber.")
-        XCTAssertEqual(partials.last, "Buy milk and bread. Then call the plumber.")
-        XCTAssertEqual(partials, ["Buy milk", "Buy milk and bread.", "Buy milk and bread. Then call", "Buy milk and bread. Then call the plumber."],
-                       "a repeat of the same text is not announced twice, and a completed line stays in the transcript")
-    }
-
-    func testALineThatIsRevisedReplacesItsOwnTextOnly() throws {
-        try recognizer.beginWithoutAudio()
-        feed(line(1, "I need Rainy to sweep.", done: true))
-        feed(line(2, "And mop"))
-        feed(line(1, "I need Rani to sweep.", done: true))
-        XCTAssertEqual(recognizer.transcript, "I need Rani to sweep. And mop")
-    }
-
-    func testABrandIsRepairedAsItArrives() throws {
-        try recognizer.beginWithoutAudio()
-        feed(line(1, "Order milk from blink it tonight."))
-        XCTAssertEqual(recognizer.transcript, "Order milk from Blinkit tonight.")
-    }
-
-    func testAHouseholdNameIsNotTurnedIntoABrand() throws {
-        recognizer.vocabulary = { ["Maggie"] }
-        try recognizer.beginWithoutAudio()
-        feed(line(1, "Ask Maggie to cook."))
-        XCTAssertEqual(recognizer.transcript, "Ask Maggie to cook.")
-    }
-
-    func testTheKeyTermsAreTheHouseholdThenTheBrands() async throws {
-        await recognizer.prepare()
-        let terms = try XCTUnwrap(engine.keyTerms.first)
-        XCTAssertEqual(Array(terms.prefix(2)), ["Rani", "Suresh"])
-        XCTAssertTrue(terms.contains("Blinkit"))
-    }
-
-    func testARestartStartsAFreshStreamAndLateLinesOfTheOldOneAreDropped() throws {
-        try recognizer.beginWithoutAudio()
-        let old = recognizer.sessionID
-        feed(line(1, "Buy milk."))
-        XCTAssertTrue(recognizer.restartRecognition())
-        XCTAssertEqual(recognizer.transcript, "")
-        XCTAssertEqual(engine.sessions.count, 2)
-        recognizer.received(line(2, "stale words from before"), session: old)
-        XCTAssertEqual(recognizer.transcript, "")
-        feed(line(1, "Call the plumber."))
-        XCTAssertEqual(recognizer.transcript, "Call the plumber.")
-    }
-
-    func testARestartNeedsARunningMicrophone() {
-        XCTAssertFalse(recognizer.restartRecognition())
-        XCTAssertFalse(recognizer.beginSpeakingListen())
-    }
-
-    func testCancelDeliversNothingAndStopDeliversTheTranscript() throws {
-        var finished: [String] = []
-        recognizer.onFinished = { finished.append($0) }
-        try recognizer.beginWithoutAudio()
-        feed(line(1, "Buy milk."))
-        recognizer.cancel()
-        XCTAssertFalse(recognizer.isRecording)
-        XCTAssertEqual(finished, [])
-
-        try recognizer.beginWithoutAudio()
-        feed(line(1, "Pay the rent."))
-        recognizer.stop()
-        let delivered = expectation(description: "finished")
-        recognizer.onFinished = { finished.append($0); delivered.fulfill() }
-        wait(for: [delivered], timeout: 2)
-        XCTAssertEqual(finished, ["Pay the rent."])
-    }
-
-    func testTheEngineCallbackReachesTheMainActorInOrder() throws {
-        try recognizer.beginWithoutAudio()
-        let session = try XCTUnwrap(engine.sessions.last)
-        let done = expectation(description: "three partials")
-        done.expectedFulfillmentCount = 3
-        recognizer.onPartial = { [unowned self] in partials.append($0); done.fulfill() }
-        DispatchQueue.global().async {
-            session.onLine(TranscriptLineUpdate(id: 1, text: "one", isComplete: false))
-            session.onLine(TranscriptLineUpdate(id: 1, text: "one two", isComplete: false))
-            session.onLine(TranscriptLineUpdate(id: 1, text: "one two three", isComplete: true))
-        }
-        wait(for: [done], timeout: 2)
-        XCTAssertEqual(partials, ["one", "one two", "one two three"])
-    }
-
-    func testAModelThatCannotLoadIsReportedSoTheConversationCanFallBack() async {
-        engine.loadError = NSError(domain: "test", code: 1)
-        await recognizer.prepare()
-        XCTAssertTrue(recognizer.modelLoadFailed)
-        XCTAssertTrue(recognizer.failureIsPermanent)
-        XCTAssertNotNil(recognizer.errorMessage)
-    }
-
-    func testTheModelFolderIsInTheApp() {
-        // The tests run inside the app, which bundles Moonshine/medium-streaming-en (see Moonshine/fetch-models.sh).
-        XCTAssertTrue(MoonshineModel.isAvailable, "run `sh Moonshine/fetch-models.sh` and rebuild")
-    }
-}
-
 // MARK: - The microphone sink
 
 @MainActor
@@ -304,10 +178,10 @@ final class AudioSinkTests: XCTestCase {
         XCTAssertEqual(b.finished, 1)
     }
 
-    func testTheMoonshineSinkCopiesToMonoAndWorksOnItsOwnQueue() throws {
+    func testTheAudioHopSinkCopiesToMonoAndWorksOnItsOwnQueue() throws {
         let session = FakeSession { _ in }
-        let queue = DispatchQueue(label: "test.moonshine")
-        let sink = MoonshineSink(session: session, queue: queue, stats: PassStats())
+        let queue = DispatchQueue(label: "test.audiohop")
+        let sink = AudioHopSink(session: session, queue: queue, stats: PassStats())
         sink.append(buffer(channels: 2, frames: 480) { _, _ in 0.2 })
         sink.append(buffer(channels: 2, frames: 480) { _, _ in 0.2 })
         queue.sync {}
@@ -433,51 +307,4 @@ final class TranscriptPolicyTests: XCTestCase {
         _ = await m.decide(utterance: said, now: now)
         XCTAssertNil(m.state.drafts.items.first { $0.title == "Buy flowers and snacks" }?.assignee, "an assignee nobody said is dropped")
     }
-}
-
-// MARK: - A real transcription (opt in)
-
-/// Needs the model and a recording:
-/// `TEST_RUNNER_KITTY_MOONSHINE=1 TEST_RUNNER_KITTY_MOONSHINE_WAV=/path/to/speech.wav xcodebuild test -only-testing:KittyTests/MoonshineRealTests …`
-final class MoonshineRealTests: XCTestCase {
-
-    func testTranscribesARecording() throws {
-        let env = ProcessInfo.processInfo.environment
-        try XCTSkipUnless(env["KITTY_MOONSHINE"] == "1", "set KITTY_MOONSHINE=1 (and KITTY_MOONSHINE_WAV) to run the real model")
-        let path = try XCTUnwrap(env["KITTY_MOONSHINE_WAV"], "KITTY_MOONSHINE_WAV is the recording to transcribe")
-        try XCTSkipUnless(MoonshineModel.isAvailable, "the model is not in the app")
-
-        let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
-        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)))
-        try file.read(into: buffer)
-        let samples = MonoAudio.samples(from: buffer)
-        let rate = Int32(file.processingFormat.sampleRate)
-
-        let engine = MoonshineEngine()
-        try engine.load(keyTerms: KeyTerms.build(household: []), boost: MoonshineSettings.boost)
-        let heard = HeardLines()
-        let session = try engine.openSession { heard.add($0) }
-        let chunk = Int(rate) / 10
-        var i = 0
-        while i < samples.count {
-            try session.add(Array(samples[i..<min(i + chunk, samples.count)]), sampleRate: rate)
-            i += chunk
-        }
-        session.flushAndClose()
-        let text = heard.text
-        print("KITTY moonshine heard:", text)
-        XCTAssertFalse(text.isEmpty, "nothing was transcribed")
-    }
-}
-
-nonisolated private final class HeardLines: @unchecked Sendable {
-    private let lock = NSLock()
-    private var order: [UInt64] = []
-    private var texts: [UInt64: String] = [:]
-    func add(_ u: TranscriptLineUpdate) {
-        lock.lock(); defer { lock.unlock() }
-        if texts[u.id] == nil { order.append(u.id) }
-        texts[u.id] = u.text
-    }
-    var text: String { lock.lock(); defer { lock.unlock() }; return order.compactMap { texts[$0] }.joined(separator: " ") }
 }

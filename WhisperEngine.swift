@@ -8,7 +8,7 @@ nonisolated enum WhisperModel {
     /// `sh Whisper/fetch-models.sh base` fetches the lighter one.
     static let folders = ["small.en", "base.en"]
 
-    /// The folder of the accurate model: large-v3-turbo. `sh Whisper/fetch-models.sh turbo` fetches it (5-bit, about 1.8 GB with its encoder).
+    /// The folder of the accurate model: large-v3-turbo. `sh Whisper/fetch-models.sh turbo` fetches it (5-bit, about 0.55 GB; the CoreML encoder is optional).
     static let accurateFolder = "large-v3-turbo"
 
     /// The first model file (ggml-*.bin) in the first of these folders that has one. The CoreML encoder sits next to it as
@@ -120,16 +120,32 @@ nonisolated final class WhisperEngine: StreamingEngine, WhisperTranscribing, @un
         #if targetEnvironment(simulator)
         params.use_gpu = false
         #endif
-        let modelPath = Self.skipCoreML ? Self.withoutEncoder(url) : url
+        // With a CoreML encoder beside the model the Neural Engine runs it (unless told not to); with none the encoder runs
+        // inside whisper.cpp on the GPU (Metal), which is how the accurate model ships: no 1.2 GB encoder in the app.
+        let hasEncoder = Self.hasEncoder(for: url)
+        let modelPath = (hasEncoder && Self.skipCoreML) ? Self.withoutEncoder(url) : url
+        Breadcrumb.log("whisper\(accurate ? "-turbo" : ""): encoder on \(hasEncoder && !Self.skipCoreML ? "the Neural Engine (CoreML)" : "the GPU/CPU (no CoreML)")")
         guard let ctx = whisper_init_from_file_with_params(modelPath.path, params) else { throw WhisperError.loadFailed }
         context = ctx
-        // The first pass compiles the CoreML encoder (a few seconds for small.en, longer for turbo): do it now, on the loading queue.
+        // The first pass compiles the CoreML encoder if there is one (seconds, and longer for turbo) and warms up the GPU: do it now,
+        // on the loading queue.
         _ = run(ctx, samples: [Float](repeating: 0, count: 17_600), prompt: "")
         setLoaded(true)
     }
 
     func setKeyTerms(_ terms: [String]) throws {
         lock.lock(); prompt = WhisperPrompt.build(from: terms); lock.unlock()
+    }
+
+    /// whisper.cpp looks for `<model>-encoder.mlmodelc` next to the model file, with a trailing `-q5_0` style suffix left off.
+    static func encoderURL(for model: URL) -> URL {
+        var name = model.deletingPathExtension().lastPathComponent
+        if let suffix = name.range(of: #"-q\d_\d$"#, options: .regularExpression) { name.removeSubrange(suffix) }
+        return model.deletingLastPathComponent().appendingPathComponent(name + "-encoder.mlmodelc", isDirectory: true)
+    }
+
+    static func hasEncoder(for model: URL) -> Bool {
+        FileManager.default.fileExists(atPath: encoderURL(for: model).path)
     }
 
     /// The CoreML encoder needs a real device: the simulator has no working Neural Engine path, so it runs the CPU encoder.

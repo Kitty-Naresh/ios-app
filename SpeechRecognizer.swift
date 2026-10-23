@@ -42,8 +42,8 @@ nonisolated struct SpokenWord: Equatable, Sendable {
 
 // MARK: - What the conversation needs from a recogniser
 
-/// The surface `VoiceConversation` listens through. Moonshine is the main recogniser (live, punctuated, with key terms);
-/// Apple Speech is the fallback if the Moonshine model cannot load, and is what the "Hey Kitty" wake word uses.
+/// The surface `VoiceConversation` listens through. `HybridRecognizer` is the main one (Apple Speech live, the accurate Whisper model
+/// settling each phrase); plain Apple Speech is the fallback, and what the "Hey Kitty" wake word uses.
 @MainActor
 protocol TurnRecognizer: AnyObject {
     /// The text of this listening session so far.
@@ -77,7 +77,7 @@ protocol TurnRecognizer: AnyObject {
 // MARK: - Where the microphone goes
 
 /// A consumer of the microphone. One engine and one tap serve whichever sink is current, so Kitty can hand the same running
-/// microphone from Moonshine to Apple Speech (hands-free "stop" while she talks) and back without touching the audio session.
+/// microphone from one consumer to Apple Speech (hands-free "stop" while she talks) and back without touching the audio session.
 /// `append` is called on the audio thread: copy what you need and return quickly.
 nonisolated protocol AudioSink: AnyObject {
     func append(_ buffer: AVAudioPCMBuffer)
@@ -86,7 +86,7 @@ nonisolated protocol AudioSink: AnyObject {
 }
 
 nonisolated enum MonoAudio {
-    /// All channels averaged into one array of Float samples in -1...1, which is what Moonshine takes.
+    /// All channels averaged into one array of Float samples in -1...1, which is what Whisper takes.
     static func samples(from buffer: AVAudioPCMBuffer) -> [Float] {
         let frames = Int(buffer.frameLength)
         let channels = Int(buffer.format.channelCount)
@@ -143,7 +143,7 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         target?.append(buffer)
     }
 
-    /// Point the running microphone at a new consumer (Apple Speech or Moonshine). No engine or session change.
+    /// Point the running microphone at a new consumer (Apple Speech or the Whisper hop). No engine or session change.
     func swap(to newSink: AudioSink?) { setSink(newSink) }
 
     func start(feeding newSink: AudioSink, voiceProcessing: Bool = false) async throws {

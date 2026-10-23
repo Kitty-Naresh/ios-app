@@ -1,3 +1,38 @@
+# Kitty v35: smaller app, Apple live text, turbo settles each phrase
+
+The app was 3.8 GB on the phone. Most of it was dead weight, so v35 keeps **large-v3-turbo** and drops the rest.
+
+- **Moonshine is gone** (code, tests, menu entry, the `moonshine-swift` package). A stored "moonshine" choice maps to Turbo; the old
+  "Moonshine speech" switch set to off maps to Apple Speech.
+- **The turbo CoreML encoder is no longer bundled** (it was about 1.2 GB). With no `-encoder.mlmodelc` beside the `.bin`, whisper.cpp runs the
+  encoder on the GPU (Metal) on a device. `WhisperEngine.encoderURL(for:)` / `hasEncoder(for:)` decide; the log line says which path loaded.
+  Optional: `sh Whisper/fetch-models.sh turbo-coreml` puts the encoder back (faster on the Neural Engine, 1.2 GB bigger).
+- **small.en is no longer bundled** (parked in `WhisperSetup/parked/`, git-ignored). The "Whisper (quick)" engine only shows if it is installed.
+- **Apple Speech shows the live words; turbo settles each phrase.** `HybridRecognizer` wraps `SpeechRecognizer`. The same microphone
+  buffers go through `SpeechRecognizer.audioMirror` to `TurboSettler`, which runs the energy VAD and calls turbo once per pause (queue
+  `kitty.whisper.final`). `HybridTranscript.merge` replaces the Apple words that fall in that phrase's time range with turbo's text. If Apple gives no word
+  times it falls back to word-count boundaries. If turbo is not loaded or fails, Apple's words stand. A generation counter drops stale
+  results after a restart or cancel.
+- **Expected size: about 0.6 GB** (turbo 547 MB plus the framework). Not yet measured on a phone.
+
+## Measure turbo on the phone (your step)
+
+Set `KITTY_WHISPER_NO_COREML=1` in the scheme if you want to force the GPU path, speak a 10 s phrase, and read the breadcrumb
+`whisper-turbo pass: X ms`. 3000 ms or less is fine. If it is much slower or the phone gets hot, tell me and I will build the quantized-encoder fallback.
+
+## Simulator
+
+Turbo is excluded on the simulator (CPU encoder, about 40 s per 11 s phrase) unless `KITTY_WHISPER_TURBO_SIM=1`; the menu shows
+"(not installed)" and Apple Speech is used. Opt-in real run with no encoder (11 s recording: loaded in 45 s, one pass 42 s, text correct):
+
+`TEST_RUNNER_KITTY_WHISPER_TURBO=1 TEST_RUNNER_KITTY_WHISPER_TURBO_SIM=1 TEST_RUNNER_KITTY_WHISPER_TURBO_MODEL=$PWD/Whisper/large-v3-turbo TEST_RUNNER_KITTY_WHISPER_WAV=/path/speech.wav xcodebuild test -project Kitty.xcodeproj -scheme Kitty -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:KittyTests/WhisperRealTests/testTheAccurateModelSettlesEachPhrase`
+
+Tests: 395 run, 3 skipped (opt-in), 0 failures.
+
+Not verified: how well Apple's partial word timestamps line up with the VAD phrases on a real device.
+
+---
+
 # Kitty v34: Whisper large-v3-turbo, hybrid with small.en
 
 The default speech engine is now **Whisper Turbo (accurate)**: `small.en` still shows the words live while you talk, and when you pause,

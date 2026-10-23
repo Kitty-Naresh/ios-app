@@ -245,6 +245,13 @@ nonisolated final class FakeTranscriber: WhisperTranscribing, @unchecked Sendabl
     }
 }
 
+nonisolated private final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _all: [TurboSettler.Event] = []
+    func add(_ e: TurboSettler.Event) { lock.lock(); _all.append(e); lock.unlock() }
+    var all: [TurboSettler.Event] { lock.lock(); defer { lock.unlock() }; return _all }
+}
+
 nonisolated private final class LineLog: @unchecked Sendable {
     private let lock = NSLock()
     private var _updates: [TranscriptLineUpdate] = []
@@ -613,16 +620,6 @@ final class WhisperRecognizerTests: XCTestCase {
         XCTAssertTrue(recognizer.failureIsPermanent)
         XCTAssertNotNil(recognizer.errorMessage)
     }
-
-    func testTheModelIsInTheApp() {
-        // The tests run inside the app, which bundles Whisper/<size>.en (see Whisper/fetch-models.sh).
-        XCTAssertTrue(WhisperModel.isAvailable, "run `sh Whisper/fetch-models.sh` and rebuild")
-        if let bin = WhisperModel.binaryURL {
-            let encoder = bin.deletingLastPathComponent().appendingPathComponent(
-                bin.lastPathComponent.replacingOccurrences(of: "-q5_1", with: "").replacingOccurrences(of: ".bin", with: "-encoder.mlmodelc"))
-            XCTAssertTrue(FileManager.default.fileExists(atPath: encoder.path), "the CoreML encoder sits next to the model")
-        }
-    }
 }
 
 // MARK: - The engine choice
@@ -640,11 +637,21 @@ final class SpeechEngineChoiceTests: XCTestCase {
         XCTAssertEqual(SpeechEngineChoice.stored(in: defaults()), .whisperTurbo)
     }
 
-    func testTheOldMoonshineSwitchCarriesOver() {
+    func testTheOldMoonshineSwitchOnlyKeepsAnAppleSpeechChoice() {
         let on = defaults(); on.set(true, forKey: SpeechEngineChoice.legacyMoonshineKey)
-        XCTAssertEqual(SpeechEngineChoice.stored(in: on), .moonshine)
+        XCTAssertEqual(SpeechEngineChoice.stored(in: on), .whisperTurbo, "Moonshine is gone: it becomes the default")
         let off = defaults(); off.set(false, forKey: SpeechEngineChoice.legacyMoonshineKey)
         XCTAssertEqual(SpeechEngineChoice.stored(in: off), .apple)
+        let old = defaults(); old.set("moonshine", forKey: SpeechEngineChoice.key)
+        XCTAssertEqual(SpeechEngineChoice.stored(in: old), .whisperTurbo)
+    }
+
+    func testTheMenuOffersTurboAndAppleAndTheQuickWhisperOnlyIfItsModelIsThere() {
+        let choices = SpeechEngineChoice.menuChoices
+        XCTAssertTrue(choices.contains(.whisperTurbo))
+        XCTAssertTrue(choices.contains(.apple))
+        XCTAssertEqual(choices.contains(.whisper), SpeechEngineChoice.whisper.isAvailable)
+        XCTAssertFalse(SpeechEngineChoice.whisper.isAvailable, "the app does not bundle the live model any more")
     }
 
     func testTheNewChoiceWinsOverTheOldSwitch() {
@@ -667,7 +674,7 @@ final class SpeechEngineChoiceTests: XCTestCase {
         SpeechEngineChoice.store(.whisperTurbo, in: d)
         XCTAssertEqual(SpeechEngineChoice.effective(in: d, available: { _ in true }), .whisperTurbo)
         XCTAssertEqual(SpeechEngineChoice.effective(in: d, available: { $0 != .whisperTurbo }), .whisper)
-        XCTAssertEqual(SpeechEngineChoice.effective(in: d, available: { $0 == .moonshine || $0 == .apple }), .apple)
+        XCTAssertEqual(SpeechEngineChoice.effective(in: d, available: { $0 == .apple }), .apple)
         XCTAssertEqual(SpeechEngineChoice.effective(in: d, available: { $0 == .apple }), .apple)
     }
 
@@ -682,9 +689,8 @@ final class SpeechEngineChoiceTests: XCTestCase {
 
     @MainActor
     func testTheConversationBuildsTheRecogniserThatWasPicked() {
-        XCTAssertEqual((VoiceConversation.makeRecognizer(for: .whisperTurbo) as? WhisperRecognizer)?.accurate, true)
+        XCTAssertTrue(VoiceConversation.makeRecognizer(for: .whisperTurbo) is HybridRecognizer)
         XCTAssertEqual((VoiceConversation.makeRecognizer(for: .whisper) as? WhisperRecognizer)?.accurate, false)
-        XCTAssertTrue(VoiceConversation.makeRecognizer(for: .moonshine) is MoonshineRecognizer)
         XCTAssertTrue(VoiceConversation.makeRecognizer(for: .apple) is SpeechRecognizer)
         for choice in SpeechEngineChoice.allCases {
             XCTAssertEqual(VoiceConversation.engine(of: VoiceConversation.makeRecognizer(for: choice)), choice)
@@ -722,6 +728,36 @@ final class WhisperModelLookupTests: XCTestCase {
         let dir = try folder(with: ["ggml-large-v3-turbo-q5_0.bin"])
         XCTAssertNil(WhisperModel.accurateBinaryURL(simulator: true, environment: ["KITTY_WHISPER_TURBO_MODEL": dir.path]))
         XCTAssertNotNil(WhisperModel.accurateBinaryURL(simulator: true, environment: ["KITTY_WHISPER_TURBO_MODEL": dir.path, "KITTY_WHISPER_TURBO_SIM": "1"]))
+    }
+
+    func testTheEncoderIsLookedForBesideTheModelWithoutTheQuantSuffix() {
+        let turbo = URL(fileURLWithPath: "/m/large-v3-turbo/ggml-large-v3-turbo-q5_0.bin")
+        XCTAssertEqual(WhisperEngine.encoderURL(for: turbo).lastPathComponent, "ggml-large-v3-turbo-encoder.mlmodelc")
+        let small = URL(fileURLWithPath: "/m/small.en/ggml-small.en-q5_1.bin")
+        XCTAssertEqual(WhisperEngine.encoderURL(for: small).lastPathComponent, "ggml-small.en-encoder.mlmodelc")
+        let f16 = URL(fileURLWithPath: "/m/x/ggml-large-v3-turbo.bin")
+        XCTAssertEqual(WhisperEngine.encoderURL(for: f16).lastPathComponent, "ggml-large-v3-turbo-encoder.mlmodelc")
+        XCTAssertEqual(WhisperEngine.encoderURL(for: turbo).deletingLastPathComponent(), turbo.deletingLastPathComponent())
+    }
+
+    func testAnEncoderBesideTheModelIsFoundAndNoneIsReported() throws {
+        let dir = try folder(with: ["ggml-large-v3-turbo-q5_0.bin"])
+        let model = dir.appendingPathComponent("ggml-large-v3-turbo-q5_0.bin")
+        XCTAssertFalse(WhisperEngine.hasEncoder(for: model))
+        try FileManager.default.createDirectory(at: WhisperEngine.encoderURL(for: model), withIntermediateDirectories: true)
+        XCTAssertTrue(WhisperEngine.hasEncoder(for: model))
+    }
+
+    /// The reason the app is small: the 1.2 GB CoreML encoder and the live model are not in the bundle.
+    func testTheAppShipsTurboWithoutItsCoreMLEncoderOrTheLiveModel() throws {
+        let whisper = try XCTUnwrap(Bundle.main.resourceURL).appendingPathComponent("Whisper")
+        let turbo = whisper.appendingPathComponent(WhisperModel.accurateFolder)
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: turbo.path)) ?? []
+        XCTAssertTrue(files.contains { $0.hasSuffix(".bin") }, "run `sh Whisper/fetch-models.sh turbo` and rebuild")
+        XCTAssertFalse(files.contains { $0.hasSuffix(".mlmodelc") }, "a CoreML encoder in the app adds 1.2 GB")
+        for live in WhisperModel.folders {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: whisper.appendingPathComponent(live).path), "\(live) is not bundled")
+        }
     }
 
     func testTheAccurateFolderIsNotOneOfTheLiveOnes() {
@@ -828,14 +864,14 @@ final class WhisperRealTests: XCTestCase {
         engine.unload()
     }
 
-    /// The hybrid: small.en shows the words live, large-v3-turbo settles each phrase. Needs the turbo folder, which the simulator
-    /// does not bundle, so point at it: `TEST_RUNNER_KITTY_WHISPER_TURBO=1 TEST_RUNNER_KITTY_WHISPER_TURBO_SIM=1
-    /// TEST_RUNNER_KITTY_WHISPER_TURBO_MODEL=$PWD/WhisperSetup/parked/large-v3-turbo TEST_RUNNER_KITTY_WHISPER_WAV=…` (CPU encoder: slow).
-    func testTheHybridSettlesWithTheAccurateModel() throws {
+    /// The accurate model on its own, through the pause detector the app uses: each phrase is transcribed once, when you pause. The
+    /// simulator does not bundle turbo, so point at it:
+    /// `TEST_RUNNER_KITTY_WHISPER_TURBO=1 TEST_RUNNER_KITTY_WHISPER_TURBO_SIM=1
+    /// TEST_RUNNER_KITTY_WHISPER_TURBO_MODEL=$PWD/Whisper/large-v3-turbo TEST_RUNNER_KITTY_WHISPER_WAV=…` (the CPU runs the encoder: slow).
+    func testTheAccurateModelSettlesEachPhrase() throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["KITTY_WHISPER_TURBO"] == "1", "set KITTY_WHISPER_TURBO=1 to run the real accurate model")
         let path = try XCTUnwrap(env["KITTY_WHISPER_WAV"], "KITTY_WHISPER_WAV is the recording to transcribe")
-        try XCTSkipUnless(WhisperModel.isAvailable, "the live model is not in the app")
         try XCTSkipUnless(WhisperModel.isAccurateAvailable, "the accurate model was not found (KITTY_WHISPER_TURBO_MODEL / KITTY_WHISPER_TURBO_SIM)")
 
         let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
@@ -843,40 +879,33 @@ final class WhisperRealTests: XCTestCase {
         try file.read(into: buffer)
         let samples = MonoAudio.samples(from: buffer)
         let rate = Int32(file.processingFormat.sampleRate)
-        let terms = KeyTerms.build(household: ["Rani", "Suresh"])
 
-        let live = WhisperEngine()
-        try live.load(keyTerms: terms, boost: 0)
         let turbo = WhisperEngine(accurate: true)
         let loadStart = Date()
-        try turbo.load(keyTerms: terms, boost: 0)
+        try turbo.load(keyTerms: KeyTerms.build(household: ["Rani", "Suresh"]), boost: 0)
         print("KITTY whisper-turbo loaded in", Int(Date().timeIntervalSince(loadStart) * 1000), "ms")
-        live.accurateProvider = { turbo.isLoaded ? turbo : nil }
 
-        let log = LineLog()
-        let session = try live.openSession { log.add($0) }
+        let events = EventLog()
+        let settler = TurboSettler(accurate: { turbo }, prompt: WhisperPrompt.build(from: KeyTerms.build(household: ["Rani", "Suresh"])),
+                                   finalTimeout: 300) { events.add($0) }
         let chunk = Int(rate) / 10
         var i = 0
         while i < samples.count {
-            try session.add(Array(samples[i..<min(i + chunk, samples.count)]), sampleRate: rate)
+            try settler.add(Array(samples[i..<min(i + chunk, samples.count)]), sampleRate: rate)
             i += chunk
         }
-        try session.add(Audio.quiet(1.5, rate: Double(rate)), sampleRate: rate)
-        session.flushAndClose()
-        // The simulator runs the encoder on the CPU, far slower than a phone, so the close gives up on the pass; wait for it here.
-        let deadline = Date().addingTimeInterval(240)
-        while Date() < deadline && !log.updates.contains(where: \.isComplete) { Thread.sleep(forTimeInterval: 0.5) }
+        try settler.add(Audio.quiet(1.5, rate: Double(rate)), sampleRate: rate)
+        settler.flushAndClose()
 
-        var order: [UInt64] = []
-        var liveText: [UInt64: String] = [:]
-        var settled: [UInt64: String] = [:]
-        for u in log.updates {
-            if liveText[u.id] == nil && settled[u.id] == nil { order.append(u.id) }
-            if u.isComplete { settled[u.id] = u.text } else { liveText[u.id] = u.text }
+        let settled = events.all.compactMap { event -> String? in
+            if case .settled(_, let text, _, _) = event { return text }
+            return nil
         }
-        print("KITTY hybrid live   :", order.compactMap { liveText[$0] }.joined(separator: " "))
-        print("KITTY hybrid settled:", order.compactMap { settled[$0] }.joined(separator: " "))
-        XCTAssertFalse(settled.values.joined().isEmpty, "nothing was settled")
-        live.unload(); turbo.unload()
+        for case .phraseEnded(let id, let start, let end) in events.all {
+            print("KITTY phrase \(id): \(String(format: "%.1f", start))-\(String(format: "%.1f", end)) s")
+        }
+        print("KITTY turbo settled:", settled.joined(separator: " "))
+        XCTAssertFalse(settled.joined().isEmpty, "nothing was settled")
+        turbo.unload()
     }
 }

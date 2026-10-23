@@ -24,7 +24,7 @@ final class WhisperRecognizer: TurnRecognizer {
     private let capture: AudioCapture
     private let queue = DispatchQueue(label: "kitty.whisper", qos: .userInitiated)
     private let stopListener = AppleStopListener()
-    private var sink: MoonshineSink?                   // the same hop from the audio thread to the engine queue Moonshine uses
+    private var sink: AudioHopSink?                   // the hop from the audio thread to the engine queue
     private var stats = PassStats(label: "whisper")
     private var loaded = false
     private(set) var sessionID = 0
@@ -142,14 +142,14 @@ final class WhisperRecognizer: TurnRecognizer {
         queue.async { try? engine.setKeyTerms(terms) }
     }
 
-    private func openSink(id: Int) throws -> MoonshineSink {
+    private func openSink(id: Int) throws -> AudioHopSink {
         stats = PassStats(label: "whisper")
         let stats = stats
         let session = try engine.openSession { [weak self] update in
             stats.recordLatency(update.latencyMs)
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.received(update, session: id) } }
         }
-        let newSink = MoonshineSink(session: session, queue: queue, stats: stats)
+        let newSink = AudioHopSink(session: session, queue: queue, stats: stats)
         sink = newSink
         return newSink
     }
@@ -180,7 +180,7 @@ final class WhisperRecognizer: TurnRecognizer {
         } else {
             lines.append((update.id, update.text, update.isComplete, update.words))
         }
-        let text = MoonshineRecognizer.join(lines.map(\.text))
+        let text = TranscriptJoin.join(lines.map(\.text))
         words = lines.flatMap(\.words)
         guard text != transcript else { return }
         transcript = text

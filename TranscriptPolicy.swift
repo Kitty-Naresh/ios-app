@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - How much Kitty trusts the transcript
 
-/// Moonshine returns punctuated, capitalised sentences, so a long turn arrives with its sentence boundaries. With `raw` on,
+/// Whisper and Apple Speech return punctuated, capitalised sentences, so a long turn arrives with its sentence boundaries. With `raw` on,
 /// Kitty stops second-guessing it: the cleaner (fillers, repeats, "no wait" repairs) passes the words through, and a long
 /// turn skips `BulkDetector` and the long-turn digest. The whole punctuated transcript goes to the model in one prompt and the
 /// model splits it into tasks. Validators, dates, assignees and the "Did you say…?" read-back all still run.

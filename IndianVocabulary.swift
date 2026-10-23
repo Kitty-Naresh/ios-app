@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Words a general speech model gets wrong in an Indian household
 
 /// Brands, apps, foods and household words that are said every day in India and that a recogniser trained mostly on other
-/// English tends to mishear ("Blinkit" as "blink it", "atta" as "alter"). Used two ways: as Moonshine key terms, which bias
+/// English tends to mishear ("Blinkit" as "blink it", "atta" as "alter"). Used two ways: as speech key terms, which bias
 /// the decoder towards them, and by `BrandFixer`, which repairs a near-miss afterwards when there is one clear match.
 ///
 /// Spell and capitalise each exactly as it should appear. No commas: commas separate key terms.
@@ -30,7 +30,7 @@ nonisolated enum IndianVocabulary {
 
 // MARK: - Key terms for the recogniser
 
-/// Builds the list handed to Moonshine as key terms: the household's own names first (people, lists, routines), then the
+/// Builds the list handed to the speech models as key terms: the household's own names first (people, lists, routines), then the
 /// bundled Indian brands and words. A long list costs a little accuracy on everything else, so it is capped.
 nonisolated enum KeyTerms {
     static let limit = 120

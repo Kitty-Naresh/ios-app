@@ -5,7 +5,7 @@ import AVFoundation
 
 // The only file that imports Speech: Apple's on-device and server recogniser.
 // Kitty uses it for the "Hey Kitty" wake word, for hands-free "stop" while she talks, and as the fallback if the
-// Moonshine model cannot load.
+// accurate speech model is not there.
 
 /// Phase 0 spike: what does SFSpeechRecognizer actually report for confidence?
 /// Collects stats per session and prints one summary line when the session ends.
@@ -87,6 +87,9 @@ final class SpeechRecognizer: ObservableObject, TurnRecognizer {
     /// Asked for at the start of every recognition session, so names added a moment ago are expected right away.
     var vocabulary: (@MainActor () -> [String])?
 
+    /// Another consumer of the same microphone (the accurate model's pause detector).
+    let audioMirror = MirrorBox()
+
     /// Created again at each start so the English (India) setting takes effect on the next listen.
     private var recognizer = SpeechLocalePreference.makeRecognizer()
     private let capture = AudioCapture()
@@ -153,7 +156,7 @@ final class SpeechRecognizer: ObservableObject, TurnRecognizer {
 
             // Mic setup runs off the main thread so the UI never freezes.
             Breadcrumb.log("5 starting microphone")
-            try await capture.start(feeding: AppleAudioSink(request), voiceProcessing: bargeIn)
+            try await capture.start(feeding: AppleAudioSink(request, mirror: audioMirror), voiceProcessing: bargeIn)
             Breadcrumb.log("6 microphone running")
             guard sessionID == id else { capture.stop(); return }   // cancelled while starting
 
@@ -215,7 +218,7 @@ final class SpeechRecognizer: ObservableObject, TurnRecognizer {
         words = []
         delivered = false
         let request = makeRequest(for: recognizer)
-        capture.swap(to: AppleAudioSink(request))
+        capture.swap(to: AppleAudioSink(request, mirror: audioMirror))
         beginTask(recognizer: recognizer, request: request, id: id)
         Breadcrumb.log("recognition restarted on the running mic")
         return true
@@ -315,10 +318,27 @@ final class SpeechRecognizer: ObservableObject, TurnRecognizer {
 
 // MARK: - Apple Speech as an audio sink
 
+/// A second consumer of the same microphone buffers, which can be switched on and off while the microphone keeps running.
+nonisolated final class MirrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _sink: AudioSink?
+    var sink: AudioSink? {
+        get { lock.lock(); defer { lock.unlock() }; return _sink }
+        set { lock.lock(); _sink = newValue; lock.unlock() }
+    }
+}
+
 nonisolated final class AppleAudioSink: AudioSink, @unchecked Sendable {
     let request: SFSpeechAudioBufferRecognitionRequest
-    init(_ request: SFSpeechAudioBufferRecognitionRequest) { self.request = request }
-    func append(_ buffer: AVAudioPCMBuffer) { request.append(buffer) }
+    private let mirror: MirrorBox?
+    init(_ request: SFSpeechAudioBufferRecognitionRequest, mirror: MirrorBox? = nil) {
+        self.request = request
+        self.mirror = mirror
+    }
+    func append(_ buffer: AVAudioPCMBuffer) {
+        request.append(buffer)
+        mirror?.sink?.append(buffer)       // the audio thread, so the mirror only copies and hands over
+    }
     func finish() { request.endAudio() }
 }
 

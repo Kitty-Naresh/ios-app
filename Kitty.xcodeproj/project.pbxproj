@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C196E2064DEE7352D7B60174 /* HybridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C096E2064DEE7352D7B60174 /* HybridTests.swift */; };
+		C1CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */; };
+		C118D23642BEFFC5D56B72CA /* TurboSettler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C018D23642BEFFC5D56B72CA /* TurboSettler.swift */; };
+		C1E0156CE15A2FCC99A38AEF /* HybridTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E0156CE15A2FCC99A38AEF /* HybridTranscript.swift */; };
+		C164107D7EB5C0D47B505D73 /* AudioPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = C064107D7EB5C0D47B505D73 /* AudioPipeline.swift */; };
 		C1FC89527F0980C2E1654219 /* WhisperAccurate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */; };
 		C1D84C66B2C902A29EE2313E /* WhisperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D84C66B2C902A29EE2313E /* WhisperTests.swift */; };
 		C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */; };
@@ -16,14 +21,11 @@
 		AB00570000000000000000E2 /* whisper.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E1 /* whisper.xcframework */; };
 		AB00570000000000000000E4 /* whisper.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E1 /* whisper.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		AB00570000000000000000E5 /* Whisper in Resources */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E3 /* Whisper */; };
-		C11E15C0B99369D9BD105989 /* MoonshineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01E15C0B99369D9BD105989 /* MoonshineTests.swift */; };
+		C11E15C0B99369D9BD105989 /* SpeechPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01E15C0B99369D9BD105989 /* SpeechPipelineTests.swift */; };
 		C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */; };
 		C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C033EDD0E8E54141063861E4 /* BrandFixer.swift */; };
 		C184B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift in Sources */ = {isa = PBXBuildFile; fileRef = C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */; };
-		C133B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C033B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift */; };
 		C17D1021BFFEC3A83E05C971 /* AppleSpeech.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */; };
-		AB00570000000000000000F2 /* Moonshine in Resources */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000F1 /* Moonshine */; };
-		AB00570000000000000000F4 /* MoonshineVoice in Frameworks */ = {isa = PBXBuildFile; productRef = AB00570000000000000000F5 /* MoonshineVoice */; };
 		A10000000000000000000302 /* Agent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000301 /* Agent.swift */; };
 		A10000000000000000000304 /* BulkAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000303 /* BulkAgent.swift */; };
 		A10000000000000000000306 /* ConversationMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000305 /* ConversationMode.swift */; };
@@ -61,6 +63,11 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		C096E2064DEE7352D7B60174 /* HybridTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridTests.swift; sourceTree = "<group>"; };
+		C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridRecognizer.swift; sourceTree = "<group>"; };
+		C018D23642BEFFC5D56B72CA /* TurboSettler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurboSettler.swift; sourceTree = "<group>"; };
+		C0E0156CE15A2FCC99A38AEF /* HybridTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridTranscript.swift; sourceTree = "<group>"; };
+		C064107D7EB5C0D47B505D73 /* AudioPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPipeline.swift; sourceTree = "<group>"; };
 		C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperAccurate.swift; sourceTree = "<group>"; };
 		C0D84C66B2C902A29EE2313E /* WhisperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperTests.swift; sourceTree = "<group>"; };
 		C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechEngineChoice.swift; sourceTree = "<group>"; };
@@ -69,13 +76,11 @@
 		C08ECB0958EC263D88F5634F /* WhisperAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperAudio.swift; sourceTree = "<group>"; };
 		AB00570000000000000000E1 /* whisper.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = whisper.xcframework; path = WhisperSetup/build-apple/whisper.xcframework; sourceTree = "<group>"; };
 		AB00570000000000000000E3 /* Whisper */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Whisper; sourceTree = "<group>"; };
-		C01E15C0B99369D9BD105989 /* MoonshineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoonshineTests.swift; sourceTree = "<group>"; };
+		C01E15C0B99369D9BD105989 /* SpeechPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPipelineTests.swift; sourceTree = "<group>"; };
 		C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPolicy.swift; sourceTree = "<group>"; };
 		C033EDD0E8E54141063861E4 /* BrandFixer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandFixer.swift; sourceTree = "<group>"; };
 		C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndianVocabulary.swift; sourceTree = "<group>"; };
-		C033B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoonshineRecognizer.swift; sourceTree = "<group>"; };
 		C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSpeech.swift; sourceTree = "<group>"; };
-		AB00570000000000000000F1 /* Moonshine */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Moonshine; sourceTree = "<group>"; };
 		A10000000000000000000301 /* Agent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Agent.swift; sourceTree = "<group>"; };
 		A10000000000000000000303 /* BulkAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BulkAgent.swift; sourceTree = "<group>"; };
 		A10000000000000000000305 /* ConversationMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMode.swift; sourceTree = "<group>"; };
@@ -123,7 +128,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AB00570000000000000000F4 /* MoonshineVoice in Frameworks */,
 				AB00570000000000000000E2 /* whisper.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -156,6 +160,10 @@
 				A1000000000000000000040E /* BargeIn.swift */,
 				A10000000000000000000600 /* UnclearAnswer.swift */,
 				A10000000000000000000500 /* LongTurn.swift */,
+				C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */,
+				C018D23642BEFFC5D56B72CA /* TurboSettler.swift */,
+				C0E0156CE15A2FCC99A38AEF /* HybridTranscript.swift */,
+				C064107D7EB5C0D47B505D73 /* AudioPipeline.swift */,
 				C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */,
 				C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */,
 				C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */,
@@ -164,9 +172,7 @@
 				C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */,
 				C033EDD0E8E54141063861E4 /* BrandFixer.swift */,
 				C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */,
-				C033B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift */,
 				C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */,
-				AB00570000000000000000F1 /* Moonshine */,
 				AB00570000000000000000E3 /* Whisper */,
 				AB00570000000000000000E1 /* whisper.xcframework */,
 				A10000000000000000000020 /* Tests */,
@@ -190,8 +196,9 @@
 				A10000000000000000000410 /* BargeInTests.swift */,
 				A10000000000000000000602 /* UnclearAnswerTests.swift */,
 				A10000000000000000000502 /* LongTurnTests.swift */,
+				C096E2064DEE7352D7B60174 /* HybridTests.swift */,
 				C0D84C66B2C902A29EE2313E /* WhisperTests.swift */,
-				C01E15C0B99369D9BD105989 /* MoonshineTests.swift */,
+				C01E15C0B99369D9BD105989 /* SpeechPipelineTests.swift */,
 				FA9E00000000000000000001 /* VaguePlaceholderTests.swift */,
 				B0A7C0DE0000000000000001 /* BulkRoutineTests.swift */,
 				A1000000000000000000040C /* VocabularyTests.swift */,
@@ -219,7 +226,6 @@
 			);
 			name = Kitty;
 			packageProductDependencies = (
-				AB00570000000000000000F5 /* MoonshineVoice */,
 			);
 			productName = Kitty;
 			productReference = A10000000000000000000028 /* Kitty.app */;
@@ -263,7 +269,6 @@
 			);
 			mainGroup = A10000000000000000000010;
 			packageReferences = (
-				AB00570000000000000000F3 /* XCRemoteSwiftPackageReference "moonshine-swift" */,
 			);
 			productRefGroup = A10000000000000000000012 /* Products */;
 			projectDirPath = "";
@@ -280,7 +285,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AB00570000000000000000F2 /* Moonshine in Resources */,
 				AB00570000000000000000E5 /* Whisper in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -309,6 +313,10 @@
 				A1000000000000000000040F /* BargeIn.swift in Sources */,
 				A10000000000000000000601 /* UnclearAnswer.swift in Sources */,
 				A10000000000000000000501 /* LongTurn.swift in Sources */,
+				C1CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift in Sources */,
+				C118D23642BEFFC5D56B72CA /* TurboSettler.swift in Sources */,
+				C1E0156CE15A2FCC99A38AEF /* HybridTranscript.swift in Sources */,
+				C164107D7EB5C0D47B505D73 /* AudioPipeline.swift in Sources */,
 				C1FC89527F0980C2E1654219 /* WhisperAccurate.swift in Sources */,
 				C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */,
 				C1075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift in Sources */,
@@ -317,7 +325,6 @@
 				C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */,
 				C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */,
 				C184B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift in Sources */,
-				C133B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift in Sources */,
 				C17D1021BFFEC3A83E05C971 /* AppleSpeech.swift in Sources */,
 				A1000000000000000000040B /* VocabularyMatcher.swift in Sources */,
 				A10000000000000000000409 /* VocabularyProvider.swift in Sources */,
@@ -335,8 +342,9 @@
 				A10000000000000000000411 /* BargeInTests.swift in Sources */,
 				A10000000000000000000603 /* UnclearAnswerTests.swift in Sources */,
 				A10000000000000000000503 /* LongTurnTests.swift in Sources */,
+				C196E2064DEE7352D7B60174 /* HybridTests.swift in Sources */,
 				C1D84C66B2C902A29EE2313E /* WhisperTests.swift in Sources */,
-				C11E15C0B99369D9BD105989 /* MoonshineTests.swift in Sources */,
+				C11E15C0B99369D9BD105989 /* SpeechPipelineTests.swift in Sources */,
 				FA9E00000000000000000002 /* VaguePlaceholderTests.swift in Sources */,
 				B0A7C0DE0000000000000002 /* BulkRoutineTests.swift in Sources */,
 				A1000000000000000000040D /* VocabularyTests.swift in Sources */,
@@ -577,24 +585,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		AB00570000000000000000F3 /* XCRemoteSwiftPackageReference "moonshine-swift" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/moonshine-ai/moonshine-swift";
-			requirement = {
-				kind = exactVersion;
-				version = 0.1.5;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		AB00570000000000000000F5 /* MoonshineVoice */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AB00570000000000000000F3 /* XCRemoteSwiftPackageReference "moonshine-swift" */;
-			productName = MoonshineVoice;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A10000000000000000000001 /* Project object */;
 }

@@ -64,7 +64,7 @@ final class VoiceConversation: ObservableObject {
     @Published var rawTranscript: Bool = TranscriptPolicy.raw {
         didSet { TranscriptPolicy.raw = rawTranscript }
     }
-    /// Whisper, Moonshine or Apple Speech for the conversation, to compare. Takes effect the next time the conversation opens.
+    /// Whisper Turbo or Apple Speech for the conversation, to compare. Takes effect the next time the conversation opens.
     @Published var speechEngine: SpeechEngineChoice = SpeechEngineChoice.stored() {
         didSet { SpeechEngineChoice.store(speechEngine) }
     }
@@ -115,9 +115,9 @@ final class VoiceConversation: ObservableObject {
                 let turbo = Self.engine(of: self.speech) == .whisperTurbo
                 switch status {
                 case .loading where turbo:
-                    self.speechNotice = "Getting the accurate speech model ready (first time only). The quick one listens meanwhile."
+                    self.speechNotice = "Getting the accurate speech model ready. Apple Speech listens meanwhile."
                 case .failed where turbo:
-                    self.speechNotice = "The accurate speech model could not load. The quick one is listening."
+                    self.speechNotice = "The accurate speech model could not load. Apple Speech is listening."
                 default:
                     self.speechNotice = nil
                 }
@@ -126,16 +126,15 @@ final class VoiceConversation: ObservableObject {
 
     /// Which engine a recogniser is.
     static func engine(of recognizer: any TurnRecognizer) -> SpeechEngineChoice {
-        if let w = recognizer as? WhisperRecognizer { return w.accurate ? .whisperTurbo : .whisper }
-        if recognizer is MoonshineRecognizer { return .moonshine }
+        if recognizer is HybridRecognizer { return .whisperTurbo }
+        if recognizer is WhisperRecognizer { return .whisper }
         return .apple
     }
 
     static func makeRecognizer(for choice: SpeechEngineChoice = SpeechEngineChoice.effective()) -> any TurnRecognizer {
         switch choice {
-        case .whisperTurbo: return WhisperRecognizer(accurate: WhisperAccurate.shared)
+        case .whisperTurbo: return HybridRecognizer(accurate: WhisperAccurate.shared)
         case .whisper: return WhisperRecognizer()
-        case .moonshine: return MoonshineRecognizer()
         case .apple:
             Breadcrumb.log("speech: using Apple Speech (picked, or the other model is missing)")
             return SpeechRecognizer()
@@ -144,13 +143,13 @@ final class VoiceConversation: ObservableObject {
 
     /// Frees the model of whichever local engine is in use, a little after the conversation closes.
     private func unloadModelSoon() {
-        (speech as? MoonshineRecognizer)?.unloadSoon()
+        (speech as? HybridRecognizer)?.unloadSoon()
         (speech as? WhisperRecognizer)?.unloadSoon()
     }
 
-    /// Whether the speech model failed to load (Moonshine or Whisper).
+    /// Whether the speech model failed to load (the quick Whisper; the hybrid carries on with Apple Speech by itself).
     private var modelLoadFailed: Bool {
-        (speech as? MoonshineRecognizer)?.modelLoadFailed == true || (speech as? WhisperRecognizer)?.modelLoadFailed == true
+        (speech as? WhisperRecognizer)?.modelLoadFailed == true
     }
 
     private func configureSpeech() {
@@ -700,7 +699,7 @@ final class VoiceConversation: ObservableObject {
                 return false
             }
         }
-        return speech.beginSpeakingListen()      // Moonshine and Whisper hand the running mic to Apple Speech for the short "stop"
+        return speech.beginSpeakingListen()      // the hybrid and Whisper hand the running mic to Apple Speech for the short "stop"
     }
 
     /// What the microphone hears while Kitty is speaking. A stop word or real speech stops her and keeps your words.
@@ -944,7 +943,7 @@ struct ConversationView: View {
                 Toggle("Add automatically after 2 seconds", isOn: $convo.autoAdd)
                 Toggle("Listen for English (India)", isOn: $convo.indianEnglish)
                 Picker("Speech engine", selection: $convo.speechEngine) {
-                    ForEach(SpeechEngineChoice.allCases) { choice in
+                    ForEach(SpeechEngineChoice.menuChoices) { choice in
                         Text(choice.isAvailable ? choice.label : choice.label + " (not installed)").tag(choice)
                     }
                 }

@@ -75,8 +75,25 @@ nonisolated struct WhisperTurnBuffer {
     private var quietRun = 0
     private var voicedFrames = 0                  // loud frames in the current stretch
     private var noiseFloor: Float = 0.003
+    private var consumed = 0                      // samples taken in since the start, to place each stretch in time
+    private var stretchStart = 0                  // where the current stretch begins (a sample index at 16 kHz)
+    private var finished: [Range<Int>] = []       // where each stretch that ended or was capped sat, oldest first
 
     init(config: Config = Config()) { self.config = config }
+
+    /// Where the stretches that ended or were capped sat, in samples at 16 kHz since the start, one per `.ended` or `.capped` event
+    /// in the same order. Taking them clears the list.
+    mutating func takeRanges() -> [Range<Int>] {
+        let out = finished
+        finished = []
+        return out
+    }
+
+    /// Samples taken in since the start.
+    var position: Int { consumed + pending.count }
+
+    /// Where the stretch being collected begins.
+    var currentStart: Int { stretchStart }
 
     var seconds: Double { Double(samples.count) / Self.rate }
 
@@ -121,6 +138,7 @@ nonisolated struct WhisperTurnBuffer {
     }
 
     private mutating func consume(_ frame: [Float], into events: inout [Event]) {
+        consumed += frame.count
         let level = Self.rms(frame)
         let loud = level > threshold
         let frameSeconds = Double(config.frameSamples) / Self.rate
@@ -136,6 +154,7 @@ nonisolated struct WhisperTurnBuffer {
                 quietRun = 0
                 voicedFrames = loudRun
                 samples = preRoll.flatMap { $0 }
+                stretchStart = consumed - samples.count
                 preRoll = []
                 events.append(.started)
             }
@@ -156,6 +175,7 @@ nonisolated struct WhisperTurnBuffer {
             voicedFrames = 0
             let out = samples
             samples = []
+            finished.append(stretchStart..<(stretchStart + out.count))
             events.append(.ended(samples: out, voiced: voiced))
             return
         }
@@ -164,6 +184,8 @@ nonisolated struct WhisperTurnBuffer {
             samples = []
             quietRun = 0
             voicedFrames = 0
+            finished.append(stretchStart..<(stretchStart + out.count))
+            stretchStart += out.count
             events.append(.capped(samples: out))
         }
     }

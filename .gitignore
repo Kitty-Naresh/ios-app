@@ -4,10 +4,7 @@
 xcuserdata/
 DerivedData/
 *.xcuserstate
-MoonshineSetup/
 WhisperSetup/
-Moonshine/medium-streaming-en/
-Moonshine/small-streaming-en/
 Whisper/small.en/
 Whisper/base.en/
 Whisper/large-v3-turbo/
