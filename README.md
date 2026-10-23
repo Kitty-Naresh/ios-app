@@ -1,3 +1,52 @@
+# Kitty v32: live speech with Moonshine
+
+Kitty now listens with **Moonshine Streaming** (medium, English) instead of Apple's recogniser for the conversation. Why: it is live
+(partials while you speak), it adds punctuation and capitals, it runs on the phone, and it takes **key terms**, so Blinkit, Zepto,
+Swiggy, Aashirvaad, Haldiram's, atta, paneer and the names in your household are expected words instead of "blink it" and "alter".
+Apple Speech is still used for the "Hey Kitty" wake word, for the hands-free "stop" while Kitty talks, and as the fallback if the
+Moonshine model cannot load.
+
+- **One microphone, two consumers.** `AudioCapture` runs one engine and one tap and hands buffers to whichever `AudioSink` is current:
+  `MoonshineSink` (downmix to mono Float, inference on its own queue, never on the audio thread) or `AppleAudioSink`. While Kitty
+  talks with hands-free stop on, the running mic is handed to Apple Speech (`AppleStopListener`), then back to a fresh Moonshine stream.
+- **`TurnRecognizer`** is the surface `VoiceConversation` uses. `MoonshineRecognizer` (`MoonshineRecognizer.swift`) and the Apple
+  `SpeechRecognizer` (now in `AppleSpeech.swift`, the only file that imports `Speech`) both conform. The engine sits behind
+  `StreamingEngine`/`EngineSession`, so tests use a fake one.
+- **Key terms.** `KeyTerms.build` = the household's names (max 40) then `IndianVocabulary.terms` (brands, staples, festivals), at most 120.
+  The list is set when the model loads and refreshed at every turn. Boost is 2.0 (`kitty.moonshineBoost`; 3.0 helps brands more and
+  costs a little on other words).
+- **`BrandFixer`** repairs what the key terms miss, conservatively: "blink it" to Blinkit, "Maggie" to Maggi, "parle g" to Parle-G, "zip tow"
+  to Zepto. Only one clear match, never a short or everyday word, never a name the household uses, never "pay them" to Paytm. Anything
+  doubtful is left to the "Did you say…?" read-back.
+- **Slower to answer, on purpose.** `longPause` 1.6 to 3.5 s and `quickNudgeAfter` 3.5 to 5.0 s; the pause caps are now `longPause + 1.5`
+  and `longPause + 2.5` (they were 3.2 and 4.2, which would have cut the new pause short). People think aloud, and Moonshine ends a line on a pause.
+- **`TranscriptPolicy.raw`** (default on in the app, off in unit tests, menu: "Trust the transcript as spoken"). The cleaner passes words
+  through, and a long turn skips `BulkDetector` and the clause digest: the whole punctuated turn goes to the model in one `decideBulk`
+  prompt and it splits it (`raw-bulk` route). Validators, dates, assignees and read-back still run. Cost: "clean the… no wait, wash the
+  car" is no longer repaired by rules. If it is worse on your phone, turn it off.
+- **Menu**: "Moonshine speech (off: Apple)" switches recogniser on the next conversation, to compare the two.
+- **Breadcrumbs** log the model load time, per-session pass count / average / worst milliseconds, end-of-phrase latency and the thermal state.
+
+## Set-up
+
+1. `sh Moonshine/fetch-models.sh` downloads the medium model (268 MB) into `Moonshine/medium-streaming-en/` (git-ignored). The folder is
+   bundled in the app as a resource. Without it the app still works, on Apple Speech.
+2. Open `Kitty.xcodeproj`; Xcode fetches `moonshine-swift` 0.1.5. Set your signing team and run on a phone.
+3. Real-model check (opt in): `TEST_RUNNER_KITTY_MOONSHINE=1 TEST_RUNNER_KITTY_MOONSHINE_WAV=/path/speech.wav xcodebuild test -only-testing:KittyTests/MoonshineRealTests …`
+
+## Try on the phone
+
+Brands ("order from Blinkit and Zepto", "Aashirvaad atta", "Parle-G", "DMart"), the in-laws example with a pause in the middle, a noisy room
+and fast speech, Hinglish words, hands-free "stop" while she talks, "Hey Kitty", and 30 minutes of use for battery and warmth. Note wrong
+words, punctuation, lag, and anything worse than Apple. If Moonshine is not good enough, the Whisper plan is the fallback.
+
+## Known
+
+- Checked on the Mac and simulator with synthetic English (India) voices only: "Maggie", "Ashavad atta", "dhong" (DMart) and "peril g" can still
+  be wrong; real Indian speakers on a phone are the real test.
+- Moonshine gives no per-word confidence here, so confidence-based read-back and the learned pause profile see no words from it.
+- Still open: "buy milk and bread" creates only "buy bread"; "Every day the maid sweeps and mops" yields only "Sweep".
+
 # Kitty v31.1: non-answers, vague placeholders, bulk routines
 
 - **Non-answers get an honest reply.** "I don't know", "no idea", "I really don't know", "nothing" are neither an answer nor a request:
