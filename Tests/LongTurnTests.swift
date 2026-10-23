@@ -490,37 +490,40 @@ final class PauseProfileTests: XCTestCase {
     }
 
     func testTheDefaultProfileKeepsTheOldTimings() {
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk"), 1.6)
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: .standard), 1.6)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk"), 3.5)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: .standard), 3.5)
     }
 
     func testASlowerTalkerWaitsLongerAndAQuickOneNotBelowTheFloor() {
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 1.2, p90: 2.0)), 2.4, accuracy: 0.001)
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 0.5, p90: 1.0)), 1.2, accuracy: 0.001)
+        // 3.5 s base scaled by median / 0.8 s, never above the cap (5.0 s) and never below the 1.2 s floor.
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 1.0, p90: 2.0)), 4.375, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 1.2, p90: 2.0)), VoiceTurnManager.normalCap, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 0.5, p90: 1.0)), 2.1875, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 0.2, p90: 0.5)), 1.2, accuracy: 0.001)
     }
 
     func testACommaOrConnectorAtTheEndWaitsAnotherSecond() {
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk and"), 2.6, accuracy: 0.001)
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk,"), 2.6, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk and"), VoiceTurnManager.longPause + 1.0, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk,"), VoiceTurnManager.longPause + 1.0, accuracy: 0.001)
     }
 
     func testALongUnfinishedTurnWaitsAnotherSecondAndMayPassTheOldCap() {
         let long = String(repeating: "clean the bathrooms and mop the floor ", count: 4) + "and then"
-        XCTAssertGreaterThan(VoiceTurnManager.pauseNeeded(for: long), 3.2)
-        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: long), 4.2)
+        XCTAssertGreaterThan(VoiceTurnManager.pauseNeeded(for: long), VoiceTurnManager.normalCap)
+        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: long), VoiceTurnManager.extendedCap)
         let longUnfinished = String(repeating: "clean the bathrooms and mop the floor ", count: 4) + "clean the garage"
-        XCTAssertGreaterThan(VoiceTurnManager.pauseNeeded(for: longUnfinished), 3.2)
+        XCTAssertGreaterThan(VoiceTurnManager.pauseNeeded(for: longUnfinished), VoiceTurnManager.normalCap)
     }
 
     func testASentenceFinalLongTurnKeepsTheOldCap() {
         let said = String(repeating: "clean the bathrooms and mop the floor. ", count: 6)
-        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: said), 3.2)
+        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: said), VoiceTurnManager.normalCap)
     }
 
     func testTheGateUsesTheProfile() {
         let said = "Buy milk and eggs from the shop"
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 1.7, lastActed: ""), .evaluate(said))
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 1.7, lastActed: "", profile: PauseProfile(median: 1.2, p90: 2.0)), .keepListening)
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 3.6, lastActed: ""), .evaluate(said))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 3.6, lastActed: "", profile: PauseProfile(median: 1.2, p90: 2.0)), .keepListening)
     }
 }
 

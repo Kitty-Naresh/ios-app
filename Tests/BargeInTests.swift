@@ -268,7 +268,7 @@ final class LongPromptTests: XCTestCase {
 
     func testASetupSentenceIsHeldNotAnswered() {
         XCTAssertTrue(LocalSemanticPrechecker.announcesMore(intro))
-        for pause in [2.0, 3.5, 5.5] {
+        for pause in [4.0, 5.0, 5.5] {
             if case .hold = VoiceTurnManager.gate(utterance: intro, silence: pause, lastActed: "") {} else { XCTFail("held at \(pause)s") }
         }
         XCTAssertEqual(VoiceTurnManager.gate(utterance: intro, silence: 6.5, lastActed: ""), .nudge)
@@ -276,7 +276,7 @@ final class LongPromptTests: XCTestCase {
 
     func testTheWholeThoughtIsEvaluatedOnceTheTaskIsSaid() {
         XCTAssertFalse(LocalSemanticPrechecker.announcesMore(full))
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: full, silence: 3.0, lastActed: ""), .evaluate(full))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: full, silence: 5.2, lastActed: ""), .evaluate(full))
     }
 
     func testRequestsAboutAListAreNotSetupSentences() {
@@ -284,7 +284,7 @@ final class LongPromptTests: XCTestCase {
                      "Add a task to clean the bathroom", "Create a list of groceries and buy milk"] {
             XCTAssertFalse(LocalSemanticPrechecker.announcesMore(said), said)
         }
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Show my list of tasks", silence: 2, lastActed: ""), .evaluate("Show my list of tasks"))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Show my list of tasks", silence: 4.0, lastActed: ""), .evaluate("Show my list of tasks"))
     }
 
     func testOtherSetupSentences() {
@@ -297,9 +297,9 @@ final class LongPromptTests: XCTestCase {
     func testALongTurnGetsALongerPause() {
         XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk"), VoiceTurnManager.longPause)
         XCTAssertGreaterThan(VoiceTurnManager.pauseNeeded(for: full), VoiceTurnManager.longPause)
-        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: String(repeating: "word ", count: 100) + ". a. b."), 3.2)
+        XCTAssertLessThanOrEqual(VoiceTurnManager.pauseNeeded(for: String(repeating: "word ", count: 100) + ". a. b."), VoiceTurnManager.normalCap)
         let long = "I need to sort out the garage this weekend and then call the plumber about the kitchen tap and then remember the school form."
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: long, silence: 1.7, lastActed: ""), .keepListening)
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: long, silence: VoiceTurnManager.longPause + 0.1, lastActed: ""), .keepListening)
     }
 
     // MARK: The project and its tasks

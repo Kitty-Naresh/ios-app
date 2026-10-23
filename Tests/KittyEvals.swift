@@ -132,7 +132,7 @@ struct TurnExpect {
 struct EvalTurn {
     var say: String
     var script: Script = .none
-    var silence: TimeInterval = 2.0              // quiet seconds after the words (10 or more is a long silence)
+    var silence: TimeInterval = 4.0              // quiet seconds after the words (10 or more is a long silence)
     var settle = false                           // the two-second countdown runs out after this turn (the last turn always settles)
     var expect: TurnExpect
 }
@@ -173,7 +173,7 @@ private func BP(_ name: String, _ steps: [String]) -> Script {
                             playbook: PlaybookDraftValue(name: name, steps: steps.map { TaskDraftValue(title: $0) })))
 }
 
-private func turn(_ say: String, _ script: Script = .none, silence: TimeInterval = 2.0, _ expect: TurnExpect) -> EvalTurn {
+private func turn(_ say: String, _ script: Script = .none, silence: TimeInterval = 4.0, _ expect: TurnExpect) -> EvalTurn {
     EvalTurn(say: say, script: script, silence: silence, expect: expect)
 }
 
@@ -619,22 +619,22 @@ enum EvalSuite {
         EvalCase(id: 106, category: "J", name: "A project over two sentences: held, then only the project's name is asked", tags: [.messy, .clarify],
                  turns: [
                     EvalTurn(say: "I'm working on a project and I would like to create list of tasks for that project.", script: .none,
-                             silence: 3.0, expect: TurnExpect.held()),
-                    EvalTurn(say: "And the first task is, to write a strategy document.", script: .none, silence: 3.0,
+                             silence: 4.0, expect: TurnExpect.held()),
+                    EvalTurn(say: "And the first task is, to write a strategy document.", script: .none, silence: 5.2,
                              expect: TurnExpect.ask("project called", model: false)),
                  ]),
         // A numbered list with a number missing: one specific question, no guessing, and no model call.
         EvalCase(id: 107, category: "J", name: "A numbered list skips a number: asks if there is a number three", tags: [.messy, .clarify],
                  turns: [
                     EvalTurn(say: "I want to make a list of tasks for the Garden project. Number one buy soil. Number two plant tomatoes. Number four water the plants.",
-                             script: .none, silence: 3.5, expect: TurnExpect.ask("number three", model: false)),
+                             script: .none, silence: 5.0, expect: TurnExpect.ask("number three", model: false)),
                  ]),
     ]
 
     // MARK: K. Long and noisy: stories, asides, several asks and one shared day
 
     // Today is Wednesday 21 October 2026: tomorrow +1, Friday +2, Saturday +3, Sunday +4, Monday +5.
-    private static let longSilence: TimeInterval = 3.5
+    private static let longSilence: TimeInterval = VoiceTurnManager.extendedCap + 0.1
 
     /// A long turn that ends in a preview of `titles`. `then` carries on from there (answering the due-day question, then saving).
     private static func long(_ id: Int, _ name: String, _ say: String, model: Script, preview titles: [String], says: [String] = [],
@@ -1695,7 +1695,7 @@ final class RealModelKTests: XCTestCase {
             guard let first = c.turns.first else { continue }
             let expected: [String] = first.expect.draft ?? (c.saved.tasks + c.saved.routines).map(\.title)
             guard !expected.isEmpty else { continue }                                   // a case about a question or a wait: nothing to compare
-            guard case .evaluate(let text) = VoiceTurnManager.gate(utterance: first.say, silence: max(first.silence, 4.5), lastActed: "") else { continue }
+            guard case .evaluate(let text) = VoiceTurnManager.gate(utterance: first.say, silence: max(first.silence, VoiceTurnManager.extendedCap + 0.1), lastActed: "") else { continue }
 
             var found = 0, extras = 0, chatter = 0, calls = 0, dayQuestions = 0
             var outcomes: [String: Int] = [:]

@@ -3443,11 +3443,15 @@ nonisolated struct PauseProfile: Equatable, Sendable {
 
 @MainActor
 final class VoiceTurnManager {
-    static let longPause: TimeInterval = 1.6        // long enough to check whether the thought is finished
+    static let longPause: TimeInterval = 3.5        // long enough to check whether the thought is finished (Moonshine ends a line on a pause, so people think aloud)
     static let finalizerDelay: TimeInterval = 0.5   // after "done"
-    static let quickNudgeAfter: TimeInterval = 3.5  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
+    static let quickNudgeAfter: TimeInterval = 5.0  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
     static let nudgeAfter: TimeInterval = 10        // a long silence on unfinished speech: gently ask what the task is
     static let announcedHold: TimeInterval = 6      // "I'd like to create a list of tasks…": the tasks are about to come
+
+    /// The most a pause may need to be: above the base `longPause`, so changing the base moves the caps with it.
+    nonisolated static var normalCap: TimeInterval { longPause + 1.5 }
+    nonisolated static var extendedCap: TimeInterval { longPause + 2.5 }
 
     /// How long a pause has to be before Kitty looks at the speech. A longer turn gets a longer grace: someone dictating
     /// several sentences pauses between them, and a sentence that ends is not the end of the thought.
@@ -3468,7 +3472,7 @@ final class VoiceTurnManager {
         let extended = endsMidThought(text) || longOpen
         if endsMidThought(text) { pause += 1.0 }
         if longOpen { pause += 1.0 }
-        return min(pause, extended ? 4.2 : 3.2)
+        return min(pause, extended ? extendedCap : normalCap)
     }
 
     static let connectors: Set<String> = ["and", "then", "but", "so", "because", "also", "plus", "or", "which", "that", "while", "until"]

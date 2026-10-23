@@ -204,8 +204,8 @@ final class UnclearAnswerTests: XCTestCase {
 
     func testTheGateLetsANonAnswerThroughInsteadOfHoldingIt() {
         for s in nonAnswers {
-            if case .evaluate = VoiceTurnManager.gate(utterance: s, silence: 2, lastActed: "") {} else {
-                XCTFail("\(s): the gate should hand it on, not hold it: \(VoiceTurnManager.gate(utterance: s, silence: 2, lastActed: ""))")
+            if case .evaluate = VoiceTurnManager.gate(utterance: s, silence: 4.0, lastActed: "") {} else {
+                XCTFail("\(s): the gate should hand it on, not hold it: \(VoiceTurnManager.gate(utterance: s, silence: 4.0, lastActed: ""))")
             }
         }
     }

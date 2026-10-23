@@ -58,8 +58,8 @@ final class KittyVoiceTurnTests: XCTestCase {
 
     func testShortPauseNeverCallsTheModelAndLongPauseOnlyWhenComplete() {
         XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to clean the bathroom", silence: 0.8, lastActed: ""), .keepListening)
-        if case .hold = VoiceTurnManager.gate(utterance: "Add a task to clean the", silence: 2, lastActed: "") {} else { XCTFail() }
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to clean the bathroom", silence: 2, lastActed: ""),
+        if case .hold = VoiceTurnManager.gate(utterance: "Add a task to clean the", silence: 4.0, lastActed: "") {} else { XCTFail() }
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to clean the bathroom", silence: 4.0, lastActed: ""),
                        .evaluate("Add a task to clean the bathroom"))
         // the same words are not judged twice
         XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to clean the bathroom", silence: 3, lastActed: "Add a task to clean the bathroom"), .keepListening)
@@ -236,20 +236,20 @@ final class KittyVoiceTurnTests: XCTestCase {
         let manager = VoiceTurnManager(engine: engine)
 
         // 1-4: "Add a task to…", pause, "clean the…", pause: the app keeps listening and never asks the model
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to…", silence: 2, lastActed: ""), .hold("trailing off"))
-        if case .hold = VoiceTurnManager.gate(utterance: "Add a task to clean the…", silence: 2, lastActed: "") {} else { XCTFail() }
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Add a task to…", silence: 4.0, lastActed: ""), .hold("trailing off"))
+        if case .hold = VoiceTurnManager.gate(utterance: "Add a task to clean the…", silence: 4.0, lastActed: "") {} else { XCTFail() }
         XCTAssertEqual(engine.prompts.count, 0)
 
         // 5: "bathroom": the model may be asked once, and says wait
         let u5 = "Add a task to clean the bathroom"
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: u5, silence: 2, lastActed: ""), .evaluate(u5))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: u5, silence: 4.0, lastActed: ""), .evaluate(u5))
         let r5 = await manager.decide(utterance: u5)
         guard case .wait = r5 else { return XCTFail("expected wait") }
         XCTAssertEqual(engine.prompts.count, 1)
 
         // 7: "every Monday for the househelp": one more call, and it becomes a routine
         let u7 = "Add a task to clean the bathroom every Monday for the househelp"
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: u7, silence: 2, lastActed: u5), .evaluate(u7))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: u7, silence: 4.0, lastActed: u5), .evaluate(u7))
         let r7 = await manager.decide(utterance: u7)
         guard case .proposal(let proposal) = r7 else { return XCTFail("expected a proposal") }
         XCTAssertEqual(engine.prompts.count, 2)
@@ -282,7 +282,7 @@ final class KittyVoiceTurnTests: XCTestCase {
     /// A lone "clean" is never silent: the gate holds it, then a long silence turns it into a question.
     func testALoneVerbGetsAQuestionAfterALongSilence() {
         let m = VoiceTurnManager(engine: NoModelEngine(), sink: InMemorySaveSink(), knownCategories: { [] })
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean", silence: 4, lastActed: ""), .nudge)
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean", silence: 5.5, lastActed: ""), .nudge)
         XCTAssertEqual(m.nudgeQuestion(for: "clean"), "What should I clean?")
     }
 
@@ -327,7 +327,7 @@ final class KittyVoiceTurnTests: XCTestCase {
         XCTAssertEqual(VoiceTurnManager.bareQuestion(for: "clean the"), "What should I clean?")
         XCTAssertEqual(VoiceTurnManager.bareQuestion(for: "Add a task to clean the"), "What should I clean?")
         XCTAssertNil(VoiceTurnManager.bareQuestion(for: "clean the bathroom"))
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean the", silence: 4, lastActed: ""), .nudge)
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean the", silence: 5.5, lastActed: ""), .nudge)
         XCTAssertEqual(VoiceTurnManager.dropTrailingFiller("buy milk and"), "buy milk")
     }
 
@@ -360,16 +360,16 @@ final class KittyVoiceTurnTests: XCTestCase {
     // MARK: Messy speech reaches the gate and the model already cleaned
 
     func testTheGateJudgesTheCleanedWords() {
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Um, add a task to clean the bathroom", silence: 2, lastActed: ""),
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Um, add a task to clean the bathroom", silence: 4.0, lastActed: ""),
                        .evaluate("add a task to clean the bathroom"))
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "um uh", silence: 2, lastActed: ""), .keepListening)
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "um uh", silence: 4.0, lastActed: ""), .keepListening)
         // "clean the... no wait, wash the car" is one complete request
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean the... no wait, wash the car", silence: 2, lastActed: ""),
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean the... no wait, wash the car", silence: 4.0, lastActed: ""),
                        .evaluate("wash the car"))
     }
 
     func testARepairWithNoCorrectionYetKeepsListeningInsteadOfAskingWhatToClean() {
-        for silence in [2.0, 4.0, 6.0] {
+        for silence in [4.0, 5.5, 7.0] {
             if case .hold = VoiceTurnManager.gate(utterance: "clean the bathroom, no wait", silence: silence, lastActed: "") {} else {
                 XCTFail("should keep waiting for the correction at \(silence)s")
             }

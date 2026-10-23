@@ -75,10 +75,10 @@ final class BulkRoutineTests: XCTestCase {
     }
 
     func testTheGateLetsTheMaidSentenceThrough() {
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: Self.maid, silence: 2, lastActed: ""), .evaluate(Self.maid))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: Self.maid, silence: 4.0, lastActed: ""), .evaluate(Self.maid))
         let held = ["The bathroom", "The maid", "The maid should"]
         for said in held {
-            if case .evaluate = VoiceTurnManager.gate(utterance: said, silence: 2, lastActed: "") { XCTFail("“\(said)” is unfinished") }
+            if case .evaluate = VoiceTurnManager.gate(utterance: said, silence: 4.0, lastActed: "") { XCTFail("“\(said)” is unfinished") }
         }
     }
 
