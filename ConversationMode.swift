@@ -60,6 +60,14 @@ final class VoiceConversation: ObservableObject {
     @Published var indianEnglish: Bool = SpeechLocalePreference.isIndianEnglish {
         didSet { SpeechLocalePreference.isIndianEnglish = indianEnglish }
     }
+    /// Trust the punctuated transcript: the model reads a long turn whole (see `TranscriptPolicy`).
+    @Published var rawTranscript: Bool = TranscriptPolicy.raw {
+        didSet { TranscriptPolicy.raw = rawTranscript }
+    }
+    /// Moonshine for the conversation; off uses Apple Speech, to compare. Takes effect the next time the conversation opens.
+    @Published var useMoonshine: Bool = (UserDefaults.standard.object(forKey: "kitty.useMoonshine") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(useMoonshine, forKey: "kitty.useMoonshine") }
+    }
     @Published var speakReplies: Bool = UserDefaults.standard.bool(forKey: "kitty.speakReplies") {
         didSet {
             UserDefaults.standard.set(speakReplies, forKey: "kitty.speakReplies")
@@ -97,8 +105,12 @@ final class VoiceConversation: ObservableObject {
     init() { configureSpeech() }
 
     /// The recogniser Kitty listens through. Moonshine unless it is turned off or its model is missing.
+    static var moonshineWanted: Bool {
+        (UserDefaults.standard.object(forKey: "kitty.useMoonshine") as? Bool ?? true) && MoonshineModel.isAvailable
+    }
+
     static func makeRecognizer() -> any TurnRecognizer {
-        if UserDefaults.standard.object(forKey: "kitty.useMoonshine") as? Bool ?? true, MoonshineModel.isAvailable {
+        if moonshineWanted {
             return MoonshineRecognizer()
         }
         Breadcrumb.log("speech: using Apple Speech (moonshine off or model missing)")
@@ -134,6 +146,11 @@ final class VoiceConversation: ObservableObject {
         errorMessage = nil
         userMuted = false
         micBlocked = false
+        if (speech is MoonshineRecognizer) != Self.moonshineWanted {     // the menu choice changed since the last conversation
+            speech.cancel()
+            speech = Self.makeRecognizer()
+            configureSpeech()
+        }
         speech.bargeIn = BargeIn.enabled        // one duplex audio setup for the whole conversation
         lines = []
         turns.state.reset()
@@ -890,6 +907,8 @@ struct ConversationView: View {
                 Toggle("Read replies aloud", isOn: $convo.speakReplies)
                 Toggle("Add automatically after 2 seconds", isOn: $convo.autoAdd)
                 Toggle("Listen for English (India)", isOn: $convo.indianEnglish)
+                Toggle("Moonshine speech (off: Apple)", isOn: $convo.useMoonshine)
+                Toggle("Trust the transcript as spoken", isOn: $convo.rawTranscript)
             } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.title3)

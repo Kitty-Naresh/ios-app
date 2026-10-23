@@ -226,7 +226,7 @@ final class MoonshineRecognizer: TurnRecognizer {
     private var sink: MoonshineSink?
     private var stats = PassStats()
     private var loaded = false
-    private var sessionID = 0
+    private(set) var sessionID = 0
     private var delivered = false
     private var lines: [(id: UInt64, text: String, complete: Bool)] = []
     private var unloadTask: Task<Void, Never>?
@@ -431,6 +431,18 @@ final class MoonshineRecognizer: TurnRecognizer {
     }
 
     func resetAudioEngine() { capture.recreateEngine() }
+
+    /// For tests: a listening session with no microphone and no model load, so lines can be fed in by hand.
+    func beginWithoutAudio() throws {
+        loaded = true
+        sessionID += 1
+        transcript = ""
+        lines = []
+        delivered = false
+        refreshKeyTerms()
+        _ = try openSink(id: sessionID)
+        isRecording = true
+    }
 
     func stop() {
         guard isRecording else { return }

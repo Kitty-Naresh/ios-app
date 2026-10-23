@@ -137,7 +137,8 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         if let old, old !== new { old.finish() }
     }
 
-    private func append(_ buffer: AVAudioPCMBuffer) {
+    /// The tap calls this on the audio thread. Internal so tests can push buffers through without an engine.
+    func append(_ buffer: AVAudioPCMBuffer) {
         lock.lock(); let target = sink; lock.unlock()
         target?.append(buffer)
     }

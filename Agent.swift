@@ -3785,6 +3785,12 @@ final class VoiceTurnManager {
             lastTrace.route = "bare-action"
             return .question(asked)
         }
+        // 3a. Raw transcript policy: a long, punctuated turn goes to the model whole, in one prompt. No clause digest, no chunks.
+        if TranscriptPolicy.raw, !answering, state.pendingProposal == nil, !state.drafts.hasContent,
+           state.phase != .awaitingClarification, LongTurnAnalyzer.isLong(utterance),
+           let result = await rawLongTurn(utterance: utterance, ctx: ctx, now: now) {
+            return result
+        }
         var analysis = BulkDetector.analyze(answering ? delta : utterance, words: answering ? [] : heardWords, now: now)
         // The answer to "Which day should I mop the floors each week?" belongs to that piece of the list, not to a new one.
         if answering, var ask = bulkAsk, ask.segments.indices.contains(ask.target), !delta.isEmpty {
@@ -3905,6 +3911,34 @@ final class VoiceTurnManager {
         if analysis.isBulk, analysis.kind != .playbook { return await bulkFromSegments(analysis, utterance: utterance, ctx: ctx) }
         // An answer to Kitty's question ("review the budget" after "What would you like the task to be?") is the task itself.
         return await TaskAgent.propose(answering && !delta.isEmpty ? delta : utterance)
+    }
+
+    /// `TranscriptPolicy.raw`: the whole punctuated turn in one `decideBulk` prompt, the model splits it, and the validators
+    /// check each piece against the sentence it came from. Nil when the model gave nothing, so the usual path answers.
+    private func rawLongTurn(utterance: String, ctx: ValidationContext, now: Date) async -> TurnResult? {
+        let segments = TranscriptPolicy.sentences(of: utterance)
+        var lines = [TranscriptPolicy.promptNote]
+        if segments.count >= 2 {
+            lines.append("This is one thought spoken over several sentences. Use all of it: what an earlier sentence says (the project, the person, the place, the day) applies to the sentences after it unless a later sentence gives its own. Never ask for something already said.")
+        }
+        let prompt = PromptBuilder.build(utterance: utterance, pendingTask: state.pendingTaskLabel, pendingPlaybook: state.pendingPlaybook,
+                                         knownCategories: knownCategories(), now: now, context: lines.joined(separator: "\n"), digest: nil)
+        lastTrace.prompt = prompt
+        modelCalls += 1
+        lastTrace.modelCallCount = 1
+        guard let bulk = await engine.decideBulk(prompt: prompt) else { return nil }
+        lastTrace.route = "raw-bulk"
+        lastTrace.modelOutput = "\(bulk)"
+        bulkContext = BulkDetector.Analysis(kind: .tasks, segments: segments)
+        if let q = readBackQuestion(bulk: bulk, utterance: utterance) { lastTrace.route = "read-back"; return q }
+        let validated = BulkValidator.validate(bulk, utterance: utterance, segments: segments, context: ctx)
+        lastTrace.validation = "\(validated)"
+        Breadcrumb.log("decision: raw bulk \(bulk.action)")
+        if case .wait = validated {
+            guard ruleFallbackEnabled else { return await bulkResult(validated, spoken: bulk.spokenResponse, utterance: utterance, ctx: ctx) }
+            return nil                                  // the model only waited: the rules read the turn
+        }
+        return await bulkResult(validated, spoken: bulk.spokenResponse, utterance: utterance, ctx: ctx)
     }
 
     /// The model gave nothing usable for a turn that holds real actions: the local rules answer, one action at a time.

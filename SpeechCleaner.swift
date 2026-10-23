@@ -37,6 +37,11 @@ nonisolated struct CleanedSpeech: Equatable {
 nonisolated enum SpeechCleaner {
 
     static func clean(_ raw: String) -> CleanedSpeech {
+        // Raw transcript policy: the recogniser's punctuated sentences are used as they are.
+        if TranscriptPolicy.raw {
+            let text = words(of: raw).joined(separator: " ")
+            return CleanedSpeech(raw: raw, text: text, edits: [], removed: [], pendingRepair: false)
+        }
         var toks = words(of: raw).map(Tok.init)
         var edits: [CleanedSpeech.Edit] = []
         var pending = false
