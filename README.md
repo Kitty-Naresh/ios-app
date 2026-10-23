@@ -1,3 +1,64 @@
+# Kitty v33: Whisper as a third speech engine
+
+Moonshine was worse than Apple Speech on the phone (wrong words and brands, no sentence breaks, worse tasks), so **Whisper** is now a third
+engine in the same slot. Pick it in the conversation menu: **Speech engine: Whisper / Moonshine / Apple Speech**. It takes effect the next
+time the conversation opens, so the three can be compared on the same sentences. The default is unchanged (Moonshine, or whatever the old
+"Moonshine speech" switch was set to), so choose Whisper in the menu to try it.
+
+- **Why Whisper.** It writes punctuation and capitals, can be shown the household's names and the Indian brands in a prompt, and is
+  generally the most accurate of the three on accents (to be confirmed on your phone). Apple Speech is still used for "Hey Kitty" and for the hands-free "stop" while Kitty talks.
+- **It is not a streaming model, so the live text is faked.** `WhisperSession` (`WhisperEngine.swift`) listens with a plain energy detector
+  (`WhisperTurnBuffer`, `WhisperAudio.swift`). While you talk, the turn so far is transcribed again after about every 0.6 s of new audio;
+  when you pause for 0.9 s one last pass settles the line. Silence never reaches the model, which is most of the battery saving. A stretch is
+  capped at 60 s (it becomes its own line and the turn goes on). A slow phone is not run flat out: after a pass it rests for half as long
+  as the pass took. Each stretch is one line, the same shape Moonshine's lines have, so `VoiceConversation` is unchanged.
+- **Names and brands** go in as Whisper's `initial_prompt`: `KeyTerms.build` (household names first, then the bundled brands), cut at 450
+  characters so the household is never cut off. `BrandFixer` still runs after Whisper, with the household's names protected.
+- **Its habits on weak audio** are filtered (`WhisperText`): `[BLANK_AUDIO]` and `(music)`, "Thanks for watching" on a short sound, a word or
+  phrase looped four or more times, and a segment Whisper itself says is not speech. A real "Thank you" or "Yes" is kept.
+- **Per-word confidence** (`whisper_full_get_token_p`) goes into `SpokenWord`, so confidence-based read-back has words again.
+- **Audio off the main thread.** The tap hands samples to `MoonshineSink` (reused: it only does the audio-thread-to-engine-queue hop), the
+  engine queue converts to 16 kHz (`StreamResampler`), detects speech and runs the model. Only the published text is on the main actor.
+- **Model and runtime.** `whisper.cpp` b5454 as a prebuilt `whisper.xcframework` (with CoreML), `ggml-small.en-q5_1.bin` (190 MB) and its CoreML
+  encoder (163 MB) in `Whisper/small.en`. On a phone the encoder runs on the Neural Engine; **the first run after install compiles it and takes
+  a few seconds** (the model is loaded, and warmed up, when the conversation opens). The simulator has no working Neural Engine path, so it
+  uses the CPU encoder (`KITTY_WHISPER_NO_COREML=1` does the same on a phone, to compare speed and warmth). `no_context` is on, so a pass never
+  feeds on the text of the pass before it.
+- **If it is too slow or warm,** `sh Whisper/fetch-models.sh base` adds `base.en` (about 190 MB with its encoder). The app uses `small.en` if both
+  are present, so delete `Whisper/small.en` (or the other way round) to compare.
+- **App size** grows by about 350 MB with `small.en`.
+
+## Set-up
+
+1. `sh Whisper/fetch-models.sh` downloads the `whisper.xcframework` into `WhisperSetup/` and the small.en model and encoder into `Whisper/small.en/`
+   (both git-ignored). The Xcode project links the framework and bundles the `Whisper` folder. Without the model the menu shows
+   "Whisper (not installed)" and the app uses Apple Speech.
+2. Open `Kitty.xcodeproj`, set your signing team, run on a phone, and pick **Whisper** in the menu.
+3. Real-model check (opt in): `TEST_RUNNER_KITTY_WHISPER=1 TEST_RUNNER_KITTY_WHISPER_WAV=/path/speech.wav xcodebuild test -only-testing:KittyTests/WhisperRealTests …`
+   It runs the recording through the same path as the microphone. On the Mac simulator (CPU encoder) an 11 s recording of
+   "Buy Maggi and Amul butter from Blinkit. Then ask Rani to sweep and mop the kitchen. Remind me to pay the BESCOM bill on Friday, and order
+   Parle-G biscuits from Zepto." came back as "Buy Maggi and Amul butter from Blinkit. Then ask Raani to sweep and mop the kitchen. Remind me
+   to pay the base comb bill on Friday, and order Paraleji biscuits from Zepto." (Maggi, Amul, Blinkit and Zepto right; BESCOM, Parle-G and
+   the name Rani still wrong).
+
+## Try on the phone (same sentences on each engine)
+
+1. Brands: "order from Blinkit and Zepto", "Aashirvaad atta", "Parle-G", "DMart", "pay the BESCOM bill".
+2. A long turn with several tasks and a pause in the middle (the in-laws example), and "buy milk and bread".
+3. Punctuation: does a long turn arrive as sentences, and do the tasks that come out match what you said?
+4. A noisy room, fast speech, Hinglish words, hands-free "stop" while she talks, "Hey Kitty".
+5. Speed and heat: how late does the live text appear after a word, how long until the first words after the mic opens (CoreML compile on the
+   first run), and the phone's warmth and battery after 10 minutes. The breadcrumbs log the model load time and the pass count, average and
+   worst milliseconds, and the thermal state.
+
+## Known
+
+- The live text moves about every 0.6 s, not word by word. If it feels laggy or the phone warm, try `base.en` or turn Neural Engine off to compare.
+- Not tried on a real phone yet: the CoreML path, speed and heat. Only the Mac simulator (CPU encoder) was run.
+- "Rani" can come out as "Raani" and BESCOM / Parle-G are not always spelled from the prompt; the next step if it matters is a post-pass for those.
+- If Whisper is not good enough either, the next candidate is iOS 26's `SpeechAnalyzer` (native, streaming, punctuated, no app size) behind the same picker.
+- Still open: "buy milk and bread" creates only "buy bread"; "Every day the maid sweeps and mops" yields only "Sweep".
+
 # Kitty v32: live speech with Moonshine
 
 Kitty now listens with **Moonshine Streaming** (medium, English) instead of Apple's recogniser for the conversation. Why: it is live

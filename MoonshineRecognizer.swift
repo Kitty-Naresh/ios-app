@@ -40,6 +40,8 @@ nonisolated struct TranscriptLineUpdate: Equatable, Sendable {
     var text: String
     var isComplete: Bool
     var latencyMs: UInt32 = 0
+    /// Per-word confidence where the engine has it (Whisper); empty for Moonshine.
+    var words: [SpokenWord] = []
 }
 
 nonisolated protocol EngineSession: AnyObject, Sendable {
@@ -117,6 +119,9 @@ nonisolated final class PassStats: @unchecked Sendable {
     private var total = 0.0
     private var worst = 0.0
     private var latencies: [UInt32] = []
+    private let label: String
+
+    init(label: String = "moonshine") { self.label = label }
 
     /// A call that took long enough to be an inference pass rather than just buffering.
     func record(milliseconds: Double) {
@@ -133,7 +138,7 @@ nonisolated final class PassStats: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let avg = count > 0 ? Int(total / Double(count)) : 0
         let lat = latencies.isEmpty ? 0 : Int(latencies.reduce(0) { $0 + Int($1) } / latencies.count)
-        return "moonshine: \(count) passes, avg \(avg) ms, worst \(Int(worst)) ms, end-of-phrase latency avg \(lat) ms, thermal \(Self.thermalName)"
+        return "\(label): \(count) passes, avg \(avg) ms, worst \(Int(worst)) ms, end-of-phrase latency avg \(lat) ms, thermal \(Self.thermalName)"
     }
 
     static var thermalName: String {

@@ -7,6 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C1D84C66B2C902A29EE2313E /* WhisperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D84C66B2C902A29EE2313E /* WhisperTests.swift */; };
+		C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */; };
+		C1075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */; };
+		C1ED6F343195FB3D795107B8 /* WhisperEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0ED6F343195FB3D795107B8 /* WhisperEngine.swift */; };
+		C18ECB0958EC263D88F5634F /* WhisperAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08ECB0958EC263D88F5634F /* WhisperAudio.swift */; };
+		AB00570000000000000000E2 /* whisper.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E1 /* whisper.xcframework */; };
+		AB00570000000000000000E4 /* whisper.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E1 /* whisper.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		AB00570000000000000000E5 /* Whisper in Resources */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E3 /* Whisper */; };
 		C11E15C0B99369D9BD105989 /* MoonshineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01E15C0B99369D9BD105989 /* MoonshineTests.swift */; };
 		C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */; };
 		C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C033EDD0E8E54141063861E4 /* BrandFixer.swift */; };
@@ -52,6 +60,13 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		C0D84C66B2C902A29EE2313E /* WhisperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperTests.swift; sourceTree = "<group>"; };
+		C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechEngineChoice.swift; sourceTree = "<group>"; };
+		C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperRecognizer.swift; sourceTree = "<group>"; };
+		C0ED6F343195FB3D795107B8 /* WhisperEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperEngine.swift; sourceTree = "<group>"; };
+		C08ECB0958EC263D88F5634F /* WhisperAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperAudio.swift; sourceTree = "<group>"; };
+		AB00570000000000000000E1 /* whisper.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = whisper.xcframework; path = WhisperSetup/build-apple/whisper.xcframework; sourceTree = "<group>"; };
+		AB00570000000000000000E3 /* Whisper */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Whisper; sourceTree = "<group>"; };
 		C01E15C0B99369D9BD105989 /* MoonshineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoonshineTests.swift; sourceTree = "<group>"; };
 		C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPolicy.swift; sourceTree = "<group>"; };
 		C033EDD0E8E54141063861E4 /* BrandFixer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandFixer.swift; sourceTree = "<group>"; };
@@ -87,12 +102,27 @@
 		A10000000000000000000602 /* UnclearAnswerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnclearAnswerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		AB00570000000000000000E6 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				AB00570000000000000000E4 /* whisper.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000111 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				AB00570000000000000000F4 /* MoonshineVoice in Frameworks */,
+				AB00570000000000000000E2 /* whisper.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -124,12 +154,18 @@
 				A1000000000000000000040E /* BargeIn.swift */,
 				A10000000000000000000600 /* UnclearAnswer.swift */,
 				A10000000000000000000500 /* LongTurn.swift */,
+				C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */,
+				C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */,
+				C0ED6F343195FB3D795107B8 /* WhisperEngine.swift */,
+				C08ECB0958EC263D88F5634F /* WhisperAudio.swift */,
 				C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */,
 				C033EDD0E8E54141063861E4 /* BrandFixer.swift */,
 				C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */,
 				C033B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift */,
 				C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */,
 				AB00570000000000000000F1 /* Moonshine */,
+				AB00570000000000000000E3 /* Whisper */,
+				AB00570000000000000000E1 /* whisper.xcframework */,
 				A10000000000000000000020 /* Tests */,
 				A10000000000000000000012 /* Products */,
 			);
@@ -151,6 +187,7 @@
 				A10000000000000000000410 /* BargeInTests.swift */,
 				A10000000000000000000602 /* UnclearAnswerTests.swift */,
 				A10000000000000000000502 /* LongTurnTests.swift */,
+				C0D84C66B2C902A29EE2313E /* WhisperTests.swift */,
 				C01E15C0B99369D9BD105989 /* MoonshineTests.swift */,
 				FA9E00000000000000000001 /* VaguePlaceholderTests.swift */,
 				B0A7C0DE0000000000000001 /* BulkRoutineTests.swift */,
@@ -171,6 +208,7 @@
 				A10000000000000000000121 /* Sources */,
 				A10000000000000000000111 /* Frameworks */,
 				A10000000000000000000131 /* Resources */,
+				AB00570000000000000000E6 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -240,6 +278,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AB00570000000000000000F2 /* Moonshine in Resources */,
+				AB00570000000000000000E5 /* Whisper in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -267,6 +306,10 @@
 				A1000000000000000000040F /* BargeIn.swift in Sources */,
 				A10000000000000000000601 /* UnclearAnswer.swift in Sources */,
 				A10000000000000000000501 /* LongTurn.swift in Sources */,
+				C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */,
+				C1075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift in Sources */,
+				C1ED6F343195FB3D795107B8 /* WhisperEngine.swift in Sources */,
+				C18ECB0958EC263D88F5634F /* WhisperAudio.swift in Sources */,
 				C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */,
 				C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */,
 				C184B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift in Sources */,
@@ -288,6 +331,7 @@
 				A10000000000000000000411 /* BargeInTests.swift in Sources */,
 				A10000000000000000000603 /* UnclearAnswerTests.swift in Sources */,
 				A10000000000000000000503 /* LongTurnTests.swift in Sources */,
+				C1D84C66B2C902A29EE2313E /* WhisperTests.swift in Sources */,
 				C11E15C0B99369D9BD105989 /* MoonshineTests.swift in Sources */,
 				FA9E00000000000000000002 /* VaguePlaceholderTests.swift in Sources */,
 				B0A7C0DE0000000000000002 /* BulkRoutineTests.swift in Sources */,

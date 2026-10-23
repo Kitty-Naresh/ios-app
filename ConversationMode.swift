@@ -64,9 +64,9 @@ final class VoiceConversation: ObservableObject {
     @Published var rawTranscript: Bool = TranscriptPolicy.raw {
         didSet { TranscriptPolicy.raw = rawTranscript }
     }
-    /// Moonshine for the conversation; off uses Apple Speech, to compare. Takes effect the next time the conversation opens.
-    @Published var useMoonshine: Bool = (UserDefaults.standard.object(forKey: "kitty.useMoonshine") as? Bool) ?? true {
-        didSet { UserDefaults.standard.set(useMoonshine, forKey: "kitty.useMoonshine") }
+    /// Whisper, Moonshine or Apple Speech for the conversation, to compare. Takes effect the next time the conversation opens.
+    @Published var speechEngine: SpeechEngineChoice = SpeechEngineChoice.stored() {
+        didSet { SpeechEngineChoice.store(speechEngine) }
     }
     @Published var speakReplies: Bool = UserDefaults.standard.bool(forKey: "kitty.speakReplies") {
         didSet {
@@ -83,7 +83,7 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    /// Moonshine (live, punctuated, brand-aware) when its model is on the phone; Apple Speech otherwise, or if Moonshine fails.
+    /// The engine picked in the menu when its model is on the phone; Apple Speech otherwise, or if that engine fails to load.
     private var speech: any TurnRecognizer = VoiceConversation.makeRecognizer()
     /// Decides when speech might be a finished thought, and makes the one model call for it.
     private let turns = VoiceTurnManager()
@@ -104,17 +104,32 @@ final class VoiceConversation: ObservableObject {
 
     init() { configureSpeech() }
 
-    /// The recogniser Kitty listens through. Moonshine unless it is turned off or its model is missing.
-    static var moonshineWanted: Bool {
-        (UserDefaults.standard.object(forKey: "kitty.useMoonshine") as? Bool ?? true) && MoonshineModel.isAvailable
+    /// Which engine a recogniser is.
+    static func engine(of recognizer: any TurnRecognizer) -> SpeechEngineChoice {
+        if recognizer is WhisperRecognizer { return .whisper }
+        if recognizer is MoonshineRecognizer { return .moonshine }
+        return .apple
     }
 
-    static func makeRecognizer() -> any TurnRecognizer {
-        if moonshineWanted {
-            return MoonshineRecognizer()
+    static func makeRecognizer(for choice: SpeechEngineChoice = SpeechEngineChoice.effective()) -> any TurnRecognizer {
+        switch choice {
+        case .whisper: return WhisperRecognizer()
+        case .moonshine: return MoonshineRecognizer()
+        case .apple:
+            Breadcrumb.log("speech: using Apple Speech (picked, or the other model is missing)")
+            return SpeechRecognizer()
         }
-        Breadcrumb.log("speech: using Apple Speech (moonshine off or model missing)")
-        return SpeechRecognizer()
+    }
+
+    /// Frees the model of whichever local engine is in use, a little after the conversation closes.
+    private func unloadModelSoon() {
+        (speech as? MoonshineRecognizer)?.unloadSoon()
+        (speech as? WhisperRecognizer)?.unloadSoon()
+    }
+
+    /// Whether the speech model failed to load (Moonshine or Whisper).
+    private var modelLoadFailed: Bool {
+        (speech as? MoonshineRecognizer)?.modelLoadFailed == true || (speech as? WhisperRecognizer)?.modelLoadFailed == true
     }
 
     private func configureSpeech() {
@@ -129,9 +144,9 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    /// The Moonshine model would not load: carry on with Apple Speech so the conversation still works.
+    /// The speech model would not load: carry on with Apple Speech so the conversation still works.
     private func fallBackToApple() {
-        Breadcrumb.log("speech: moonshine failed, falling back to Apple Speech")
+        Breadcrumb.log("speech: \(Self.engine(of: speech).label) failed, falling back to Apple Speech")
         speech.cancel()
         speech = SpeechRecognizer()
         speech.bargeIn = BargeIn.enabled
@@ -146,7 +161,7 @@ final class VoiceConversation: ObservableObject {
         errorMessage = nil
         userMuted = false
         micBlocked = false
-        if (speech is MoonshineRecognizer) != Self.moonshineWanted {     // the menu choice changed since the last conversation
+        if Self.engine(of: speech) != SpeechEngineChoice.effective() {     // the menu choice changed since the last conversation
             speech.cancel()
             speech = Self.makeRecognizer()
             configureSpeech()
@@ -180,7 +195,7 @@ final class VoiceConversation: ObservableObject {
         countdownActive = false
         speech.bargeIn = false                  // let the audio session shut down with the screen
         speech.cancel()
-        (speech as? MoonshineRecognizer)?.unloadSoon()
+        unloadModelSoon()
         Speaker.stopIfActive()
         micOn = false
         generation += 1
@@ -198,7 +213,7 @@ final class VoiceConversation: ObservableObject {
         while true {
             await speech.start()
             guard active else { speech.cancel(); return }
-            if let m = speech as? MoonshineRecognizer, m.modelLoadFailed {
+            if modelLoadFailed {
                 fallBackToApple()
                 continue
             }
@@ -664,7 +679,7 @@ final class VoiceConversation: ObservableObject {
                 return false
             }
         }
-        return speech.beginSpeakingListen()      // Moonshine hands the running mic to Apple Speech for the short "stop"
+        return speech.beginSpeakingListen()      // Moonshine and Whisper hand the running mic to Apple Speech for the short "stop"
     }
 
     /// What the microphone hears while Kitty is speaking. A stop word or real speech stops her and keeps your words.
@@ -907,7 +922,11 @@ struct ConversationView: View {
                 Toggle("Read replies aloud", isOn: $convo.speakReplies)
                 Toggle("Add automatically after 2 seconds", isOn: $convo.autoAdd)
                 Toggle("Listen for English (India)", isOn: $convo.indianEnglish)
-                Toggle("Moonshine speech (off: Apple)", isOn: $convo.useMoonshine)
+                Picker("Speech engine", selection: $convo.speechEngine) {
+                    ForEach(SpeechEngineChoice.allCases) { choice in
+                        Text(choice.isAvailable ? choice.label : choice.label + " (not installed)").tag(choice)
+                    }
+                }
                 Toggle("Trust the transcript as spoken", isOn: $convo.rawTranscript)
             } label: {
                 Image(systemName: "slider.horizontal.3")
