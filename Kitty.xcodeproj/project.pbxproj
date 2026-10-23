@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AB00570000000000000000F2 /* Moonshine in Resources */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000F1 /* Moonshine */; };
+		AB00570000000000000000F4 /* MoonshineVoice in Frameworks */ = {isa = PBXBuildFile; productRef = AB00570000000000000000F5 /* MoonshineVoice */; };
 		A10000000000000000000302 /* Agent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000301 /* Agent.swift */; };
 		A10000000000000000000304 /* BulkAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000303 /* BulkAgent.swift */; };
 		A10000000000000000000306 /* ConversationMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000305 /* ConversationMode.swift */; };
@@ -44,6 +46,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		AB00570000000000000000F1 /* Moonshine */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Moonshine; sourceTree = "<group>"; };
 		A10000000000000000000301 /* Agent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Agent.swift; sourceTree = "<group>"; };
 		A10000000000000000000303 /* BulkAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BulkAgent.swift; sourceTree = "<group>"; };
 		A10000000000000000000305 /* ConversationMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMode.swift; sourceTree = "<group>"; };
@@ -77,6 +80,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AB00570000000000000000F4 /* MoonshineVoice in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -108,6 +112,7 @@
 				A1000000000000000000040E /* BargeIn.swift */,
 				A10000000000000000000600 /* UnclearAnswer.swift */,
 				A10000000000000000000500 /* LongTurn.swift */,
+				AB00570000000000000000F1 /* Moonshine */,
 				A10000000000000000000020 /* Tests */,
 				A10000000000000000000012 /* Products */,
 			);
@@ -154,6 +159,9 @@
 			dependencies = (
 			);
 			name = Kitty;
+			packageProductDependencies = (
+				AB00570000000000000000F5 /* MoonshineVoice */,
+			);
 			productName = Kitty;
 			productReference = A10000000000000000000028 /* Kitty.app */;
 			productType = "com.apple.product-type.application";
@@ -195,6 +203,9 @@
 				Base,
 			);
 			mainGroup = A10000000000000000000010;
+			packageReferences = (
+				AB00570000000000000000F3 /* XCRemoteSwiftPackageReference "moonshine-swift" */,
+			);
 			productRefGroup = A10000000000000000000012 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -210,6 +221,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AB00570000000000000000F2 /* Moonshine in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -492,6 +504,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AB00570000000000000000F3 /* XCRemoteSwiftPackageReference "moonshine-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/moonshine-ai/moonshine-swift";
+			requirement = {
+				kind = exactVersion;
+				version = 0.1.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AB00570000000000000000F5 /* MoonshineVoice */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AB00570000000000000000F3 /* XCRemoteSwiftPackageReference "moonshine-swift" */;
+			productName = MoonshineVoice;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A10000000000000000000001 /* Project object */;
 }
