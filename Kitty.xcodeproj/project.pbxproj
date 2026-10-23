@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C1FC89527F0980C2E1654219 /* WhisperAccurate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */; };
 		C1D84C66B2C902A29EE2313E /* WhisperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D84C66B2C902A29EE2313E /* WhisperTests.swift */; };
 		C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */; };
 		C1075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */; };
@@ -60,6 +61,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperAccurate.swift; sourceTree = "<group>"; };
 		C0D84C66B2C902A29EE2313E /* WhisperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperTests.swift; sourceTree = "<group>"; };
 		C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechEngineChoice.swift; sourceTree = "<group>"; };
 		C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperRecognizer.swift; sourceTree = "<group>"; };
@@ -154,6 +156,7 @@
 				A1000000000000000000040E /* BargeIn.swift */,
 				A10000000000000000000600 /* UnclearAnswer.swift */,
 				A10000000000000000000500 /* LongTurn.swift */,
+				C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */,
 				C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */,
 				C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */,
 				C0ED6F343195FB3D795107B8 /* WhisperEngine.swift */,
@@ -306,6 +309,7 @@
 				A1000000000000000000040F /* BargeIn.swift in Sources */,
 				A10000000000000000000601 /* UnclearAnswer.swift in Sources */,
 				A10000000000000000000501 /* LongTurn.swift in Sources */,
+				C1FC89527F0980C2E1654219 /* WhisperAccurate.swift in Sources */,
 				C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */,
 				C1075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift in Sources */,
 				C1ED6F343195FB3D795107B8 /* WhisperEngine.swift in Sources */,

@@ -64,6 +64,11 @@ struct QuickTasksApp: App {
                     KittyQuickAction.install()
                     #endif
                     store.refreshRoutines()
+                    // The accurate speech model takes a while to load, so start it now rather than when the mic opens.
+                    if SpeechEngineChoice.effective() == .whisperTurbo {
+                        WhisperAccurate.shared.prepare(keyTerms: KeyTerms.build(household: VocabularyProvider.current()))
+                        WhisperAccurate.shared.unloadSoon()      // let go again if the conversation is not opened
+                    }
                     await TaskAgent.classifyUntimed()
                 }
         }

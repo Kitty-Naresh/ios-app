@@ -1,8 +1,8 @@
 import Foundation
 import AVFoundation
 
-/// Live speech to text with Whisper (small.en by default, CoreML encoder on a real device): punctuation, capitals, and names and
-/// brands carried in the prompt. Whisper is not a streaming model, so `WhisperSession` re-transcribes the turn about every 0.6 s
+/// Live speech to text with Whisper (small.en for the live text, CoreML encoder on a real device; with `accurate`, large-v3-turbo
+/// settles each phrase when you pause): punctuation, capitals, and names and brands carried in the prompt. Whisper is not a streaming model, so `WhisperSession` re-transcribes the turn about every 0.6 s
 /// while someone talks. All inference runs on its own queue; only published values and callbacks are on the main actor.
 @MainActor
 final class WhisperRecognizer: TurnRecognizer {
@@ -32,10 +32,15 @@ final class WhisperRecognizer: TurnRecognizer {
     private var lines: [(id: UInt64, text: String, complete: Bool, words: [SpokenWord])] = []
     private var unloadTask: Task<Void, Never>?
     private var protectedNames: [String] = []
+    /// The accurate model, when this recogniser is the hybrid. Nil for small.en alone.
+    private let accurateModel: WhisperAccurate?
+    var accurate: Bool { accurateModel != nil }
 
-    init(engine: StreamingEngine = WhisperEngine(), capture: AudioCapture = AudioCapture()) {
+    init(engine: StreamingEngine = WhisperEngine(), capture: AudioCapture = AudioCapture(), accurate: WhisperAccurate? = nil) {
         self.engine = engine
         self.capture = capture
+        self.accurateModel = accurate
+        if let live = engine as? WhisperEngine, let accurate { live.accurateProvider = accurate.provider }
     }
 
     // MARK: Model
@@ -76,6 +81,7 @@ final class WhisperRecognizer: TurnRecognizer {
             self.queue.async { engine.unload() }
             Breadcrumb.log("whisper model unloaded")
         }
+        accurateModel?.unloadSoon()
     }
 
     private func keyTerms() -> [String] { KeyTerms.build(household: vocabulary?() ?? []) }
@@ -101,6 +107,7 @@ final class WhisperRecognizer: TurnRecognizer {
             Breadcrumb.log("start failed: microphone permission off")
             return
         }
+        accurateModel?.prepare(keyTerms: keyTerms())      // in the background: the first conversation never waits for it
         await prepare()
         guard sessionID == id else { return }
         guard loaded else { return }
@@ -117,7 +124,7 @@ final class WhisperRecognizer: TurnRecognizer {
             let newSink = try openSink(id: id)
             Breadcrumb.log("w3 starting microphone")
             try await capture.start(feeding: newSink, voiceProcessing: bargeIn)
-            guard sessionID == id else { capture.stop(); closeSink(); return }
+            guard sessionID == id else { capture.stop(); closeSink(discard: true); return }
             isRecording = true
             Breadcrumb.log("w4 listening (whisper)")
         } catch {
@@ -147,11 +154,13 @@ final class WhisperRecognizer: TurnRecognizer {
         return newSink
     }
 
-    private func closeSink(then completion: (@Sendable () -> Void)? = nil) {
+    /// `discard`: nobody wants what is left (a restart or a cancel), so nothing is waited for. Without it, the last words are
+    /// settled first, including any accurate pass still running.
+    private func closeSink(discard: Bool = false, then completion: (@Sendable () -> Void)? = nil) {
         guard let old = sink else { completion?(); return }
         sink = nil
         Breadcrumb.log(stats.summary)
-        old.close(then: completion)
+        old.close(discard: discard, then: completion)
     }
 
     /// One line from the engine: update the transcript and tell the conversation.
@@ -185,7 +194,7 @@ final class WhisperRecognizer: TurnRecognizer {
         sessionID += 1
         let id = sessionID
         stopListener.stop()
-        closeSink()
+        closeSink(discard: true)
         transcript = ""
         words = []
         lines = []
@@ -207,7 +216,7 @@ final class WhisperRecognizer: TurnRecognizer {
         guard isRecording else { return false }
         sessionID += 1
         let id = sessionID
-        closeSink()
+        closeSink(discard: true)
         transcript = ""
         words = []
         lines = []
@@ -279,7 +288,7 @@ final class WhisperRecognizer: TurnRecognizer {
     private func cleanup() {
         stopListener.stop()
         capture.stop()
-        closeSink()
+        closeSink(discard: true)
         isRecording = false
         if !bargeIn { AudioSessionControl.deactivate() }
     }

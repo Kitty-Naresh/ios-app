@@ -490,15 +490,15 @@ final class PauseProfileTests: XCTestCase {
     }
 
     func testTheDefaultProfileKeepsTheOldTimings() {
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk"), 3.5)
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: .standard), 3.5)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk"), VoiceTurnManager.longPause)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: .standard), VoiceTurnManager.longPause)
     }
 
     func testASlowerTalkerWaitsLongerAndAQuickOneNotBelowTheFloor() {
-        // 3.5 s base scaled by median / 0.8 s, never above the cap (5.0 s) and never below the 1.2 s floor.
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 1.0, p90: 2.0)), 4.375, accuracy: 0.001)
+        // The base (longPause) scaled by median / 0.8 s, never above the cap (longPause + 1.5) and never below the 1.2 s floor.
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 1.0, p90: 2.0)), VoiceTurnManager.longPause * 1.25, accuracy: 0.001)
         XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 1.2, p90: 2.0)), VoiceTurnManager.normalCap, accuracy: 0.001)
-        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 0.5, p90: 1.0)), 2.1875, accuracy: 0.001)
+        XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 0.5, p90: 1.0)), VoiceTurnManager.longPause * 0.625, accuracy: 0.001)
         XCTAssertEqual(VoiceTurnManager.pauseNeeded(for: "Buy milk", profile: PauseProfile(median: 0.2, p90: 0.5)), 1.2, accuracy: 0.001)
     }
 
@@ -522,8 +522,9 @@ final class PauseProfileTests: XCTestCase {
 
     func testTheGateUsesTheProfile() {
         let said = "Buy milk and eggs from the shop"
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 3.6, lastActed: ""), .evaluate(said))
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: 3.6, lastActed: "", profile: PauseProfile(median: 1.2, p90: 2.0)), .keepListening)
+        let silence = VoiceTurnManager.longPause + 0.1
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: silence, lastActed: ""), .evaluate(said))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: said, silence: silence, lastActed: "", profile: PauseProfile(median: 1.2, p90: 2.0)), .keepListening)
     }
 }
 

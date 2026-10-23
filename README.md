@@ -1,3 +1,53 @@
+# Kitty v34: Whisper large-v3-turbo, hybrid with small.en
+
+The default speech engine is now **Whisper Turbo (accurate)**: `small.en` still shows the words live while you talk, and when you pause,
+**large-v3-turbo** re-listens to the whole phrase and its text replaces the live line. That settled text is what Kitty acts on.
+Pick the engine in the conversation menu (**Speech engine**): Whisper Turbo (accurate) / Whisper (quick, live model only) / Moonshine / Apple Speech.
+It takes effect the next time the conversation opens. A choice you made before (for example plain Whisper) is kept; pick Turbo once to switch.
+
+- **How the hybrid works.** `WhisperSession` (`WhisperEngine.swift`) has two models. The live one runs a pass about every 0.6 s of new audio.
+  When you stop for 0.9 s, the phrase goes to a separate queue (`kitty.whisper.final`) where turbo transcribes it; the result replaces the
+  live line by id. The next phrase is listened to at once, so a slow turbo pass never freezes the live text. If turbo is not loaded yet, fails, or
+  runs past the 6 s the close is willing to wait, small.en's text settles the line instead. Restarts and cancels do not wait at all.
+- **Loading.** `WhisperAccurate` loads turbo in the background when the app opens or a conversation starts (never blocking it), keeps it loaded
+  for 10 minutes after the conversation closes, and lets go of it on a memory warning. While it loads for the first time the screen says so
+  under the transcript, and the quick model listens meanwhile. On a phone the CoreML encoder is compiled on first use and cached: **expect the first
+  load to take a minute or more**, later ones a few seconds.
+- **Weights.** 5-bit `ggml-large-v3-turbo-q5_0.bin` (574 MB) plus its CoreML encoder (about 1.2 GB), in `Whisper/large-v3-turbo/`. **The app grows by
+  about 1.8 GB** on top of small.en. The 16-bit file (1.6 GB) is available with `sh Whisper/fetch-models.sh turbo-f16`; the app uses the 5-bit one if both are there
+  (delete it to compare).
+- **Timings.** `VoiceTurnManager.longPause` is 4.0 s (was 3.5) and the quick nudge after a lone verb is 5.0 s. The caps follow the base (5.5 s and 6.5 s).
+  `TranscriptPolicy.raw` already passes the words through uncleaned, and long turns already go whole to `decideBulk`.
+- **Simulator.** There is no usable Neural Engine in the simulator and turbo on the CPU is very slow (about 40 s for an 11 s phrase), so the
+  simulator uses small.en only and the menu says Turbo is not installed. To try it anyway: `KITTY_WHISPER_TURBO_SIM=1` with
+  `KITTY_WHISPER_TURBO_MODEL=<folder with the .bin>`.
+
+## Set-up
+
+1. `sh Whisper/fetch-models.sh` (small.en and the framework, as before), then `sh Whisper/fetch-models.sh turbo` for turbo and its encoder.
+   Both folders are git-ignored; the project bundles the whole `Whisper` folder.
+2. Run on the iPhone 17 Pro with your signing team. Open the conversation once and wait for the first load (the notice disappears when it is ready).
+3. Opt-in real-model checks on the Mac simulator (both take minutes):
+   `TEST_RUNNER_KITTY_WHISPER_TURBO=1 TEST_RUNNER_KITTY_WHISPER_TURBO_SIM=1 TEST_RUNNER_KITTY_WHISPER_TURBO_MODEL=$PWD/Whisper/large-v3-turbo TEST_RUNNER_KITTY_WHISPER_WAV=/path/speech.wav xcodebuild test -only-testing:KittyTests/WhisperRealTests/testTheHybridSettlesWithTheAccurateModel …`
+   The same 11 s brand recording that small.en got partly wrong came back from turbo (5-bit, CPU encoder) as: "Buy Maggi and Amul butter from Blinkit. Then ask Rani
+   to sweep and mop the kitchen. Remind me to pay the base comb bill on Friday. And order Paralegi biscuits from Zepto." (Rani is right now;
+   BESCOM and Parle-G are still spelled by sound.)
+
+## Try on the phone
+
+1. Same sentences as v33 on Turbo, then on Whisper (quick) and Apple Speech: brands, a long multi-task turn with a pause in the middle, "buy milk and bread".
+2. How late does the settled text replace the live text after you stop (it should be about a second or two on the Neural Engine)? Does the line
+   visibly change under Kitty's hands as it settles?
+3. Heat and battery over 10 minutes, memory (does iOS ever kill the app while turbo is loaded?), and the first-load wait.
+4. If it is too slow or warm: pick **Whisper (quick)** in the menu, or `KITTY_WHISPER_NO_COREML=1` to see what the CPU encoder costs.
+
+## What was left out of the request, and why
+
+- No whisper.cpp source package and no manual Xcode drag: the prebuilt `whisper.xcframework` is already linked and the `Whisper` folder is already bundled.
+- No `import Speech` removal: Apple Speech stays for "Hey Kitty" and the hands-free "stop", and as the fallback engine. Audio capture was already
+  engine-neutral and downsampled to 16 kHz off the main thread.
+- The 5-bit turbo file is used rather than the 16-bit one (574 MB instead of 1.6 GB); `turbo-f16` is one command away.
+
 # Kitty v33: Whisper as a third speech engine
 
 Moonshine was worse than Apple Speech on the phone (wrong words and brands, no sentence breaks, worse tasks), so **Whisper** is now a third

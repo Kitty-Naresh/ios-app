@@ -8,15 +8,12 @@ nonisolated enum WhisperModel {
     /// `sh Whisper/fetch-models.sh base` fetches the lighter one.
     static let folders = ["small.en", "base.en"]
 
-    /// The model file (ggml-*.bin), or nil if none was bundled. The CoreML encoder sits next to it as `ggml-<size>-encoder.mlmodelc`.
-    static var binaryURL: URL? {
-        var directories: [URL] = []
-        if let override = ProcessInfo.processInfo.environment["KITTY_WHISPER_MODEL"], !override.isEmpty {
-            directories.append(URL(fileURLWithPath: override))
-        }
-        if let base = Bundle.main.resourceURL {
-            for f in folders { directories.append(base.appendingPathComponent("Whisper").appendingPathComponent(f)) }
-        }
+    /// The folder of the accurate model: large-v3-turbo. `sh Whisper/fetch-models.sh turbo` fetches it (5-bit, about 1.8 GB with its encoder).
+    static let accurateFolder = "large-v3-turbo"
+
+    /// The first model file (ggml-*.bin) in the first of these folders that has one. The CoreML encoder sits next to it as
+    /// `ggml-<size>-encoder.mlmodelc`.
+    static func firstBinary(in directories: [URL]) -> URL? {
         for dir in directories {
             let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
             if let bin = files.sorted().first(where: { $0.hasPrefix("ggml-") && $0.hasSuffix(".bin") }) {
@@ -26,7 +23,42 @@ nonisolated enum WhisperModel {
         return nil
     }
 
+    /// The live model (small.en or base.en), or nil if none was bundled.
+    static var binaryURL: URL? {
+        var directories: [URL] = []
+        if let override = ProcessInfo.processInfo.environment["KITTY_WHISPER_MODEL"], !override.isEmpty {
+            directories.append(URL(fileURLWithPath: override))
+        }
+        if let base = Bundle.main.resourceURL {
+            for f in folders { directories.append(base.appendingPathComponent("Whisper").appendingPathComponent(f)) }
+        }
+        return firstBinary(in: directories)
+    }
+
+    /// The accurate model (large-v3-turbo), or nil if it was not bundled. The simulator has none: its CPU encoder takes tens of
+    /// seconds a pass, so it is skipped there unless `KITTY_WHISPER_TURBO_SIM=1` is set (for the opt-in real run).
+    static func accurateBinaryURL(simulator: Bool = Self.runningInSimulator, environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        if simulator && environment["KITTY_WHISPER_TURBO_SIM"] != "1" { return nil }
+        var directories: [URL] = []
+        if let override = environment["KITTY_WHISPER_TURBO_MODEL"], !override.isEmpty {
+            directories.append(URL(fileURLWithPath: override))
+        }
+        if let base = Bundle.main.resourceURL {
+            directories.append(base.appendingPathComponent("Whisper").appendingPathComponent(accurateFolder))
+        }
+        return firstBinary(in: directories)
+    }
+
+    static var runningInSimulator: Bool {
+        #if targetEnvironment(simulator)
+        return true
+        #else
+        return false
+        #endif
+    }
+
     static var isAvailable: Bool { binaryURL != nil }
+    static var isAccurateAvailable: Bool { accurateBinaryURL() != nil }
 }
 
 nonisolated enum WhisperError: LocalizedError {
@@ -62,13 +94,28 @@ nonisolated protocol WhisperTranscribing: AnyObject, Sendable {
 nonisolated final class WhisperEngine: StreamingEngine, WhisperTranscribing, @unchecked Sendable {
     private var context: OpaquePointer?
     private var prompt = ""
-    private let lock = NSLock()
+    private let lock = NSLock()              // the context and the prompt
+    private let runLock = NSLock()           // one pass, load or unload at a time: a whisper context is not thread safe
+    private let flagLock = NSLock()          // `isLoaded`, so asking never waits for a long load
+    private var loadedFlag = false
+
+    /// The accurate engine (large-v3-turbo) rather than the live one (small.en).
+    let accurate: Bool
+
+    /// The accurate engine, if there is one and it is loaded now. Read when a phrase ends.
+    var accurateProvider: (@Sendable () -> WhisperTranscribing?)?
+
+    init(accurate: Bool = false) { self.accurate = accurate }
+
+    var isLoaded: Bool { flagLock.lock(); defer { flagLock.unlock() }; return loadedFlag }
+    private func setLoaded(_ value: Bool) { flagLock.lock(); loadedFlag = value; flagLock.unlock() }
 
     func load(keyTerms: [String], boost: Double) throws {
+        runLock.lock(); defer { runLock.unlock() }
         lock.lock(); defer { lock.unlock() }
         prompt = WhisperPrompt.build(from: keyTerms)
         if context != nil { return }
-        guard let url = WhisperModel.binaryURL else { throw WhisperError.modelMissing }
+        guard let url = accurate ? WhisperModel.accurateBinaryURL() : WhisperModel.binaryURL else { throw WhisperError.modelMissing }
         var params = whisper_context_default_params()
         #if targetEnvironment(simulator)
         params.use_gpu = false
@@ -76,8 +123,9 @@ nonisolated final class WhisperEngine: StreamingEngine, WhisperTranscribing, @un
         let modelPath = Self.skipCoreML ? Self.withoutEncoder(url) : url
         guard let ctx = whisper_init_from_file_with_params(modelPath.path, params) else { throw WhisperError.loadFailed }
         context = ctx
-        // The first pass compiles the CoreML encoder, which takes a few seconds: do it now, on the loading queue.
+        // The first pass compiles the CoreML encoder (a few seconds for small.en, longer for turbo): do it now, on the loading queue.
         _ = run(ctx, samples: [Float](repeating: 0, count: 17_600), prompt: "")
+        setLoaded(true)
     }
 
     func setKeyTerms(_ terms: [String]) throws {
@@ -108,20 +156,28 @@ nonisolated final class WhisperEngine: StreamingEngine, WhisperTranscribing, @un
     func openSession(onLine: @escaping @Sendable (TranscriptLineUpdate) -> Void) throws -> EngineSession {
         lock.lock(); let loaded = context != nil; let prompt = self.prompt; lock.unlock()
         guard loaded else { throw WhisperError.loadFailed }
-        return WhisperSession(transcriber: self, prompt: prompt, onLine: onLine)
+        return WhisperSession(transcriber: self, prompt: prompt, accurate: accurateProvider, onLine: onLine)
     }
 
     func unload() {
-        lock.lock()
+        setLoaded(false)
+        runLock.lock(); defer { runLock.unlock() }      // waits for a pass that is running
+        lock.lock(); defer { lock.unlock() }
         if let ctx = context { whisper_free(ctx) }
         context = nil
-        lock.unlock()
     }
 
     func transcribe(_ samples: [Float], prompt: String) -> WhisperResult? {
+        runLock.lock(); defer { runLock.unlock() }
         lock.lock(); let ctx = context; lock.unlock()
         guard let ctx else { return nil }
-        return run(ctx, samples: samples, prompt: prompt)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let result = run(ctx, samples: samples, prompt: prompt)
+        if accurate {
+            let ms = Int(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+            Breadcrumb.log("whisper-turbo pass: \(ms) ms for \(String(format: "%.1f", Double(samples.count) / 16_000)) s of audio, thermal \(PassStats.thermalName)")
+        }
+        return result
     }
 
     /// Whisper wants at least a second of audio, so a short stretch is padded with silence.
@@ -195,7 +251,9 @@ nonisolated final class WhisperEngine: StreamingEngine, WhisperTranscribing, @un
 
 /// Whisper does not stream, so this makes it look live: while someone talks, the turn so far is transcribed again about every
 /// 0.6 s of new audio, and when they stop (or the 60 s cap is hit) one last pass settles the line. Silence is never sent to the model.
-/// Called on the engine queue only.
+/// When an accurate model (large-v3-turbo) is loaded, that last pass goes to it on a queue of its own, so live text for the next
+/// phrase never waits behind it, and its text replaces the live text of the line. Without it, the live model settles the line.
+/// `add` and `flushAndClose` are called on the engine queue only.
 nonisolated final class WhisperSession: EngineSession, @unchecked Sendable {
     private let transcriber: WhisperTranscribing
     private let prompt: String
@@ -208,13 +266,24 @@ nonisolated final class WhisperSession: EngineSession, @unchecked Sendable {
     private var lastText = ""
     private var lastWords: [SpokenWord] = []
     private var closed = false
+    private let accurate: (@Sendable () -> WhisperTranscribing?)?
+    private let finalQueue: DispatchQueue
+    private let finals = DispatchGroup()
+    private let finalTimeout: Double
     private var lastPassSeconds = 0.0            // how long the last live pass took
     private var lastPassEnd = DispatchTime.now().uptimeNanoseconds
 
     init(transcriber: WhisperTranscribing, prompt: String, passInterval: Double = 0.6,
-         config: WhisperTurnBuffer.Config = .init(), onLine: @escaping @Sendable (TranscriptLineUpdate) -> Void) {
+         config: WhisperTurnBuffer.Config = .init(),
+         accurate: (@Sendable () -> WhisperTranscribing?)? = nil,
+         finalQueue: DispatchQueue = DispatchQueue(label: "kitty.whisper.final", qos: .userInitiated),
+         finalTimeout: Double = 6,
+         onLine: @escaping @Sendable (TranscriptLineUpdate) -> Void) {
         self.transcriber = transcriber
         self.prompt = prompt
+        self.accurate = accurate
+        self.finalQueue = finalQueue
+        self.finalTimeout = finalTimeout
         self.onLine = onLine
         self.passSamples = Int(passInterval * WhisperTurnBuffer.rate)
         self.buffer = WhisperTurnBuffer(config: config)
@@ -252,12 +321,20 @@ nonisolated final class WhisperSession: EngineSession, @unchecked Sendable {
         }
     }
 
+    /// The microphone was closed to deliver the result: settle the line being spoken, and wait (a few seconds at most) for
+    /// the accurate passes still running, so the text delivered is the settled one.
     func flushAndClose() {
         guard !closed else { return }
         let (stretch, voiced) = buffer.drain()
         if voiced { finalPass(stretch) }
         closed = true
+        if finals.wait(timeout: .now() + finalTimeout) == .timedOut {
+            Breadcrumb.log("whisper: an accurate pass was still running after \(Int(finalTimeout)) s; the live text stands")
+        }
     }
+
+    /// The result is not wanted (a restart, or the conversation closed): stop without waiting for anything.
+    func discard() { closed = true }
 
     // MARK: Passes
 
@@ -289,6 +366,10 @@ nonisolated final class WhisperSession: EngineSession, @unchecked Sendable {
     }
 
     private func finalPass(_ stretch: [Float]) {
+        if let engine = accurate?() {
+            accurateFinal(stretch, engine: engine)
+            return
+        }
         let started = DispatchTime.now().uptimeNanoseconds
         let result = transcriber.transcribe(stretch, prompt: prompt)
         let ms = UInt32(min(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000, Double(UInt32.max)))
@@ -300,5 +381,32 @@ nonisolated final class WhisperSession: EngineSession, @unchecked Sendable {
         // An empty final over a non-empty partial means the partial was noise: the line is blanked and closed.
         guard !text.isEmpty || !lastText.isEmpty else { return }
         onLine(TranscriptLineUpdate(id: lineID, text: text, isComplete: true, latencyMs: ms, words: words))
+    }
+
+    /// The accurate model settles the line on its own queue. The line stays as the live model left it until the answer comes.
+    private func accurateFinal(_ stretch: [Float], engine: WhisperTranscribing) {
+        let id = lineID
+        let live = lastText
+        let liveWords = lastWords
+        let prompt = prompt
+        let onLine = onLine
+        let seconds = Double(stretch.count) / WhisperTurnBuffer.rate
+        finals.enter()
+        finalQueue.async {
+            defer { self.finals.leave() }
+            let started = DispatchTime.now().uptimeNanoseconds
+            let result = engine.transcribe(stretch, prompt: prompt)
+            let ms = UInt32(min(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000, Double(UInt32.max)))
+            guard let result else {
+                // The accurate model failed: the live text stands.
+                if !live.isEmpty { onLine(TranscriptLineUpdate(id: id, text: live, isComplete: true, latencyMs: ms, words: liveWords)) }
+                return
+            }
+            let joined = result.text
+            let text = WhisperText.clean(joined, voicedSeconds: seconds, noSpeech: result.noSpeech, meanConfidence: result.meanConfidence)
+            let words = text == joined ? result.words : []
+            guard !text.isEmpty || !live.isEmpty else { return }
+            onLine(TranscriptLineUpdate(id: id, text: text, isComplete: true, latencyMs: ms, words: words))
+        }
     }
 }

@@ -268,7 +268,7 @@ final class LongPromptTests: XCTestCase {
 
     func testASetupSentenceIsHeldNotAnswered() {
         XCTAssertTrue(LocalSemanticPrechecker.announcesMore(intro))
-        for pause in [4.0, 5.0, 5.5] {
+        for pause in [VoiceTurnManager.longPause + 0.5, 5.0, 5.5] {
             if case .hold = VoiceTurnManager.gate(utterance: intro, silence: pause, lastActed: "") {} else { XCTFail("held at \(pause)s") }
         }
         XCTAssertEqual(VoiceTurnManager.gate(utterance: intro, silence: 6.5, lastActed: ""), .nudge)

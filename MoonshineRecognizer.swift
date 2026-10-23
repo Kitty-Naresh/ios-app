@@ -49,6 +49,12 @@ nonisolated protocol EngineSession: AnyObject, Sendable {
     func add(_ samples: [Float], sampleRate: Int32) throws
     /// Process what is left, emit the final lines, and release the stream.
     func flushAndClose()
+    /// Release the stream without waiting for results nobody wants (a restart or a cancel). Defaults to `flushAndClose`.
+    func discard()
+}
+
+extension EngineSession {
+    func discard() { flushAndClose() }
 }
 
 nonisolated protocol StreamingEngine: AnyObject, Sendable {
@@ -195,10 +201,10 @@ nonisolated final class MoonshineSink: AudioSink, @unchecked Sendable {
     func finish() {}
 
     /// Stop taking audio, then process what is left and release the stream on the engine queue.
-    func close(then completion: (@Sendable () -> Void)? = nil) {
+    func close(discard: Bool = false, then completion: (@Sendable () -> Void)? = nil) {
         lock.lock(); closed = true; lock.unlock()
         queue.async { [session] in
-            session.flushAndClose()
+            if discard { session.discard() } else { session.flushAndClose() }
             completion?()
         }
     }

@@ -132,7 +132,7 @@ struct TurnExpect {
 struct EvalTurn {
     var say: String
     var script: Script = .none
-    var silence: TimeInterval = 4.0              // quiet seconds after the words (10 or more is a long silence)
+    var silence: TimeInterval = VoiceTurnManager.longPause + 0.5   // quiet seconds after the words (10 or more is a long silence)
     var settle = false                           // the two-second countdown runs out after this turn (the last turn always settles)
     var expect: TurnExpect
 }
@@ -173,7 +173,7 @@ private func BP(_ name: String, _ steps: [String]) -> Script {
                             playbook: PlaybookDraftValue(name: name, steps: steps.map { TaskDraftValue(title: $0) })))
 }
 
-private func turn(_ say: String, _ script: Script = .none, silence: TimeInterval = 4.0, _ expect: TurnExpect) -> EvalTurn {
+private func turn(_ say: String, _ script: Script = .none, silence: TimeInterval = VoiceTurnManager.longPause + 0.5, _ expect: TurnExpect) -> EvalTurn {
     EvalTurn(say: say, script: script, silence: silence, expect: expect)
 }
 

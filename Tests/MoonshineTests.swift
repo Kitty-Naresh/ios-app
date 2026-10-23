@@ -328,15 +328,15 @@ final class AudioSinkTests: XCTestCase {
 final class GateTimingTests: XCTestCase {
 
     func testTheGateWaitsForALongerPause() {
-        XCTAssertEqual(VoiceTurnManager.longPause, 3.5)
+        XCTAssertEqual(VoiceTurnManager.longPause, 4.0)
         XCTAssertEqual(VoiceTurnManager.quickNudgeAfter, 5.0)
         XCTAssertEqual(VoiceTurnManager.nudgeAfter, 10)
         XCTAssertLessThan(VoiceTurnManager.longPause, VoiceTurnManager.quickNudgeAfter)
     }
 
     func testTheCapsMoveWithTheBaseAndAreNotClampedToTheOldNumbers() {
-        XCTAssertEqual(VoiceTurnManager.normalCap, 5.0, accuracy: 0.0001)
-        XCTAssertEqual(VoiceTurnManager.extendedCap, 6.0, accuracy: 0.0001)
+        XCTAssertEqual(VoiceTurnManager.normalCap, 5.5, accuracy: 0.0001)
+        XCTAssertEqual(VoiceTurnManager.extendedCap, 6.5, accuracy: 0.0001)
         let longOpen = String(repeating: "clean the bathrooms and mop the floor ", count: 4) + "and then"
         let p = VoiceTurnManager.pauseNeeded(for: longOpen)
         XCTAssertGreaterThan(p, 4.2, "the old extended cap would have cut this short")
@@ -346,11 +346,11 @@ final class GateTimingTests: XCTestCase {
 
     func testAShortFinishedRequestIsReadAfterThePause() {
         XCTAssertEqual(VoiceTurnManager.gate(utterance: "Buy milk", silence: 3.0, lastActed: ""), .keepListening)
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Buy milk", silence: 3.6, lastActed: ""), .evaluate("Buy milk"))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: "Buy milk", silence: VoiceTurnManager.longPause + 0.1, lastActed: ""), .evaluate("Buy milk"))
     }
 
     func testALoneVerbIsNudgedAfterFiveSeconds() {
-        if case .hold = VoiceTurnManager.gate(utterance: "clean", silence: 4.0, lastActed: "") {} else { XCTFail("held at 4 s") }
+        if case .hold = VoiceTurnManager.gate(utterance: "clean", silence: VoiceTurnManager.longPause + 0.5, lastActed: "") {} else { XCTFail("held at 4.5 s") }
         XCTAssertEqual(VoiceTurnManager.gate(utterance: "clean", silence: 5.1, lastActed: ""), .nudge)
     }
 }

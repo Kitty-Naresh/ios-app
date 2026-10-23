@@ -242,14 +242,14 @@ final class KittyVoiceTurnTests: XCTestCase {
 
         // 5: "bathroom": the model may be asked once, and says wait
         let u5 = "Add a task to clean the bathroom"
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: u5, silence: 4.0, lastActed: ""), .evaluate(u5))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: u5, silence: VoiceTurnManager.longPause + 0.5, lastActed: ""), .evaluate(u5))
         let r5 = await manager.decide(utterance: u5)
         guard case .wait = r5 else { return XCTFail("expected wait") }
         XCTAssertEqual(engine.prompts.count, 1)
 
         // 7: "every Monday for the househelp": one more call, and it becomes a routine
         let u7 = "Add a task to clean the bathroom every Monday for the househelp"
-        XCTAssertEqual(VoiceTurnManager.gate(utterance: u7, silence: 4.0, lastActed: u5), .evaluate(u7))
+        XCTAssertEqual(VoiceTurnManager.gate(utterance: u7, silence: VoiceTurnManager.longPause + 0.5, lastActed: u5), .evaluate(u7))
         let r7 = await manager.decide(utterance: u7)
         guard case .proposal(let proposal) = r7 else { return XCTFail("expected a proposal") }
         XCTAssertEqual(engine.prompts.count, 2)

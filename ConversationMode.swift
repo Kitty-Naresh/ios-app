@@ -102,17 +102,38 @@ final class VoiceConversation: ObservableObject {
     private var restarts: [Date] = []
     private var micWanted = true       // false when you typed instead: don't open the mic behind your back
 
-    init() { configureSpeech() }
+    /// A quiet line while the accurate speech model is getting ready (first run only), so a slower start is explained.
+    @Published private(set) var speechNotice: String?
+    private var accurateObserver: AnyCancellable?
+
+    init() {
+        configureSpeech()
+        accurateObserver = WhisperAccurate.shared.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                guard let self else { return }
+                let turbo = Self.engine(of: self.speech) == .whisperTurbo
+                switch status {
+                case .loading where turbo:
+                    self.speechNotice = "Getting the accurate speech model ready (first time only). The quick one listens meanwhile."
+                case .failed where turbo:
+                    self.speechNotice = "The accurate speech model could not load. The quick one is listening."
+                default:
+                    self.speechNotice = nil
+                }
+            }
+    }
 
     /// Which engine a recogniser is.
     static func engine(of recognizer: any TurnRecognizer) -> SpeechEngineChoice {
-        if recognizer is WhisperRecognizer { return .whisper }
+        if let w = recognizer as? WhisperRecognizer { return w.accurate ? .whisperTurbo : .whisper }
         if recognizer is MoonshineRecognizer { return .moonshine }
         return .apple
     }
 
     static func makeRecognizer(for choice: SpeechEngineChoice = SpeechEngineChoice.effective()) -> any TurnRecognizer {
         switch choice {
+        case .whisperTurbo: return WhisperRecognizer(accurate: WhisperAccurate.shared)
         case .whisper: return WhisperRecognizer()
         case .moonshine: return MoonshineRecognizer()
         case .apple:
@@ -1082,6 +1103,11 @@ struct ConversationView: View {
                 Text(error)
                     .font(.footnote)
                     .foregroundStyle(.red)
+                    .padding(.horizontal, 4)
+            } else if let notice = convo.speechNotice {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
             }
         }

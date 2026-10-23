@@ -3443,7 +3443,7 @@ nonisolated struct PauseProfile: Equatable, Sendable {
 
 @MainActor
 final class VoiceTurnManager {
-    static let longPause: TimeInterval = 3.5        // long enough to check whether the thought is finished (Moonshine ends a line on a pause, so people think aloud)
+    static let longPause: TimeInterval = 4.0        // long enough to check whether the thought is finished (people think aloud, and the accurate Whisper pass settles a line about a second after the pause)
     static let finalizerDelay: TimeInterval = 0.5   // after "done"
     static let quickNudgeAfter: TimeInterval = 5.0  // a lone verb ("clean", "buy"): ask what, don't leave her in silence
     static let nudgeAfter: TimeInterval = 10        // a long silence on unfinished speech: gently ask what the task is
