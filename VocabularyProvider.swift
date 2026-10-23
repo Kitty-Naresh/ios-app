@@ -1,5 +1,4 @@
 import Foundation
-import Speech
 
 // MARK: - Speech locale preference
 
@@ -16,12 +15,6 @@ nonisolated enum SpeechLocalePreference {
 
     static var locale: Locale {
         isIndianEnglish ? Locale(identifier: indianEnglish) : .current
-    }
-
-    static func makeRecognizer() -> SFSpeechRecognizer? {
-        SFSpeechRecognizer(locale: locale)
-            ?? SFSpeechRecognizer(locale: .current)
-            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     }
 }
 

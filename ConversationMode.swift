@@ -75,11 +75,8 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    private let speech: SpeechRecognizer = {
-        let r = SpeechRecognizer()
-        r.vocabulary = { VocabularyProvider.current() }
-        return r
-    }()
+    /// Moonshine (live, punctuated, brand-aware) when its model is on the phone; Apple Speech otherwise, or if Moonshine fails.
+    private var speech: any TurnRecognizer = VoiceConversation.makeRecognizer()
     /// Decides when speech might be a finished thought, and makes the one model call for it.
     private let turns = VoiceTurnManager()
     private var pauseProfile = PauseProfile.current()   // how long this person pauses mid-sentence, learned over time
@@ -97,8 +94,20 @@ final class VoiceConversation: ObservableObject {
     private var restarts: [Date] = []
     private var micWanted = true       // false when you typed instead: don't open the mic behind your back
 
-    init() {
+    init() { configureSpeech() }
+
+    /// The recogniser Kitty listens through. Moonshine unless it is turned off or its model is missing.
+    static func makeRecognizer() -> any TurnRecognizer {
+        if UserDefaults.standard.object(forKey: "kitty.useMoonshine") as? Bool ?? true, MoonshineModel.isAvailable {
+            return MoonshineRecognizer()
+        }
+        Breadcrumb.log("speech: using Apple Speech (moonshine off or model missing)")
+        return SpeechRecognizer()
+    }
+
+    private func configureSpeech() {
         speech.continuous = true
+        speech.vocabulary = { VocabularyProvider.current() }
         // Called on the main actor, in order, so a late partial of the old session can never slip in after a restart.
         speech.onPartial = { [weak self] text in
             MainActor.assumeIsolated { self?.heard(text) }
@@ -106,6 +115,15 @@ final class VoiceConversation: ObservableObject {
         speech.onFinished = { [weak self] text in
             Task { @MainActor in self?.sessionEnded(text) }
         }
+    }
+
+    /// The Moonshine model would not load: carry on with Apple Speech so the conversation still works.
+    private func fallBackToApple() {
+        Breadcrumb.log("speech: moonshine failed, falling back to Apple Speech")
+        speech.cancel()
+        speech = SpeechRecognizer()
+        speech.bargeIn = BargeIn.enabled
+        configureSpeech()
     }
 
     // MARK: Open and close
@@ -145,6 +163,7 @@ final class VoiceConversation: ObservableObject {
         countdownActive = false
         speech.bargeIn = false                  // let the audio session shut down with the screen
         speech.cancel()
+        (speech as? MoonshineRecognizer)?.unloadSoon()
         Speaker.stopIfActive()
         micOn = false
         generation += 1
@@ -162,6 +181,10 @@ final class VoiceConversation: ObservableObject {
         while true {
             await speech.start()
             guard active else { speech.cancel(); return }
+            if let m = speech as? MoonshineRecognizer, m.modelLoadFailed {
+                fallBackToApple()
+                continue
+            }
             guard let message = speech.errorMessage else { break }
             // A start-up hiccup (audio session or engine busy after a route change) is retried quietly. Only a permission
             // problem is shown, because only you can fix it.
@@ -617,13 +640,14 @@ final class VoiceConversation: ObservableObject {
     private func startBargeInListening() async -> Bool {
         guard BargeIn.enabled, active, micWanted, !userMuted else { return false }
         speech.bargeIn = true
-        if speech.isRecording { return speech.restartRecognition() }
-        await speech.start()
-        guard speech.isRecording, speech.errorMessage == nil else {
-            speech.cancel()
-            return false
+        if !speech.isRecording {
+            await speech.start()
+            guard speech.isRecording, speech.errorMessage == nil else {
+                speech.cancel()
+                return false
+            }
         }
-        return true
+        return speech.beginSpeakingListen()      // Moonshine hands the running mic to Apple Speech for the short "stop"
     }
 
     /// What the microphone hears while Kitty is speaking. A stop word or real speech stops her and keeps your words.

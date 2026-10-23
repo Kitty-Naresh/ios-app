@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import Speech
 import AVFoundation
 
 // MARK: - Diagnostics (temporary): remembers the last steps so a freeze can be located
@@ -41,304 +40,79 @@ nonisolated struct SpokenWord: Equatable, Sendable {
     }
 }
 
-/// Phase 0 spike: what does SFSpeechRecognizer actually report for confidence?
-/// Collects stats per session and prints one summary line when the session ends.
-/// Read the "KITTY spike" lines in the console to decide how read-back is triggered.
-nonisolated struct ConfidenceSpike {
-    var onDevice = false
-    var partials = 0
-    var partialsWithConfidence = 0
-    var partialWords = 0
-    var partialWordsWithConfidence = 0
-    var finalWords = 0
-    var finalWordsWithConfidence = 0
-    var finalLowConfidence = 0        // 0 < confidence < 0.5
-    var finalWithAlternatives = 0
-    var lastLogged = Date.distantPast
+// MARK: - What the conversation needs from a recogniser
 
-    mutating func record(_ words: [SpokenWord], isFinal: Bool) {
-        let withConf = words.filter { $0.confidence > 0 }.count
-        if isFinal {
-            finalWords += words.count
-            finalWordsWithConfidence += withConf
-            finalLowConfidence += words.filter { $0.confidence > 0 && $0.confidence < 0.5 }.count
-            finalWithAlternatives += words.filter { !$0.alternatives.isEmpty }.count
-        } else {
-            partials += 1
-            if withConf > 0 { partialsWithConfidence += 1 }
-            partialWords += words.count
-            partialWordsWithConfidence += withConf
-        }
-    }
+/// The surface `VoiceConversation` listens through. Moonshine is the main recogniser (live, punctuated, with key terms);
+/// Apple Speech is the fallback if the Moonshine model cannot load, and is what the "Hey Kitty" wake word uses.
+@MainActor
+protocol TurnRecognizer: AnyObject {
+    /// The text of this listening session so far.
+    var transcript: String { get }
+    /// Words of the latest result. Confidence is 0 where the recogniser does not report one.
+    var words: [SpokenWord] { get }
+    var isRecording: Bool { get }
+    var errorMessage: String? { get set }
+    /// The last start-up failure cannot be fixed by trying again.
+    var failureIsPermanent: Bool { get }
+    /// Conversation mode: punctuation on, and never ends by itself on a pause.
+    var continuous: Bool { get set }
+    /// Echo-cancelled duplex session for hands-free "stop" while Kitty talks.
+    var bargeIn: Bool { get set }
+    /// Names and terms to expect. Asked for at the start of each session.
+    var vocabulary: (@MainActor () -> [String])? { get set }
+    var onPartial: ((String) -> Void)? { get set }
+    var onFinished: ((String) -> Void)? { get set }
 
-    var summary: String {
-        "spike(\(onDevice ? "on-device" : "server")): partials \(partialsWithConfidence)/\(partials) with confidence, "
-        + "words \(partialWordsWithConfidence)/\(partialWords); final words \(finalWordsWithConfidence)/\(finalWords) with confidence, "
-        + "\(finalLowConfidence) low, \(finalWithAlternatives) with alternatives"
-    }
+    func start() async
+    func stop()
+    func cancel()
+    /// A fresh recognition on the microphone that is already running. False if it is not running.
+    @discardableResult func restartRecognition() -> Bool
+    func resetAudioEngine()
+    /// The microphone stays open while Kitty talks, listening only for a stop word or real speech. False if it cannot.
+    /// `restartRecognition()` brings the normal listening back afterwards.
+    @discardableResult func beginSpeakingListen() -> Bool
 }
 
-// MARK: - Speech to text
+// MARK: - Where the microphone goes
 
-@MainActor
-final class SpeechRecognizer: ObservableObject {
-    @Published private(set) var transcript = ""
-    @Published private(set) var isRecording = false
-    @Published var errorMessage: String?
+/// A consumer of the microphone. One engine and one tap serve whichever sink is current, so Kitty can hand the same running
+/// microphone from Moonshine to Apple Speech (hands-free "stop" while she talks) and back without touching the audio session.
+/// `append` is called on the audio thread: copy what you need and return quickly.
+nonisolated protocol AudioSink: AnyObject {
+    func append(_ buffer: AVAudioPCMBuffer)
+    /// No more audio will arrive (swapped out or stopped).
+    func finish()
+}
 
-    /// The last start-up failure cannot be fixed by trying again (permission off, recogniser unavailable).
-    private(set) var failureIsPermanent = false
-
-    /// When true, listening stops by itself after a pause in speech
-    /// (used by hands-free conversation mode).
-    var autoStopOnSilence = false
-
-    /// Conversation mode: adds punctuation and never ends by itself on a pause.
-    /// The owner decides when you have finished (see VoiceConversation).
-    var continuous = false
-
-    /// For the always-on "Hey Kitty" listener: recognise on the device when supported, and don't duck music.
-    var lightweight = false
-
-    /// Listening while Kitty is talking (hands-free "stop"): a voice-chat session with echo cancellation, so she mostly does not
-    /// hear herself, and a session that is not shut off if the recogniser ends while she is still speaking.
-    var bargeIn = false
-
-    /// With `lightweight`: try on-device recognition first. Turned off for good if it fails to start.
-    var preferOnDevice = true
-
-    /// Called once per listening session with the final transcript (may be empty).
-    var onFinished: ((String) -> Void)?
-
-    /// Called with the live transcript as you speak (and with "" when a session starts).
-    var onPartial: ((String) -> Void)?
-
-    /// Words of the latest result (partial or final), with confidence and timing.
-    private(set) var words: [SpokenWord] = []
-
-    private var spike = ConfidenceSpike()
-
-    /// Asked for at the start of every recognition session, so names added a moment ago are expected right away.
-    var vocabulary: (@MainActor () -> [String])?
-
-    /// Created again at each start so the English (India) setting takes effect on the next listen.
-    private var recognizer = SpeechLocalePreference.makeRecognizer()
-    private let capture = AudioCapture()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
-    private var timerTask: Task<Void, Never>?
-    private var delivered = false
-    private var sessionID = 0   // ignores late callbacks from an earlier session
-
-    func toggle() async {
-        if isRecording { stop() } else { await start() }
-    }
-
-    func start() async {
-        guard !isRecording else { return }
-        errorMessage = nil
-        failureIsPermanent = false
-        transcript = ""
-        words = []
-        spike = ConfidenceSpike()
-        onPartial?("")
-        delivered = false
-        sessionID += 1
-        let id = sessionID
-
-        Breadcrumb.log("1 start: checking recognizer")
-        recognizer = SpeechLocalePreference.makeRecognizer()
-        guard let recognizer, recognizer.isAvailable else {
-            errorMessage = "Speech recognition isn't available right now. Check your internet connection and try again."
-            failureIsPermanent = true
-            Breadcrumb.log("start failed: recogniser unavailable")
-            return
-        }
-        Breadcrumb.log("2 asking for speech permission")
-        guard await Self.speechAuthorized() else {
-            errorMessage = "Speech Recognition is off for Kitty. Turn it on in Settings > Kitty."
-            failureIsPermanent = true
-            Breadcrumb.log("start failed: speech permission off")
-            return
-        }
-        Breadcrumb.log("3 asking for microphone permission")
-        guard await AVAudioApplication.requestRecordPermission() else {
-            errorMessage = "Microphone is off for Kitty. Turn it on in Settings > Kitty."
-            failureIsPermanent = true
-            Breadcrumb.log("start failed: microphone permission off")
-            return
-        }
-
-        do {
-            // Off the main thread: activating the session on main can freeze the UI.
-            Breadcrumb.log("4 configuring audio session")
-            if bargeIn {
-                try await AudioSessionControl.configure(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-            } else if lightweight {
-                // "Mix with others" is not allowed with the plain record category, so use play-and-record.
-                // (Asking for an invalid combination fails, and the listener would never start.)
-                try await AudioSessionControl.configure(.playAndRecord, mode: .default, options: [.mixWithOthers])
-            } else {
-                try await AudioSessionControl.configure(.record, mode: .measurement, options: .duckOthers)
+nonisolated enum MonoAudio {
+    /// All channels averaged into one array of Float samples in -1...1, which is what Moonshine takes.
+    static func samples(from buffer: AVAudioPCMBuffer) -> [Float] {
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        guard frames > 0, channels > 0 else { return [] }
+        if let data = buffer.floatChannelData {
+            if channels == 1 { return Array(UnsafeBufferPointer(start: data[0], count: frames)) }
+            var out = [Float](repeating: 0, count: frames)
+            for c in 0..<channels {
+                let ch = data[c]
+                for i in 0..<frames { out[i] += ch[i] }
             }
-            guard sessionID == id else { return }   // cancelled while waiting
-
-            let request = makeRequest(for: recognizer)
-
-            // Mic setup runs off the main thread so the UI never freezes.
-            Breadcrumb.log("5 starting microphone")
-            try await capture.start(feeding: request, voiceProcessing: bargeIn)
-            Breadcrumb.log("6 microphone running")
-            guard sessionID == id else { capture.stop(); return }   // cancelled while starting
-
-            beginTask(recognizer: recognizer, request: request, id: id)
-            isRecording = true
-            Breadcrumb.log("7 listening")
-            if autoStopOnSilence { armTimer(seconds: 8) }   // give up if nobody speaks
-        } catch {
-            errorMessage = "Couldn't start listening: \(error.localizedDescription)"
-            Breadcrumb.log("start failed: \(error.localizedDescription) [\(String(describing: type(of: error)))]")
-            cleanup()
+            let scale = 1 / Float(channels)
+            for i in 0..<frames { out[i] *= scale }
+            return out
         }
-    }
-
-    private func makeRequest(for recognizer: SFSpeechRecognizer) -> SFSpeechAudioBufferRecognitionRequest {
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.contextualStrings = vocabulary?() ?? []
-        if continuous {
-            request.addsPunctuation = true
-            request.taskHint = .dictation
-        }
-        if (lightweight && preferOnDevice || bargeIn), recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
-        self.request = request
-        spike.onDevice = request.requiresOnDeviceRecognition
-        return request
-    }
-
-    private func beginTask(recognizer: SFSpeechRecognizer, request: SFSpeechAudioBufferRecognitionRequest, id: Int) {
-        task = Self.startTask(recognizer: recognizer, request: request) { [weak self] text, words, isFinal, done in
-            guard let self else { return }
-            Task { @MainActor in
-                guard self.sessionID == id else { return }
-                if let text {
-                    self.words = words
-                    self.spike.record(words, isFinal: isFinal)
-                    self.transcript = text
-                    self.onPartial?(text)
-                    if self.autoStopOnSilence && !text.isEmpty { self.armTimer(seconds: 1.6) }
-                }
-                if done { self.finish() }
+        if let data = buffer.int16ChannelData {
+            var out = [Float](repeating: 0, count: frames)
+            for c in 0..<channels {
+                let ch = data[c]
+                for i in 0..<frames { out[i] += Float(ch[i]) / 32768 }
             }
+            let scale = 1 / Float(channels)
+            for i in 0..<frames { out[i] *= scale }
+            return out
         }
-    }
-
-    /// Ends the current recognition and starts a fresh one on the microphone that is already running. The audio session and
-    /// engine are not touched, so nothing can fail on the audio side and no speech is missed. False if the mic is not running.
-    @discardableResult
-    func restartRecognition() -> Bool {
-        guard isRecording, let recognizer, recognizer.isAvailable else { return false }
-        sessionID += 1
-        let id = sessionID
-        task?.cancel()
-        task = nil
-        request?.endAudio()
-        transcript = ""
-        words = []
-        delivered = false
-        let request = makeRequest(for: recognizer)
-        capture.swap(to: request)
-        beginTask(recognizer: recognizer, request: request, id: id)
-        Breadcrumb.log("recognition restarted on the running mic")
-        return true
-    }
-
-    /// A fresh audio engine for the next start (used by the last retry after a failure).
-    func resetAudioEngine() { capture.recreateEngine() }
-
-    func stop() {
-        guard isRecording else { return }
-        Breadcrumb.log("stop tapped")
-        isRecording = false
-        timerTask?.cancel()
-        capture.stop()
-        request?.endAudio()
-        let id = sessionID
-        // Safety net in case the recognizer never sends a final result.
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            if self.sessionID == id { self.finish() }
-        }
-    }
-
-    /// Abort without delivering a result.
-    func cancel() {
-        Breadcrumb.log("cancel")
-        delivered = true
-        sessionID += 1
-        cleanup()
-    }
-
-    private func armTimer(seconds: Double) {
-        timerTask?.cancel()
-        timerTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
-            guard !Task.isCancelled, let self, self.isRecording else { return }
-            self.stop()
-        }
-    }
-
-    private func finish() {
-        guard !delivered else { return }
-        delivered = true
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        Breadcrumb.log(spike.summary)
-        cleanup()
-        onFinished?(text)
-    }
-
-    private func cleanup() {
-        timerTask?.cancel()
-        timerTask = nil
-        capture.stop()
-        task?.cancel()
-        task = nil
-        request = nil
-        isRecording = false
-        if !bargeIn { AudioSessionControl.deactivate() }      // the session is still needed for Kitty's voice
-    }
-
-    // Nonisolated so these system callbacks (which run on background queues)
-    // don't inherit the main actor.
-    nonisolated private static func speechAuthorized() async -> Bool {
-        await withCheckedContinuation { cont in
-            SFSpeechRecognizer.requestAuthorization { status in
-                cont.resume(returning: status == .authorized)
-            }
-        }
-    }
-
-    nonisolated private static func startTask(recognizer: SFSpeechRecognizer,
-                                              request: SFSpeechAudioBufferRecognitionRequest,
-                                              onUpdate: @escaping @Sendable (String?, [SpokenWord], Bool, Bool) -> Void) -> SFSpeechRecognitionTask {
-        recognizer.recognitionTask(with: request) { result, error in
-            let isFinal = result?.isFinal ?? false
-            onUpdate(result?.bestTranscription.formattedString,
-                     result.map { spokenWords(from: $0.bestTranscription) } ?? [],
-                     isFinal,
-                     isFinal || error != nil)
-        }
-    }
-
-    /// Full-transcription view: every segment with confidence, timing and the recogniser's alternatives.
-    nonisolated static func spokenWords(from transcription: SFTranscription) -> [SpokenWord] {
-        transcription.segments.map { seg in
-            SpokenWord(text: seg.substring, confidence: seg.confidence,
-                       timestamp: seg.timestamp, duration: seg.duration,
-                       alternatives: seg.alternativeSubstrings)
-        }
+        return []
     }
 }
 
@@ -356,10 +130,11 @@ nonisolated final class AudioCapture: @unchecked Sendable {
 
     /// Where the microphone buffers go. It can be swapped while the engine keeps running (see `swap(to:)`).
     private let lock = NSLock()
-    private var sink: SFSpeechAudioBufferRecognitionRequest?
+    private var sink: AudioSink?
 
-    private func setSink(_ request: SFSpeechAudioBufferRecognitionRequest?) {
-        lock.lock(); sink = request; lock.unlock()
+    private func setSink(_ new: AudioSink?) {
+        lock.lock(); let old = sink; sink = new; lock.unlock()
+        if let old, old !== new { old.finish() }
     }
 
     private func append(_ buffer: AVAudioPCMBuffer) {
@@ -367,11 +142,11 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         target?.append(buffer)
     }
 
-    /// Point the running microphone at a new recognition request. No engine or session change.
-    func swap(to request: SFSpeechAudioBufferRecognitionRequest) { setSink(request) }
+    /// Point the running microphone at a new consumer (Apple Speech or Moonshine). No engine or session change.
+    func swap(to newSink: AudioSink?) { setSink(newSink) }
 
-    func start(feeding request: SFSpeechAudioBufferRecognitionRequest, voiceProcessing: Bool = false) async throws {
-        setSink(request)
+    func start(feeding newSink: AudioSink, voiceProcessing: Bool = false) async throws {
+        setSink(newSink)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             queue.async {
                 do {

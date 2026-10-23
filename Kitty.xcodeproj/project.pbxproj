@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C11E15C0B99369D9BD105989 /* MoonshineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01E15C0B99369D9BD105989 /* MoonshineTests.swift */; };
+		C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */; };
+		C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C033EDD0E8E54141063861E4 /* BrandFixer.swift */; };
+		C184B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift in Sources */ = {isa = PBXBuildFile; fileRef = C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */; };
+		C133B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C033B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift */; };
+		C17D1021BFFEC3A83E05C971 /* AppleSpeech.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */; };
 		AB00570000000000000000F2 /* Moonshine in Resources */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000F1 /* Moonshine */; };
 		AB00570000000000000000F4 /* MoonshineVoice in Frameworks */ = {isa = PBXBuildFile; productRef = AB00570000000000000000F5 /* MoonshineVoice */; };
 		A10000000000000000000302 /* Agent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000301 /* Agent.swift */; };
@@ -46,6 +52,12 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		C01E15C0B99369D9BD105989 /* MoonshineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoonshineTests.swift; sourceTree = "<group>"; };
+		C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPolicy.swift; sourceTree = "<group>"; };
+		C033EDD0E8E54141063861E4 /* BrandFixer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandFixer.swift; sourceTree = "<group>"; };
+		C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndianVocabulary.swift; sourceTree = "<group>"; };
+		C033B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoonshineRecognizer.swift; sourceTree = "<group>"; };
+		C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSpeech.swift; sourceTree = "<group>"; };
 		AB00570000000000000000F1 /* Moonshine */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Moonshine; sourceTree = "<group>"; };
 		A10000000000000000000301 /* Agent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Agent.swift; sourceTree = "<group>"; };
 		A10000000000000000000303 /* BulkAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BulkAgent.swift; sourceTree = "<group>"; };
@@ -112,6 +124,11 @@
 				A1000000000000000000040E /* BargeIn.swift */,
 				A10000000000000000000600 /* UnclearAnswer.swift */,
 				A10000000000000000000500 /* LongTurn.swift */,
+				C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */,
+				C033EDD0E8E54141063861E4 /* BrandFixer.swift */,
+				C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */,
+				C033B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift */,
+				C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */,
 				AB00570000000000000000F1 /* Moonshine */,
 				A10000000000000000000020 /* Tests */,
 				A10000000000000000000012 /* Products */,
@@ -134,6 +151,7 @@
 				A10000000000000000000410 /* BargeInTests.swift */,
 				A10000000000000000000602 /* UnclearAnswerTests.swift */,
 				A10000000000000000000502 /* LongTurnTests.swift */,
+				C01E15C0B99369D9BD105989 /* MoonshineTests.swift */,
 				FA9E00000000000000000001 /* VaguePlaceholderTests.swift */,
 				B0A7C0DE0000000000000001 /* BulkRoutineTests.swift */,
 				A1000000000000000000040C /* VocabularyTests.swift */,
@@ -249,6 +267,11 @@
 				A1000000000000000000040F /* BargeIn.swift in Sources */,
 				A10000000000000000000601 /* UnclearAnswer.swift in Sources */,
 				A10000000000000000000501 /* LongTurn.swift in Sources */,
+				C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */,
+				C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */,
+				C184B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift in Sources */,
+				C133B9AAF8D5DA1A65E25469 /* MoonshineRecognizer.swift in Sources */,
+				C17D1021BFFEC3A83E05C971 /* AppleSpeech.swift in Sources */,
 				A1000000000000000000040B /* VocabularyMatcher.swift in Sources */,
 				A10000000000000000000409 /* VocabularyProvider.swift in Sources */,
 				A10000000000000000000405 /* SpeechCleaner.swift in Sources */,
@@ -265,6 +288,7 @@
 				A10000000000000000000411 /* BargeInTests.swift in Sources */,
 				A10000000000000000000603 /* UnclearAnswerTests.swift in Sources */,
 				A10000000000000000000503 /* LongTurnTests.swift in Sources */,
+				C11E15C0B99369D9BD105989 /* MoonshineTests.swift in Sources */,
 				FA9E00000000000000000002 /* VaguePlaceholderTests.swift in Sources */,
 				B0A7C0DE0000000000000002 /* BulkRoutineTests.swift in Sources */,
 				A1000000000000000000040D /* VocabularyTests.swift in Sources */,
