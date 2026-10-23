@@ -230,6 +230,7 @@ final class MoonshineRecognizer: TurnRecognizer {
     private var delivered = false
     private var lines: [(id: UInt64, text: String, complete: Bool)] = []
     private var unloadTask: Task<Void, Never>?
+    private var protectedNames: [String] = []          // the household's own names: never "repaired" into a brand
 
     init(engine: StreamingEngine = MoonshineEngine(), capture: AudioCapture = AudioCapture()) {
         self.engine = engine
@@ -328,7 +329,8 @@ final class MoonshineRecognizer: TurnRecognizer {
 
     /// The names added a minute ago should be expected from the next turn on.
     private func refreshKeyTerms() {
-        let terms = keyTerms()
+        protectedNames = vocabulary?() ?? []
+        let terms = KeyTerms.build(household: protectedNames)
         let engine = engine
         queue.async { try? engine.setKeyTerms(terms) }
     }
@@ -354,8 +356,14 @@ final class MoonshineRecognizer: TurnRecognizer {
     }
 
     /// One line event from the engine: update the transcript and tell the conversation.
-    func received(_ update: TranscriptLineUpdate, session id: Int) {
+    func received(_ rawUpdate: TranscriptLineUpdate, session id: Int) {
         guard id == sessionID else { return }
+        var update = rawUpdate
+        let repaired = BrandFixer.fix(update.text, protectedNames: protectedNames)
+        if !repaired.changes.isEmpty {
+            update.text = repaired.text
+            if update.isComplete { Breadcrumb.log("brand fix: " + repaired.changes.map { "\($0.from) -> \($0.to)" }.joined(separator: ", ")) }
+        }
         if let i = lines.firstIndex(where: { $0.id == update.id }) {
             lines[i].text = update.text
             lines[i].complete = lines[i].complete || update.isComplete
