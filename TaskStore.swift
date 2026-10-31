@@ -73,11 +73,16 @@ struct TaskLookupSpec {
     var status: StatusFilter = .open
     var overdueOnly = false           // "what is overdue"
     var profileID: UUID? = nil        // only this list
+    var label: String? = nil          // only tasks carrying this label ("Zomato")
+    /// Tasks shown with the label even though they do not carry it: the ones whose own words (or a related word) match.
+    var alsoIDs: Set<UUID> = []
+    /// Empty when `alsoIDs` were found by their words; otherwise why they are there ("tagged Zomato or Kitty").
+    var alsoWhy = ""
 }
 
 struct PlannedTask {
     var title: String
-    var category: TaskCategory
+    var category: TaskCategory?         // only when the user said it; never guessed from the title
     var due: Date?
     /// nil = one-off task. Otherwise how it repeats.
     var recurrence: RecurrenceSpec? = nil
@@ -88,6 +93,12 @@ struct PlannedTask {
     var categoryName: String? = nil
     var priority: String? = nil
     var notes: String? = nil
+    var reason: String? = nil
+    var utteranceID: UUID? = nil         // the one Utterance (the raw words of the turn) this task came from
+    var instructions: String? = nil      // quantity, dosage, variant, method: what the user said about how, never system text
+    var schedule: String? = nil          // a repeat, in the user's words (kept even when Swift could not read it)
+    var softDue: String? = nil           // a timeframe that is not a day ("next week"), kept as said
+    var evidence: [String: String] = [:] // the user's words that justified each value (see `TaskItem.evidence`)
 }
 
 /// How a routine repeats.
@@ -129,9 +140,16 @@ struct Routine: Identifiable, Codable, Hashable {
     var startDate: Date? = nil        // when the routine was created: anchors "every N" and stops backfilling earlier days
     var slot: DaySlot? = nil          // when in the day it is usually done
     var timeMinutes: Int? = nil       // exact time, if one was given
+    var reason: String? = nil         // why, when the user said it; copied to each day's task
+    var said: String? = nil           // old data only: the cleaned words it came from. New routines link an Utterance instead.
+    var utteranceID: UUID? = nil      // the raw words of the turn it was made in; copied to each day's task
+    var instructions: String? = nil   // what the user said about how (quantity, method); copied to each day's task
+    var schedule: String? = nil       // the repeat in the user's own words, kept beside the parsed one
+    var createdAt: Date? = nil        // when it was saved; nil for routines saved before this was kept
 
+    /// Who it is for, only when the user said it; empty means nobody was named (no person is shown or assumed).
     var effectiveAssignee: String {
-        assignee.map(Assignee.normalize) ?? ((category ?? .guess(from: title)) == .househelp ? Assignee.househelp : Assignee.me)
+        assignee.map(Assignee.normalize).flatMap { $0.isEmpty ? nil : $0 } ?? ""
     }
 
     func isDue(on date: Date) -> Bool {
@@ -189,6 +207,7 @@ struct Routine: Identifiable, Codable, Hashable {
 struct PlaybookStep: Codable, Hashable {
     var title: String
     var assignee: String? = nil
+    var instructions: String? = nil
 }
 
 /// A procedure the user taught Kitty ("how I make biryani"). Kitty never invents the steps.
@@ -197,6 +216,7 @@ struct Playbook: Identifiable, Codable, Hashable {
     var name: String
     var category: TaskCategory? = nil
     var steps: [PlaybookStep]
+    var ordered: Bool? = nil            // true when the steps are a sequence (copied from a list the user marked "Steps in order")
 }
 
 // MARK: - The same chore listed more than once
@@ -227,6 +247,54 @@ enum TaskStacking {
     }
 }
 
+// MARK: - Order
+
+/// The one order every list and preview uses, applied here in Swift and never asked of the model: what is overdue comes first,
+/// then the day slot from morning to night, then the time. Ties keep the order they had.
+/// An exact time wins over a slot; a task with neither goes to the end of the day ("anytime").
+enum TaskSorting {
+    struct Key: Comparable {
+        var overdue: Bool
+        var day: Double
+        var minutes: Int
+        var index: Int
+
+        static func < (a: Key, b: Key) -> Bool {
+            if a.overdue != b.overdue { return a.overdue }
+            if a.day != b.day { return a.day < b.day }
+            if a.minutes != b.minutes { return a.minutes < b.minutes }
+            return a.index < b.index
+        }
+    }
+
+    /// `acrossDays`: group by day first (a list that shows several days). Otherwise the day is ignored apart from overdue.
+    static func key(due: Date?, minutes: Int, index: Int, acrossDays: Bool, now: Date = .now) -> Key {
+        let cal = Calendar.current
+        let day = due.map { cal.startOfDay(for: $0) }
+        let overdue = day.map { $0 < cal.startOfDay(for: now) } ?? false
+        return Key(overdue: overdue && !acrossDays, day: acrossDays ? (day?.timeIntervalSince1970 ?? 0) : 0, minutes: minutes, index: index)
+    }
+
+    static func ordered(_ items: [TaskItem], acrossDays: Bool = false) -> [TaskItem] {
+        items.enumerated().sorted {
+            key(due: $0.element.effectiveDue, minutes: $0.element.sortMinutes, index: $0.offset, acrossDays: acrossDays)
+                < key(due: $1.element.effectiveDue, minutes: $1.element.sortMinutes, index: $1.offset, acrossDays: acrossDays)
+        }.map(\.element)
+    }
+
+    /// The same order for the tasks in a preview that is waiting for Save. Nothing is ever dropped or changed, only moved.
+    static func ordered(_ items: [DraftItem]) -> [DraftItem] {
+        items.enumerated().sorted {
+            key(due: $0.element.due, minutes: minutes($0.element), index: $0.offset, acrossDays: false)
+                < key(due: $1.element.due, minutes: minutes($1.element), index: $1.offset, acrossDays: false)
+        }.map(\.element)
+    }
+
+    private static func minutes(_ d: DraftItem) -> Int {
+        d.timeMinutes ?? (d.slot ?? .anytime).defaultMinutes
+    }
+}
+
 // MARK: - Lists ("profiles") you create by talking
 
 /// A named place for items, made the first time you mention it: "add milk to my Blinkit order".
@@ -234,7 +302,10 @@ struct TaskProfile: Identifiable, Codable, Hashable {
     var id = UUID()
     var name: String
     var createdAt = Date()
+    var ordered: Bool? = nil           // true only when the user said the items go in a sequence; nil reads as false
+    var requestID: UUID? = nil         // the Utterance of the request that created the list
 
+    var isOrdered: Bool { ordered ?? false }
     var symbol: String { Self.symbol(for: name) }
 
     static func symbol(for name: String) -> String {
@@ -250,99 +321,22 @@ struct TaskProfile: Identifiable, Codable, Hashable {
     }
 }
 
-// MARK: - The Kitty guide: how Kitty organises and how she replies
+// MARK: - Household words
 
-/// Plain-text rules the user can edit. They are added to the instructions of every on-device model call,
-/// so they have to stay short (the model's memory window is small).
+/// Names and spellings the user wants Kitty to recognise ("Rani is the house help"). They are reference vocabulary for
+/// hearing and spelling, never facts or tasks. How Kitty understands a request is the model's job, not a settings screen.
 nonisolated enum KittyGuideStore {
-    static let organiseKey = "kitty.guide.organise"
-    static let respondKey = "kitty.guide.respond"
-    static let listKey = "kitty.guide.list"
     static let profileNamesKey = "kitty.profileNames"
     static let householdKey = "kitty.guide.household"
-    static let smartKey = "kitty.guide.smartReplies"
-    static let budget = 2400            // characters sent to the model per call
-
-    static let defaultOrganise = """
-    - Order each day by time of day: morning first, then afternoon, evening and night. Tasks with no time go last.
-    - Keep playbook steps in the order they were taught. Never reorder them and never invent steps.
-    - Show overdue tasks first. Show the same chore only once with a count, like "Clean dishes +2".
-    - House chores are for the Househelp. Everything else is for Me unless a person is named. "My tasks" means Me and Family.
-    - A task with no date is due today.
-    - If a repeating task has no day, or a request is unclear, ask one short question instead of guessing.
-    - Never create tasks the user did not say.
-    """
-
-    static let defaultRespond = """
-    - Answer first, in one to three short sentences that sound natural when spoken.
-    - Use only the facts you are given. Never invent or recalculate numbers, dates or names.
-    - Mention overdue items and who they are for.
-    - For long lists, name the first three and say "and N more". The full list is shown on screen.
-    - Offer at most one helpful next step, such as moving overdue work to tomorrow.
-    - Be warm and brief. No emoji.
-    """
-
-    static let defaultList = """
-    - A list is a named place for items, like "Blinkit order", "Goa trip" or "Party shopping". Items on a list have no due date unless the user gives one.
-    - "Add X to my Y order" or "put X in the Y list": X is the item and Y is the list. Never put the list name in the item.
-    - Reuse an existing list when the name is close ("Blinkit" means "Blinkit order"). Only create a new list when none fits, and say it is new.
-    - "I placed the order" or "got everything" means every item on that list is done. "Clear the list" removes the items. Always confirm before deleting a list.
-    - If it is not clear which list the user means, ask.
-    """
-
-    static var list: String { UserDefaults.standard.string(forKey: listKey) ?? defaultList }
-    static var profileNames: [String] { UserDefaults.standard.stringArray(forKey: profileNamesKey) ?? [] }
-
-    static var organise: String { UserDefaults.standard.string(forKey: organiseKey) ?? defaultOrganise }
-    static var respond: String { UserDefaults.standard.string(forKey: respondKey) ?? defaultRespond }
     static var household: String { UserDefaults.standard.string(forKey: householdKey) ?? "" }
-    static var smartReplies: Bool { (UserDefaults.standard.object(forKey: smartKey) as? Bool) ?? true }
-
-    enum Purpose { case understand, reply }
-
-    /// The part of the guide a model call needs, ready to append to its instructions.
-    static func block(_ purpose: Purpose) -> String {
-        var parts: [String] = []
-        parts.append(purpose == .understand ? organise : respond)
-        if purpose == .understand {
-            parts.append(list)
-            let names = profileNames
-            if !names.isEmpty { parts.append("Existing lists: " + names.joined(separator: ", ")) }
-        }
-        let home = household.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !home.isEmpty { parts.append("About this household:\n" + home) }
-        let text = parts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: "\n\n")
-        guard !text.isEmpty else { return "" }
-        return "\n\nFollow this guide from the user:\n" + String(text.prefix(budget))
-    }
 }
 
-/// What the guide editor shows and edits.
+/// What the household editor shows and edits.
 @MainActor
 final class KittyGuide: ObservableObject {
     static let shared = KittyGuide()
-
-    @Published var organise: String { didSet { UserDefaults.standard.set(organise, forKey: KittyGuideStore.organiseKey) } }
-    @Published var respond: String { didSet { UserDefaults.standard.set(respond, forKey: KittyGuideStore.respondKey) } }
-    @Published var list: String { didSet { UserDefaults.standard.set(list, forKey: KittyGuideStore.listKey) } }
     @Published var household: String { didSet { UserDefaults.standard.set(household, forKey: KittyGuideStore.householdKey) } }
-    @Published var smartReplies: Bool { didSet { UserDefaults.standard.set(smartReplies, forKey: KittyGuideStore.smartKey) } }
-
-    init() {
-        organise = KittyGuideStore.organise
-        respond = KittyGuideStore.respond
-        list = KittyGuideStore.list
-        household = KittyGuideStore.household
-        smartReplies = KittyGuideStore.smartReplies
-    }
-
-    func reset() {
-        organise = KittyGuideStore.defaultOrganise
-        respond = KittyGuideStore.defaultRespond
-        list = KittyGuideStore.defaultList
-        household = ""
-        smartReplies = true
-    }
+    init() { household = KittyGuideStore.household }
 }
 
 // MARK: - Time of day
@@ -476,9 +470,45 @@ struct PanelFilter: Equatable {
     var day: PanelDay = .today
     var status: PanelStatus = .open
     var profileID: UUID? = nil          // show one list; the day filter is ignored for a list
+    var label: String? = nil            // show the tasks carrying one label
+    /// Tasks shown with the label although they only mention it (see `TaskLookupSpec.alsoIDs`).
+    var alsoIDs: Set<UUID> = []
+    /// The view answers a question that narrowed it (a day, a person, a category, a label): what was asked for comes first.
+    var requestedFirst = false
+    /// Only tasks created on or after this moment, newest first (the home screen's "New"). Tasks with no creation date are left out.
+    var addedSince: Date? = nil
+}
+
+/// Where the tasks that are still open from before go in a list.
+enum OverdueSpot: Equatable {
+    case top             // the home screen and the Overdue chip: the backlog leads
+    case noteBelow       // a day was asked for: one red line under that day's tasks
+    case sectionBelow    // a person, category or label was asked for: the overdue ones match, so they are listed, after
+}
+
+extension TaskLookupSpec {
+    /// Did the question narrow the view? Then what it asked for is shown, and said, first.
+    var isNarrowing: Bool { label != nil || category != nil || !assignees.isEmpty || day != .anytime }
 }
 
 extension PanelFilter {
+    /// One rule for the inline list, the full list and the spoken text.
+    var overdueSpot: OverdueSpot {
+        guard profileID == nil, status == .open || status == .all else { return .top }
+        if day == .tomorrow { return .noteBelow }
+        guard requestedFirst else { return .top }
+        return day == .today ? .noteBelow : .sectionBelow
+    }
+
+    /// Looking at tomorrow (or at today, after a question), what is still open from before is one line under the asked-for tasks.
+    var overdueIsNoteBelow: Bool { overdueSpot == .noteBelow }
+
+    /// "4 overdue from today" for the one line under tomorrow's tasks.
+    static func overdueNote(count: Int) -> String { "\(count) overdue from today" }
+
+    /// The same line for the view being shown: today's tasks say "4 overdue", tomorrow's say "4 overdue from today".
+    func noteText(count: Int) -> String { day == .today ? "\(count) overdue" : Self.overdueNote(count: count) }
+
     /// The view that matches a question Kitty just answered.
     init(spec: TaskLookupSpec) {
         let status: PanelStatus
@@ -496,6 +526,56 @@ extension PanelFilter {
                   day: spec.day == .today ? .today : (spec.day == .tomorrow ? .tomorrow : .all),
                   status: status)
         self.profileID = spec.profileID
+        self.label = spec.label
+        self.alsoIDs = spec.alsoIDs
+        self.requestedFirst = spec.isNarrowing && spec.profileID == nil
+    }
+}
+
+/// The asked-for tasks first, the overdue ones after. Used by the list under a reply, the full list and the tests, so they
+/// cannot disagree with each other or with what Kitty says.
+struct PanelOrder {
+    var requested: [TaskItem]
+    var overdue: [TaskItem]
+    var spot: OverdueSpot
+
+    init(_ data: (overdue: [TaskItem], due: [TaskItem]), filter: PanelFilter) {
+        requested = data.due
+        overdue = data.overdue
+        spot = filter.overdueSpot
+    }
+
+    /// Every task in the order shown.
+    var flat: [TaskItem] { spot == .top ? overdue + requested : requested + overdue }
+
+    /// The list under a reply: at most `limit` cards. The asked-for tasks take the slots first; overdue ones get what is left
+    /// (when they match the question) or one line (when a day was asked for).
+    struct Inline {
+        var cards: [TaskStack]            // in order, the asked-for tasks first
+        var overdueCards: [TaskStack]     // under an "Overdue" label, after the cards
+        var overdueHidden: Int            // overdue tasks not shown as cards: one red line that opens the full list
+        var shown: Int { cards.count + overdueCards.count }
+    }
+
+    func inline(limit: Int = 5) -> Inline {
+        switch spot {
+        case .top:
+            return Inline(cards: Array(TaskStacking.stacks(flat).prefix(limit)), overdueCards: [], overdueHidden: 0)
+        case .noteBelow:
+            return Inline(cards: Array(TaskStacking.stacks(requested).prefix(limit)), overdueCards: [], overdueHidden: overdue.count)
+        case .sectionBelow:
+            let cards = Array(TaskStacking.stacks(requested).prefix(limit))
+            let late = TaskStacking.stacks(overdue)
+            let room = max(0, limit - cards.count)
+            let shown = Array(late.prefix(room))
+            let hidden = late.dropFirst(room).reduce(0) { $0 + $1.items.count }
+            return Inline(cards: cards, overdueCards: shown, overdueHidden: hidden)
+        }
+    }
+
+    /// The same two groups for a list of tasks that is not split yet (the spoken text of a question with no day).
+    static func split(_ items: [TaskItem]) -> (requested: [TaskItem], overdue: [TaskItem]) {
+        (items.filter { !$0.isOverdue }, items.filter(\.isOverdue))
     }
 }
 
@@ -505,6 +585,11 @@ enum Assignee {
     static let me = "Me"
     static let family = "Family"
     static let househelp = "Househelp"
+
+    private static let roles: Set<String> = ["me", "family", "househelp", "cook", "driver", "gardener", "nanny", "chef"]
+
+    /// A role ("cook", "me") rather than a person's name.
+    static func isRole(_ name: String) -> Bool { roles.contains(normalize(name).lowercased()) }
 
     /// "the maid" / "house help" -> Househelp, "I" -> Me, "everyone" -> Family, other names are capitalised.
     static func normalize(_ raw: String) -> String {
@@ -531,7 +616,8 @@ enum Assignee {
         func has(_ list: [String]) -> Bool { list.contains { t.contains($0) } }
 
         if has([" maid ", " maid's ", " househelp ", " househelp's ", " house help ", " house help's ", " house helper ",
-                " helper ", " helper's ", " housemaid ", " housekeeper ", " domestic help "]) { return househelp }
+                " helper ", " helper's ", " housemaid ", " housekeeper ", " domestic help ",
+                " the help ", " my help ", " our help ", " the help's "]) { return househelp }
         for role in ["cook", "driver", "gardener", "nanny", "chef"] {
             if has([" the \(role) ", " my \(role) ", " our \(role) ", " ask \(role) ", " \(role)'s "]) { return role.capitalized }
         }
@@ -545,6 +631,159 @@ enum Assignee {
         if has(mePhrases) { return me }
         return nil
     }
+}
+
+// MARK: - Labels
+
+/// Name helpers for tags (category and list names). Free-form labels no longer exist.
+nonisolated enum TaskLabels {
+    /// Words that name no particular thing: never offered as a name to tap or search by.
+    static let generic: Set<String> = [
+        "task", "tasks", "other", "misc", "miscellaneous", "general", "stuff", "things", "todo", "to do", "to-do", "chores", "chore",
+        "item", "items", "none", "unknown",
+        "update", "updates", "get", "new", "reminder", "reminders", "important", "urgent", "high", "low", "medium", "priority",
+        "today", "tomorrow", "tonight", "yesterday", "morning", "afternoon", "evening", "night", "daily", "weekly", "monthly",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "me", "myself", "you", "my", "project"]
+
+    /// A word reduced so "designs" and "design" match.
+    static func stem(_ word: String) -> String {
+        var w = word.lowercased().filter { $0.isLetter || $0.isNumber }
+        for suffix in ["ing", "es", "ed", "s"] where w.count > suffix.count + 2 && w.hasSuffix(suffix) {
+            w = String(w.dropLast(suffix.count)); break
+        }
+        return w
+    }
+
+    /// A whole label reduced word by word: "Zomato", "zomato" and "Designs"/"Design" are each one label.
+    static func stemKey(_ s: String) -> String {
+        s.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { stem(String($0)) }.joined(separator: " ")
+    }
+
+    static func same(_ a: String, _ b: String) -> Bool {
+        let k = stemKey(a)
+        return !k.isEmpty && k == stemKey(b)
+    }
+
+    /// Words that make a list a list ("Blinkit order", "Goa trip list"): left out of the short name.
+    static let listWords: Set<String> = ["order", "list", "cart", "basket", "shopping", "checklist", "wishlist", "profile"]
+
+    /// The name people say for a list: "Blinkit order" is also "Blinkit". Empty when nothing is left, so the full name is used.
+    static func listShort(_ name: String) -> String {
+        let kept = name.split(whereSeparator: { $0.isWhitespace }).filter { !listWords.contains($0.lowercased()) }
+        return kept.joined(separator: " ")
+    }
+
+    /// The main label first, then the extras, once each (case-insensitive), the first spelling kept.
+    static func merged(primary: String, extras: [String]) -> [String] {
+        var out: [String] = []
+        for raw in [primary] + extras {
+            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty, !out.contains(where: { $0.lowercased() == t.lowercased() }) else { continue }
+            out.append(t)
+        }
+        return out
+    }
+}
+
+// MARK: - Tags
+
+/// One searchable name on a task. The type says where it came from (and gets its icon); search ignores the type.
+struct TaskTag: Equatable, Hashable {
+    enum Kind: String, CaseIterable {
+        case person, category, list, priority, routine, playbook
+
+        var icon: String {
+            switch self {
+            case .person: return "person.fill"
+            case .category: return "folder.fill"
+            case .list: return "tray.full.fill"
+            case .priority: return "flag.fill"
+            case .routine: return "repeat"
+            case .playbook: return "list.bullet.rectangle"
+            }
+        }
+
+        /// How a reply says it: "3 tagged Kitty", "2 for Kitty", "1 on your Kitty list".
+        func phrase(_ count: Int, _ name: String) -> String {
+            switch self {
+            case .person: return "\(count) for \(name)"
+            case .list: return "\(count) on your \(name) list"
+            default: return "\(count) tagged \(name)"
+            }
+        }
+    }
+    var kind: Kind
+    var name: String
+}
+
+/// A name in use as a tag, with every type it exists as and how many open tasks carry it.
+struct TagEntry: Equatable {
+    var name: String
+    var kinds: Set<TaskTag.Kind>
+    var count: Int
+}
+
+// MARK: - Utterances
+
+/// What the user actually said in one turn, as heard (the raw words, never cleaned or rewritten). One `Utterance` is written when
+/// a Save is confirmed, and every task or routine made from that turn points to it with `utteranceID`, so a turn that made five
+/// tasks keeps its words once. A draft that is abandoned stores nothing.
+struct Utterance: Identifiable, Codable, Equatable {
+    enum Source: String, Codable { case voice, typed }
+    var id = UUID()
+    var rawText: String
+    var createdAt = Date()
+    var source: Source = .voice
+}
+
+/// The utterances, as JSON in UserDefaults like the tasks. Kept only while something still points to them.
+nonisolated final class UtteranceStore: @unchecked Sendable {
+    static let shared = UtteranceStore()
+    static let key = "kitty.utterances"
+
+    private let defaults: UserDefaults
+    private let lock = NSLock()
+    private var stored: [Utterance]
+    var all: [Utterance] { lock.lock(); defer { lock.unlock() }; return stored }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let data = defaults.data(forKey: Self.key), let list = try? JSONDecoder().decode([Utterance].self, from: data) { stored = list } else { stored = [] }
+    }
+
+    func utterance(_ id: UUID?) -> Utterance? { id.flatMap { id in all.first { $0.id == id } } }
+
+    /// Stores the words of one turn and returns its id. Nil, and nothing stored, for empty words or when "Save task details" is off.
+    @discardableResult
+    func record(_ rawText: String, source: Utterance.Source = .voice, createdAt: Date = .now) -> UUID? {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Trace.recording, !text.isEmpty else { return nil }
+        let u = Utterance(rawText: text, createdAt: createdAt, source: source)
+        lock.lock(); stored.append(u); lock.unlock()
+        persist()
+        return u.id
+    }
+
+    /// Drops the utterances nothing points to any more.
+    func prune(keeping ids: Set<UUID>) {
+        lock.lock()
+        let kept = stored.filter { ids.contains($0.id) }
+        let changed = kept.count != stored.count
+        stored = kept
+        lock.unlock()
+        if changed { persist() }
+    }
+
+    func clear() { lock.lock(); stored = []; lock.unlock(); persist() }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(all) { defaults.set(data, forKey: Self.key) }
+    }
+}
+
+extension TaskItem {
+    /// The words a task keeps about itself beyond its title: why (as the model gave it) and the words it was said in.
+    var storedWords: String { [reason, UtteranceStore.shared.utterance(utteranceID)?.rawText].compactMap { $0 }.joined(separator: " ") }
 }
 
 // MARK: - Model
@@ -564,26 +803,91 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var categoryName: String? = nil     // the specific category the user's words point to: "Bathroom", "Groceries"
     var priority: String? = nil         // "low", "medium" or "high", only if the user said so
     var notes: String? = nil
+    var labels: [String]? = nil         // legacy: free-form labels saved by older versions. Still read when loading, never written or shown
+    var reason: String? = nil           // why, in a few of the user's own words, when they said it (checked by Swift)
+    var said: String? = nil             // old data only: the cleaned words. Never written any more; the raw words live in one Utterance.
+    var utteranceID: UUID? = nil        // the Utterance (raw words of the turn) this task came from; nil when none was kept
+    var instructions: String? = nil     // what the user said about how: quantity, dosage, variant, method. Never system text (that is `notes`)
+    var schedule: String? = nil         // the repeat in the user's words, when the task came from a repeat
+    var softDue: String? = nil          // a timeframe that is not a day ("next week"), as said; shown, never turned into a date
+    var createdAt: Date? = nil          // set when saved; nil for tasks saved before this was kept (shown as unknown)
+    var completedAt: Date? = nil        // set when completed, cleared when reopened
+    /// The words of the user that justified each value the task holds ("assignee": "ask Rani to"), or "added by you" for a hand edit.
+    /// Nil for tasks saved before this was kept: they show no evidence line.
+    var evidence: [String: String]? = nil
 }
 
 extension TaskItem {
-    var effectiveCategory: TaskCategory { category ?? .guess(from: title) }
+    /// The category the user named. A task with none is in "Other" for the category filters; the category is never guessed from the title.
+    var effectiveCategory: TaskCategory { category ?? .other }
 
-    /// Who it is for. Tasks with nobody named go to the house help if it is a house chore, otherwise to Me.
+    /// Who it is for, only when the user said it; empty means nobody was named. No person is assumed from the category.
     var effectiveAssignee: String {
-        assignee.map(Assignee.normalize).flatMap { $0.isEmpty ? nil : $0 }
-            ?? (effectiveCategory == .househelp ? Assignee.househelp : Assignee.me)
+        assignee.map(Assignee.normalize).flatMap { $0.isEmpty ? nil : $0 } ?? ""
     }
 
-    /// Every task has a day; older tasks without one count as today.
-    var effectiveDue: Date { dueDate ?? Calendar.current.startOfDay(for: .now) }
+    /// Whether the task is for one of these people. Nobody named counts as the owner's own ("Me", "Family"): such a task stays in
+    /// "Mine" and is never put under another person. An empty list means anyone.
+    func isFor(_ names: [String]) -> Bool {
+        let wanted = names.map { $0.lowercased() }
+        if wanted.isEmpty { return true }
+        let who = effectiveAssignee.lowercased()
+        if who.isEmpty { return wanted.contains(Assignee.me.lowercased()) || wanted.contains(Assignee.family.lowercased()) }
+        return wanted.contains(who)
+    }
+
+    /// Whether the user gave a day. A task with none has no day: it is not in Today and not overdue, and it sorts after the dated ones.
+    var hasDate: Bool { dueDate != nil }
+
+    /// The day for sorting and filtering. An undated task has none: it is far in the future, so no day filter matches it.
+    var effectiveDue: Date { dueDate ?? .distantFuture }
 
     /// An item on a named list ("milk" on "Blinkit order") with no date of its own. It lives on its list, not in
     /// Today or Overdue.
     var isListItem: Bool { profileID != nil && dueDate == nil }
 
     /// What the category tag shows: the specific name if there is one ("Bathroom"), otherwise the built-in category.
-    var categoryLabel: String { categoryName ?? effectiveCategory.label }
+    /// Empty when the user named no category.
+    var categoryLabel: String { categoryName ?? category?.label ?? "" }
+
+    /// The names to draw under a task: its category, then its list. Nothing else.
+    var tagNames: [String] { TaskLabels.merged(primary: categoryLabel, extras: listName.map { [$0] } ?? []) }
+
+    /// The list this item is on ("Blinkit order"). Playbook steps also have a `group`, but no list.
+    var listName: String? {
+        guard profileID != nil, let g = group?.trimmingCharacters(in: .whitespacesAndNewlines), !g.isEmpty else { return nil }
+        return g
+    }
+
+    /// Every tag the task carries, whatever its type: who it is for, its category, its list, its priority. Days and status are not tags.
+    var tags: [TaskTag] {
+        var out: [TaskTag] = []
+        func add(_ kind: TaskTag.Kind, _ raw: String?) {
+            let name = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, !out.contains(where: { $0.kind == kind && TaskLabels.same($0.name, name) }) else { return }
+            out.append(TaskTag(kind: kind, name: name))
+        }
+        add(.category, categoryLabel)
+        add(.list, listName)
+        add(.person, effectiveAssignee)
+        add(.priority, priority.map { $0.prefix(1).uppercased() + $0.dropFirst() })
+        if routineID != nil { add(.routine, "Routine") }
+        if profileID == nil { add(.playbook, group) }
+        return out
+    }
+
+    /// Does it carry this tag, of any type? Case and plural do not matter. "Blinkit" matches the list "Blinkit order".
+    func hasTag(_ name: String) -> Bool {
+        if tags.contains(where: { TaskLabels.same($0.name, name) }) { return true }
+        if let list = listName {
+            let short = TaskLabels.listShort(list)
+            return !short.isEmpty && TaskLabels.same(short, name)
+        }
+        return false
+    }
+
+    /// The old name for `hasTag`: a label filter now matches every tag type.
+    func hasLabel(_ name: String) -> Bool { hasTag(name) }
 
     /// Playbook steps keep the order you taught; everything else sorts by when in the day it happens.
     var sortSlot: DaySlot {
@@ -603,14 +907,14 @@ extension TaskItem {
 
     /// Whole days past its due date while still open (the backlog).
     var daysOverdue: Int {
-        guard !isDone, !isListItem else { return 0 }
+        guard !isDone, !isListItem, hasDate else { return 0 }
         let cal = Calendar.current
         return max(0, cal.dateComponents([.day], from: cal.startOfDay(for: effectiveDue), to: cal.startOfDay(for: .now)).day ?? 0)
     }
     var isOverdue: Bool { daysOverdue > 0 }
 
     var dueLabel: String {
-        let d = effectiveDue
+        guard let d = dueDate else { return "No date" }
         let cal = Calendar.current
         if cal.isDateInToday(d) { return "Today" }
         if cal.isDateInTomorrow(d) { return "Tomorrow" }
@@ -619,7 +923,10 @@ extension TaskItem {
     }
 
     var subtitle: String {
-        var parts = ["\(effectiveCategory.emoji) \(effectiveCategory.label)", "👤 \(effectiveAssignee)", "📅 \(dueLabel)"]
+        var parts: [String] = []
+        if let c = category { parts.append("\(c.emoji) \(c.label)") }
+        if !effectiveAssignee.isEmpty { parts.append("👤 \(effectiveAssignee)") }
+        parts.append("📅 \(dueLabel)")
         if isOverdue { parts.append("⚠️ \(daysOverdue)d overdue") }
         if routineID != nil { parts.append("🔁 Routine") }
         if let g = group { parts.append(g) }
@@ -644,14 +951,22 @@ final class TaskStore: ObservableObject {
     private let profilesKey = "kitty.profiles"
     private let materializedKey = "kitty.materialized"
 
-    private init() { load() }
+    private let defaults: UserDefaults
+
+    /// `defaults` is the user's own unless a test gives it a scratch one.
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        load()
+    }
 
     // MARK: Create
 
     @discardableResult
     func add(_ title: String) -> TaskItem {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let item = TaskItem(title: clean, category: .guess(from: clean), dueDate: Calendar.current.startOfDay(for: .now))
+        // Typed in by hand on the Today screen: the day is the user's own act, and the evidence says so.
+        var item = TaskItem(title: clean, dueDate: Calendar.current.startOfDay(for: .now))
+        item.evidence = ["day": "added by you"]
         tasks.insert(item, at: 0)
         save()
         return item
@@ -659,23 +974,49 @@ final class TaskStore: ObservableObject {
 
     @discardableResult
     func addMany(_ titles: [String]) -> [TaskItem] {
-        addMany(titles.map { PlannedTask(title: $0, category: .guess(from: $0), due: nil) })
+        addMany(titles.map { PlannedTask(title: $0, category: nil, due: nil) })
     }
 
     @discardableResult
     func addMany(_ planned: [PlannedTask]) -> [TaskItem] {
-        let today = Calendar.current.startOfDay(for: .now)
+        let now = Date()
+        // A task that names a list is put on it: the list is found by its name, or made once for the whole request. A task on a
+        // list with no day of its own lives on the list, not in Today.
+        var lists: [String: TaskProfile] = [:]
+        var madeLists: [TaskProfile] = []
+        func list(_ raw: String?, request: UUID?) -> TaskProfile? {
+            guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            let key = TaskLabels.stemKey(raw)
+            if let known = lists[key] { return known }
+            let found = ensureProfile(raw, requestID: request)
+            lists[key] = found.profile
+            if found.created { madeLists.append(found.profile) }
+            return found.profile
+        }
         let items = planned
-            .map { PlannedTask(title: $0.title.trimmingCharacters(in: .whitespacesAndNewlines),
-                               category: $0.category, due: $0.due, assignee: $0.assignee,
-                               slot: $0.slot, timeMinutes: $0.timeMinutes,
-                               categoryName: $0.categoryName, priority: $0.priority, notes: $0.notes) }
-            .filter { !$0.title.isEmpty }
-            .map { TaskItem(title: $0.title, category: $0.category, dueDate: $0.due ?? today, assignee: $0.assignee,
-                            slot: $0.slot, timeMinutes: $0.timeMinutes,
-                            categoryName: $0.categoryName, priority: $0.priority, notes: $0.notes) }
+            .filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { p -> TaskItem in
+                let profile = list(p.profile, request: p.utteranceID)
+                // No day is made up: a task the user gave no day stays undated (a task on a list lives on its list).
+                var made = TaskItem(title: p.title.trimmingCharacters(in: .whitespacesAndNewlines), category: p.category,
+                                dueDate: p.due, group: profile?.name, assignee: p.assignee,
+                                slot: p.slot, timeMinutes: p.timeMinutes, profileID: profile?.id,
+                                categoryName: p.categoryName, priority: p.priority, notes: p.notes,
+                                reason: p.reason, utteranceID: p.utteranceID,
+                                instructions: p.instructions, schedule: p.schedule, softDue: p.softDue, createdAt: now)
+                made.evidence = p.evidence.isEmpty ? nil : p.evidence
+                return made
+            }
         tasks.insert(contentsOf: items, at: 0)
-        save()
+        // Reported only when the tasks were really stored: if encoding failed, they are taken back out and nothing is returned, so
+        // the caller can never say "saved" for tasks that are not.
+        guard save() else {
+            let ids = Set(items.map(\.id))
+            tasks.removeAll { ids.contains($0.id) }
+            let made = Set(madeLists.map(\.id))
+            if !made.isEmpty { profiles.removeAll { made.contains($0.id) }; persistExtras() }       // a list made for tasks that were not stored
+            return []
+        }
         return items
     }
 
@@ -702,7 +1043,13 @@ final class TaskStore: ObservableObject {
     func search(_ query: String) -> [TaskItem] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return tasks }
-        return tasks.filter { $0.title.localizedCaseInsensitiveContains(q) }
+        // What was typed, as part of a word or tag (partial typing finds it). Meaning is the model's job, not this search's.
+        let typed = tasks.filter { t in
+            t.title.localizedCaseInsensitiveContains(q) || t.hasTag(q)
+                || (t.categoryName?.localizedCaseInsensitiveContains(q) ?? false)
+                || t.storedWords.localizedCaseInsensitiveContains(q)
+        }
+        return typed
     }
 
     /// Category + day + status lookup.
@@ -717,7 +1064,8 @@ final class TaskStore: ObservableObject {
                 return false                        // items on a list are not "due today"
             }
             if let c = spec.category, t.effectiveCategory != c { return false }
-            if !spec.assignees.isEmpty, !spec.assignees.contains(where: { $0.lowercased() == t.effectiveAssignee.lowercased() }) { return false }
+            if let l = spec.label, !t.hasTag(l), !spec.alsoIDs.contains(t.id) { return false }
+            if !t.isFor(spec.assignees) { return false }
             switch spec.status {
             case .open: if t.isDone { return false }
             case .done: if !t.isDone { return false }
@@ -746,7 +1094,8 @@ final class TaskStore: ObservableObject {
         let mine = tasks.filter { t in
             if t.isListItem { return false }
             if let c = spec.category, t.effectiveCategory != c { return false }
-            if !spec.assignees.isEmpty, !spec.assignees.contains(where: { $0.lowercased() == t.effectiveAssignee.lowercased() }) { return false }
+            if let l = spec.label, !t.hasTag(l), !spec.alsoIDs.contains(t.id) { return false }
+            if !t.isFor(spec.assignees) { return false }
             switch spec.status {
             case .open: return !t.isDone
             case .done: return t.isDone
@@ -758,15 +1107,9 @@ final class TaskStore: ObservableObject {
         return (onDay, earlier)
     }
 
-    /// Orders tasks by day (optionally) and then by time of day: morning walk before evening walk.
-    /// Tasks with the same time keep the order they already had.
+    /// Orders tasks by day (optionally) and then by time of day: morning walk before evening walk. See `TaskSorting`.
     func timeOrdered(_ items: [TaskItem], byDay: Bool) -> [TaskItem] {
-        let cal = Calendar.current
-        func key(_ pair: (offset: Int, element: TaskItem)) -> (Double, Int, Int) {
-            let day = byDay ? cal.startOfDay(for: pair.element.effectiveDue).timeIntervalSince1970 : 0
-            return (day, pair.element.sortMinutes, pair.offset)
-        }
-        return items.enumerated().sorted { key($0) < key($1) }.map(\.element)
+        TaskSorting.ordered(items, acrossDays: byDay)
     }
 
     /// What the Talk to Kitty panel lists: tasks due that day (done ones included, so they can be undone)
@@ -775,7 +1118,6 @@ final class TaskStore: ObservableObject {
         let cal = Calendar.current
         let today = cal.startOfDay(for: .now)
         let target = f.day == .tomorrow ? (cal.date(byAdding: .day, value: 1, to: today) ?? today) : today
-        let names = f.who.names.map { $0.lowercased() }
 
         let mine = tasks.filter { t in
             if let pid = f.profileID {
@@ -783,8 +1125,10 @@ final class TaskStore: ObservableObject {
             } else if t.isListItem && f.day != .all {
                 return false                        // list items are not due today or tomorrow
             }
-            if !names.isEmpty, !names.contains(t.effectiveAssignee.lowercased()) { return false }
+            if !t.isFor(f.who.names) { return false }
             if let c = f.category, t.effectiveCategory != c { return false }
+            if let l = f.label, !t.hasTag(l), !f.alsoIDs.contains(t.id) { return false }
+            if let since = f.addedSince, (t.createdAt ?? .distantPast) < since { return false }
             return true
         }
         func dayOf(_ t: TaskItem) -> Date { cal.startOfDay(for: t.effectiveDue) }
@@ -810,6 +1154,10 @@ final class TaskStore: ObservableObject {
             due = mine.filter { !isLate($0) && onDay($0) }
         }
         let ordered = f.status == .done ? due : timeOrdered(due, byDay: f.day == .all)
+        if f.addedSince != nil {
+            let newestFirst: (TaskItem, TaskItem) -> Bool = { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+            return (overdue.sorted(by: newestFirst), ordered.sorted(by: newestFirst))
+        }
         return (timeOrdered(overdue, byDay: true), ordered)
     }
 
@@ -835,8 +1183,7 @@ final class TaskStore: ObservableObject {
     }
 
     func openCount(for choice: AssigneeChoice) -> Int {
-        let names = choice.names.map { $0.lowercased() }
-        return tasks.filter { !$0.isDone && (names.isEmpty || names.contains($0.effectiveAssignee.lowercased())) }.count
+        return tasks.filter { !$0.isDone && $0.isFor(choice.names) }.count
     }
 
     /// Saves times Apple Intelligence decided for tasks (and their routines, so future days follow).
@@ -885,10 +1232,11 @@ final class TaskStore: ObservableObject {
     /// Saves a routine. Returns nil if an identical one already exists.
     @discardableResult
     func addRoutine(title: String, category: TaskCategory?, recurrence: RecurrenceSpec, assignee: String? = nil,
-                    slot: DaySlot? = nil, timeMinutes: Int? = nil) -> Routine? {
+                    slot: DaySlot? = nil, timeMinutes: Int? = nil, reason: String? = nil, utteranceID: UUID? = nil,
+                    instructions: String? = nil, schedule: String? = nil, allowDuplicate: Bool = false) -> Routine? {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return nil }
-        var r = Routine(title: clean, category: category ?? .guess(from: clean),
+        var r = Routine(title: clean, category: category,
                         weekdays: Array(Set(recurrence.weekdays.filter { (1...7).contains($0) })).sorted(),
                         assignee: assignee.map(Assignee.normalize).flatMap { $0.isEmpty ? nil : $0 })
         r.everyNWeeks = recurrence.everyNWeeks > 1 ? recurrence.everyNWeeks : nil
@@ -898,7 +1246,14 @@ final class TaskStore: ObservableObject {
         r.startDate = Calendar.current.startOfDay(for: .now)
         r.slot = slot
         r.timeMinutes = timeMinutes
-        if routines.contains(where: { $0.title.lowercased() == clean.lowercased() && $0.scheduleText == r.scheduleText }) { return nil }
+        r.reason = reason
+        r.utteranceID = utteranceID
+        r.instructions = instructions
+        r.schedule = schedule
+        r.createdAt = Date()
+        // A routine the user did not approve one by one (a quick path) is still not repeated; an approved draft item passes
+        // `allowDuplicate` and is saved, because the card already told the user about the saved match before they approved.
+        if !allowDuplicate, routines.contains(where: { $0.title.lowercased() == clean.lowercased() && $0.scheduleText == r.scheduleText }) { return nil }
         routines.append(r)
         persistExtras()
         return r
@@ -934,8 +1289,9 @@ final class TaskStore: ObservableObject {
                 let k = "\(r.id.uuidString)|\(dayKey(day))"
                 guard !materialized.contains(k) else { continue }
                 materialized.insert(k)
-                fresh.append(TaskItem(title: r.title, category: r.category, dueDate: day, routineID: r.id, assignee: r.effectiveAssignee,
-                                      slot: r.slot, timeMinutes: r.timeMinutes))
+                fresh.append(TaskItem(title: r.title, category: r.category, dueDate: day, routineID: r.id, assignee: r.assignee,
+                                      slot: r.slot, timeMinutes: r.timeMinutes, reason: r.reason, said: r.said, utteranceID: r.utteranceID,
+                                      instructions: r.instructions, schedule: r.schedule, createdAt: Date()))
             }
         }
         // Newest first, like other tasks; backlog from earlier days sits just below.
@@ -951,13 +1307,114 @@ final class TaskStore: ObservableObject {
 
     // MARK: Categories and changes from the voice decision
 
-    /// Categories already in use (newest first), then the built-in ones, at most 12. The model is told these.
+    /// Names already on tasks as a category name, then the list names (newest first): the spellings the model can reuse.
+    var usedCategoryNames: [String] {
+        var out: [String] = []
+        for t in tasks { let l = t.categoryName ?? ""; if !l.isEmpty, !out.contains(where: { $0.lowercased() == l.lowercased() }) { out.append(l) } }
+        for l in listTopicNames where !out.contains(where: { $0.lowercased() == l.lowercased() }) { out.append(l) }
+        return Array(out.prefix(40))
+    }
+
+    /// The lists, as people say them: "Blinkit" for "Blinkit order", "Kitty" for "Kitty".
+    var listTopicNames: [String] {
+        profiles.map { p in
+            let short = TaskLabels.listShort(p.name)
+            return short.isEmpty ? p.name : short
+        }
+    }
+
+    /// The tag in use that is spelled most like `name` (one or two letters off), for "Did you mean…?". Nil when none is close.
+    func nearestTag(to name: String) -> String? {
+        let target = Array(TaskLabels.stemKey(name))
+        guard target.count >= 3 else { return nil }
+        func distance(_ a: [Character], _ b: [Character]) -> Int {
+            var row = Array(0...b.count)
+            for i in 1...max(1, a.count) where i <= a.count {
+                var prev = row[0]
+                row[0] = i
+                for j in 1...max(1, b.count) where j <= b.count {
+                    let keep = row[j]
+                    row[j] = Swift.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] == b[j - 1] ? 0 : 1))
+                    prev = keep
+                }
+            }
+            return row[b.count]
+        }
+        let allowed = target.count >= 7 ? 2 : 1
+        return tagIndex
+            .compactMap { entry -> (String, Int)? in
+                let d = distance(target, Array(TaskLabels.stemKey(entry.name)))
+                return d >= 1 && d <= allowed ? (entry.name, d) : nil
+            }
+            .min { $0.1 < $1.1 }?.0
+    }
+
+    /// Every tag name in use, most used first, one spelling each, with the types it exists as: the choices of the tag filter.
+    /// People, categories and lists all count; a name that is several types is one entry.
+    var tagIndex: [TagEntry] {
+        var order: [String] = []
+        var byKey: [String: TagEntry] = [:]
+        func note(_ name: String, _ kind: TaskTag.Kind) {
+            let k = TaskLabels.stemKey(name)
+            guard !k.isEmpty else { return }
+            if byKey[k] == nil { byKey[k] = TagEntry(name: name, kinds: [], count: 0); order.append(k) }
+            byKey[k]?.kinds.insert(kind)
+        }
+        for t in tasks {
+            for tag in t.tags where tag.kind != .routine && tag.kind != .priority { note(tag.name, tag.kind) }
+        }
+        for p in profiles { note(p.name, .list) }
+        // Once per task: a name that is both the category and the list of one task counts once.
+        for t in tasks where !t.isDone {
+            for k in Set(t.tags.map { TaskLabels.stemKey($0.name) }) where byKey[k] != nil { byKey[k]?.count += 1 }
+        }
+        return order.compactMap { byKey[$0] }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name.lowercased() < $1.name.lowercased() }
+    }
+
+    /// The same names as `tagIndex`, as the filter menu shows them.
+    var labelCounts: [(name: String, count: Int)] { tagIndex.map { (name: $0.name, count: $0.count) } }
+
+    /// A tag the words name, with the types it exists as.
+    struct TagMention: Equatable {
+        var name: String
+        var kinds: Set<TaskTag.Kind>
+    }
+
+    /// Every tag these words name ("show tasks about Kitty"), the longest first, as the household spells it. A built-in category,
+    /// a role ("the cook"), Me and Family are left out: they keep their own meaning.
+    func tagsMentioned(in text: String) -> [TagMention] {
+        let cleaned = text.lowercased().replacingOccurrences(of: "\\b(hey|hi|hello|ok|okay)[, ]+kitty\\b", with: " ", options: .regularExpression)
+        let said = Set(cleaned.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { TaskLabels.stem(String($0)) })
+        var found: [(mention: TagMention, words: Int)] = []
+        func consider(_ name: String, _ kinds: Set<TaskTag.Kind>) {
+            let parts = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { TaskLabels.stem(String($0)) }
+            guard !parts.isEmpty, parts.allSatisfy({ $0.count >= 3 && said.contains($0) }),
+                  !TaskLabels.generic.contains(name.lowercased()) else { return }
+            if kinds == [.person], Assignee.isRole(name) || name.lowercased() == Assignee.me.lowercased()
+                || name.lowercased() == Assignee.family.lowercased() { return }
+            let key = TaskLabels.stemKey(name)
+            if let i = found.firstIndex(where: { TaskLabels.stemKey($0.mention.name) == key }) { found[i].mention.kinds.formUnion(kinds) }
+            else { found.append((TagMention(name: name, kinds: kinds), parts.count)) }
+        }
+        for e in tagIndex { consider(e.name, e.kinds) }
+        for p in profiles {                                   // "Blinkit" for the list "Blinkit order"
+            let short = TaskLabels.listShort(p.name)
+            if !short.isEmpty { consider(short, [.list]) }
+        }
+        return found.sorted { $0.words > $1.words }.map(\.mention)
+    }
+
+    /// The first name `tagsMentioned` finds.
+    func labelMentioned(in text: String) -> String? { tagsMentioned(in: text).first?.name }
+
     var knownCategoryNames: [String] {
         var out: [String] = []
         func add(_ n: String) {
             if out.count < 12, !out.contains(where: { $0.lowercased() == n.lowercased() }) { out.append(n) }
         }
         for t in tasks { if let n = t.categoryName { add(n) } }
+        for l in listTopicNames { add(l) }
         for c in TaskCategory.allCases where c != .other { add(c.label) }
         return out
     }
@@ -977,9 +1434,67 @@ final class TaskStore: ObservableObject {
         save()
     }
 
+    /// What the flat edit can also change on a saved task: purpose, instructions, part of the day, timeframe, list, and fields to
+    /// empty. Applied after `applyChanges`. The list is the one that exists, or one made now (the user approved the change).
+    func applyEditExtras(_ id: UUID, with c: ValidatedTask) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        for field in c.cleared {
+            switch field.lowercased().filter({ $0.isLetter }) {
+            case "day", "date", "due", "duedate": tasks[i].dueDate = nil
+            case "time", "clock", "duetime": tasks[i].timeMinutes = nil
+            case "timeofday", "slot", "daypart": tasks[i].slot = nil
+            case "priority": tasks[i].priority = nil
+            case "person", "assignee", "for", "who": tasks[i].assignee = nil
+            case "purpose", "reason": tasks[i].reason = nil
+            case "instructions": tasks[i].instructions = nil
+            case "timeframe", "softdue": tasks[i].softDue = nil
+            case "list", "listname": tasks[i].profileID = nil; tasks[i].group = nil
+            default: break
+            }
+        }
+        if let r = c.reason { tasks[i].reason = r }
+        if let h = c.instructions { tasks[i].instructions = h }
+        if c.timeMinutes == nil, let s = c.slot, s != .anytime { tasks[i].slot = s; tasks[i].timeMinutes = nil }
+        if c.timeMinutes != nil { tasks[i].slot = nil }
+        if let soft = c.softDue { tasks[i].softDue = soft; if c.due == nil { tasks[i].dueDate = nil } }
+        if let name = c.listName {
+            let p = ensureProfile(name).profile
+            tasks[i].profileID = p.id
+            tasks[i].group = p.name
+        }
+        save()
+    }
+
+    /// Does the stored task now hold what the change asked for? The reply says "done" only when this is true.
+    func holds(_ id: UUID, _ c: ValidatedTask) -> Bool {
+        guard let t = tasks.first(where: { $0.id == id }) else { return false }
+        let cal = Calendar.current
+        if let d = c.due, !(t.dueDate.map { cal.isDate($0, inSameDayAs: d) } ?? false) { return false }
+        if let m = c.timeMinutes, t.timeMinutes != m { return false }
+        if let p = c.priority, t.priority != p { return false }
+        if let a = c.assignee, t.assignee != a { return false }
+        if let r = c.reason, t.reason != r { return false }
+        if let h = c.instructions, t.instructions != h { return false }
+        if let soft = c.softDue, t.softDue != soft { return false }
+        if let l = c.listName, !(t.isOnList(l) || (t.listName.map { TaskLabels.same($0, Self.cleanProfileName(l)) } ?? false)) { return false }
+        for field in c.cleared {
+            switch field.lowercased().filter({ $0.isLetter }) {
+            case "day", "date", "due", "duedate": if t.dueDate != nil { return false }
+            case "time", "clock", "duetime": if t.timeMinutes != nil { return false }
+            case "priority": if t.priority != nil { return false }
+            case "purpose", "reason": if t.reason != nil { return false }
+            case "instructions": if t.instructions != nil { return false }
+            case "timeframe", "softdue": if t.softDue != nil { return false }
+            case "list", "listname": if t.profileID != nil { return false }
+            default: break
+            }
+        }
+        return true
+    }
+
     // MARK: Lists (profiles)
 
-    static let genericListWords: Set<String> = ["order", "list", "cart", "basket", "shopping", "checklist", "wishlist", "profile"]
+    static let genericListWords: Set<String> = TaskLabels.listWords
 
     /// "my blinkit order" -> "Blinkit order"
     static func cleanProfileName(_ raw: String) -> String {
@@ -1023,10 +1538,11 @@ final class TaskStore: ObservableObject {
 
     /// Finds the list, or makes it. `created` is true when it is new.
     @discardableResult
-    func ensureProfile(_ raw: String) -> (profile: TaskProfile, created: Bool) {
+    func ensureProfile(_ raw: String, requestID: UUID? = nil) -> (profile: TaskProfile, created: Bool) {
         if let existing = profile(named: raw) { return (existing, false) }
         let name = Self.cleanProfileName(raw)
-        let p = TaskProfile(name: name.isEmpty ? "List" : name)
+        var p = TaskProfile(name: name.isEmpty ? "List" : name)
+        p.requestID = requestID
         profiles.append(p)
         persistExtras()
         return (p, true)
@@ -1041,7 +1557,7 @@ final class TaskStore: ObservableObject {
         for (i, raw) in titles.enumerated() {
             let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { continue }
-            var item = TaskItem(title: title, category: .guess(from: title), dueDate: due.map { Calendar.current.startOfDay(for: $0) },
+            var item = TaskItem(title: title, category: nil, dueDate: due.map { Calendar.current.startOfDay(for: $0) },
                                 group: profile.name, assignee: assignee, profileID: profile.id)
             if i < notes.count, let n = notes[i]?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty { item.notes = n }
             items.append(item)
@@ -1090,6 +1606,31 @@ final class TaskStore: ObservableObject {
             if tasks[i].dueDate == nil { tasks[i].dueDate = Calendar.current.startOfDay(for: .now) }
         }
         save()
+    }
+
+    /// "Steps in order": a list is a sequence only when the user says so. Never inferred.
+    func setOrdered(_ ordered: Bool, for profileID: UUID) {
+        guard let i = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        profiles[i].ordered = ordered ? true : nil
+        persistExtras()
+    }
+
+    /// A list the user approved, kept as a playbook they can run again. It copies what makes the procedure (the titles, the
+    /// instructions, the order and who usually does each step) and nothing about one run of it: not whether a step is done, not a
+    /// one-off date or time, not a repeat. Returns false when the list has no items. The list itself is not changed.
+    @discardableResult
+    func savePlaybook(fromList profile: TaskProfile) -> Bool {
+        // The items of one request keep the order they were said in (the store puts a request's items first, in order).
+        let steps = items(in: profile).map { PlaybookStep(title: $0.title, assignee: $0.assignee, instructions: $0.instructions) }
+        guard !steps.isEmpty else { return false }
+        let clean = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return false }
+        if let existing = playbook(matching: clean, minWords: 1) { playbooks.removeAll { $0.id == existing.id } }
+        var pb = Playbook(name: clean, category: nil, steps: steps)
+        pb.ordered = profile.isOrdered ? true : nil
+        playbooks.append(pb)
+        persistExtras()
+        return true
     }
 
     @discardableResult
@@ -1144,7 +1685,7 @@ final class TaskStore: ObservableObject {
     @discardableResult
     func addPlaybookTasks(_ pb: Playbook, due: Date?) -> [TaskItem] {
         let items = pb.steps.map {
-            TaskItem(title: $0.title, category: pb.category ?? .guess(from: pb.name), dueDate: due, group: pb.name, assignee: $0.assignee)
+            TaskItem(title: $0.title, category: pb.category, dueDate: due, group: pb.name, assignee: $0.assignee)
         }
         tasks.insert(contentsOf: items, at: 0)
         save()
@@ -1161,6 +1702,30 @@ final class TaskStore: ObservableObject {
 
     // MARK: Update
 
+    /// Replaces a task with an edited copy (the edit form). A change of list is handled as `moveTask` does: the list's name becomes the
+    /// group, and a task taken off its list gets a day again. `completedAt` follows the done state. Returns false when the task is gone or could not be stored (the old copy is kept).
+    @discardableResult
+    func update(_ edited: TaskItem) -> Bool {
+        guard let i = tasks.firstIndex(where: { $0.id == edited.id }) else { return false }
+        let before = tasks[i]
+        var item = edited
+        item.title = edited.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if item.profileID != before.profileID {
+            if let pid = item.profileID, let p = profiles.first(where: { $0.id == pid }) {
+                item.group = p.name
+            } else {
+                item.profileID = nil
+                item.group = nil
+                if item.dueDate == nil { item.dueDate = Calendar.current.startOfDay(for: .now) }
+            }
+        }
+        if item.isDone != before.isDone { item.completedAt = item.isDone ? Date() : nil }
+        tasks[i] = item
+        // Stored or not: if the tasks could not be encoded, the old copy is put back, so what is shown is what is saved.
+        guard save() else { tasks[i] = before; return false }
+        return true
+    }
+
     func rename(_ id: UUID, to title: String) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].title = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1170,18 +1735,21 @@ final class TaskStore: ObservableObject {
     func complete(_ id: UUID) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].isDone = true
+        tasks[i].completedAt = Date()
         save()
     }
 
     func reopen(_ id: UUID) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].isDone = false
+        tasks[i].completedAt = nil
         save()
     }
 
     func toggle(_ id: UUID) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].isDone.toggle()
+        tasks[i].completedAt = tasks[i].isDone ? Date() : nil
         save()
     }
 
@@ -1197,6 +1765,14 @@ final class TaskStore: ObservableObject {
         save()
     }
 
+    /// Points tasks at the utterance they were made from.
+    func link(_ ids: [UUID], to utteranceID: UUID) {
+        let set = Set(ids)
+        var changed = false
+        for i in tasks.indices where set.contains(tasks[i].id) { tasks[i].utteranceID = utteranceID; changed = true }
+        if changed { save() }
+    }
+
     @discardableResult
     func clearCompleted() -> Int {
         let count = tasks.filter(\.isDone).count
@@ -1207,13 +1783,25 @@ final class TaskStore: ObservableObject {
 
     // MARK: Persistence
 
-    private func save() {
+    /// False when the tasks could not be encoded and so were not stored.
+    @discardableResult
+    private func save() -> Bool {
+        let stored: Bool
         if let data = try? JSONEncoder().encode(tasks) {
-            UserDefaults.standard.set(data, forKey: key)
-        }    }
+            defaults.set(data, forKey: key)
+            stored = true
+        } else {
+            stored = false
+        }
+        guard stored else { return false }
+        guard defaults === UserDefaults.standard else { return true }       // a scratch store never prunes the user's own turns
+        TaskDetailsStore.shared.prune(keeping: Set(tasks.map(\.id)))      // how a task was made goes when the task does
+        UtteranceStore.shared.prune(keeping: Set(tasks.compactMap(\.utteranceID) + routines.compactMap(\.utteranceID)))
+        return true
+    }
 
     private func persistExtras() {
-        let d = UserDefaults.standard
+        let d = defaults
         if let data = try? JSONEncoder().encode(routines) { d.set(data, forKey: routinesKey) }
         if let data = try? JSONEncoder().encode(playbooks) { d.set(data, forKey: playbooksKey) }
         if let data = try? JSONEncoder().encode(profiles) { d.set(data, forKey: profilesKey) }
@@ -1222,7 +1810,7 @@ final class TaskStore: ObservableObject {
     }
 
     private func load() {
-        let d = UserDefaults.standard
+        let d = defaults
         if let data = d.data(forKey: key), let items = try? JSONDecoder().decode([TaskItem].self, from: data) {
             tasks = items
         }

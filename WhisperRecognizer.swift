@@ -166,13 +166,7 @@ final class WhisperRecognizer: TurnRecognizer {
     /// One line from the engine: update the transcript and tell the conversation.
     func received(_ rawUpdate: TranscriptLineUpdate, session id: Int) {
         guard id == sessionID else { return }
-        var update = rawUpdate
-        let repaired = BrandFixer.fix(update.text, protectedNames: protectedNames)
-        if !repaired.changes.isEmpty {
-            update.text = repaired.text
-            update.words = []          // the words no longer match the text
-            if update.isComplete { Breadcrumb.log("brand fix: " + repaired.changes.map { "\($0.from) -> \($0.to)" }.joined(separator: ", ")) }
-        }
+        let update = rawUpdate
         if let i = lines.firstIndex(where: { $0.id == update.id }) {
             lines[i].text = update.text
             lines[i].words = update.words

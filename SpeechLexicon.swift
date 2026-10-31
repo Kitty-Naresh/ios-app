@@ -1,7 +1,7 @@
 import Foundation
 
 /// The one place for the word lists that speech handling shares: the prechecker,
-/// the turn gate and the SpeechCleaner all read from here, so they can't drift apart.
+/// the turn gate and the endpointing all read from here, so they can't drift apart.
 nonisolated enum SpeechLexicon {
     /// Hesitation sounds. Safe to drop anywhere.
     static let fillers: Set<String> = [

@@ -1,6 +1,8 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import Combine
 import AVFoundation
+import AudioToolbox
 #if os(iOS)
 import UIKit
 #endif
@@ -25,23 +27,23 @@ final class VoiceConversation: ObservableObject {
         var taskIDs: [UUID] = []            // tasks this reply created: shown as cards you can swipe to delete
     }
 
-    static let autoAddDelay: Double = 2
-
     // What the screen shows
-    @Published private(set) var stage: Stage = .idle
+    @Published private(set) var stage: Stage = .idle { didSet { stageSince = Date(); refreshScreenAwake() } }
+    /// When the stage last changed: the watchdog uses it to find a turn that is stuck.
+    private var stageSince = Date()
+    /// Working on the words longer than this (seconds) is stuck: the work is cancelled and the turn starts again. Not measured.
+    static let thinkingTimeout: TimeInterval = 60
+    /// Words that were already judged, with nothing new and no sound for this long (seconds), are dropped. Not measured.
+    static let staleWordsTimeout: TimeInterval = 25
     @Published private(set) var turnText = ""          // everything you said in this turn, across pauses
-    @Published private(set) var hearingTasks: Int?      // live "Hearing N tasks" chip: from the words so far, never from the model
-    private var hearingThrottle = HearingThrottle()
-    private var hearingTask: Task<Void, Never>?
     @Published private(set) var proposal: Proposal?
     @Published private(set) var question = ""
     @Published private(set) var lines: [ChatLine] = []
     /// How many of the words in `turnText` are already in the chat (said before a question). The live bubble shows the rest.
     @Published private(set) var committedWords = 0
-    @Published private(set) var countdownActive = false
     @Published private(set) var isStale = false         // you kept talking: the preview is out of date
     /// Kitty is talking. The mic is off then, so tapping the mic button stops her and starts listening.
-    @Published private(set) var isSpeaking = false
+    @Published private(set) var isSpeaking = false { didSet { refreshScreenAwake() } }
     private var spokenNow = ""          // what Kitty is saying right now, so her own voice is not mistaken for yours
     private var spokenBuffer = SpokenBuffer()   // and what she said just before, for the tail of her voice after she stops
     private var lastEchoLogged = ""
@@ -52,7 +54,17 @@ final class VoiceConversation: ObservableObject {
     private var startingMic = false
     private var bargeRestarts: [Date] = []
     private var watchdogTicks = 0
-    @Published private(set) var micOn = false { didSet { turns.state.setListening(micOn) } }
+    /// Turns whose model call was still running when the screen was closed: they finish on their own (see `finishInBackground`).
+    private var backgroundGenerations = Set<Int>()
+    /// The turns of the request being worked on ("clean", then "the bathroom"), kept to be saved with the tasks it makes.
+    private var requestRecords: [TaskTurnRecord] = []
+    /// Where "See details" is kept (replaceable in tests).
+    var detailsStore: TaskDetailsStore = .shared
+    /// Why the mic turned itself off, so the quiet stop is never a mystery.
+    @Published private(set) var micNotice: String?
+    @Published private(set) var micOn = false {
+        didSet { turns.state.setListening(micOn); refreshScreenAwake() }
+    }
     @Published private(set) var errorMessage: String?
 
     /// Read Kitty's replies out loud. Off by default; remembered between launches.
@@ -60,9 +72,14 @@ final class VoiceConversation: ObservableObject {
     @Published var indianEnglish: Bool = SpeechLocalePreference.isIndianEnglish {
         didSet { SpeechLocalePreference.isIndianEnglish = indianEnglish }
     }
-    /// Trust the punctuated transcript: the model reads a long turn whole (see `TranscriptPolicy`).
-    @Published var rawTranscript: Bool = TranscriptPolicy.raw {
-        didSet { TranscriptPolicy.raw = rawTranscript }
+    /// Keep how each task was made (what was said, sent, answered and checked) so a long press can show it. Off by default.
+    @Published var saveDetails: Bool = Trace.recording {
+        didSet { UserDefaults.standard.set(saveDetails, forKey: Trace.recordingKey) }
+    }
+    /// Show what Kitty is doing while the model works: the steps, the text sent, the answer as it is written. On by default in a
+    /// debug build.
+    @Published var liveView: Bool = LiveFeed.enabled {
+        didSet { UserDefaults.standard.set(liveView, forKey: LiveFeed.key) }
     }
     /// Whisper Turbo or Apple Speech for the conversation, to compare. Takes effect the next time the conversation opens.
     @Published var speechEngine: SpeechEngineChoice = SpeechEngineChoice.stored() {
@@ -75,38 +92,54 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    /// Fill the confirm button for 2 seconds and then apply. Turn off to always tap yourself.
-    @Published var autoAdd: Bool = (UserDefaults.standard.object(forKey: "kitty.autoAdd") as? Bool) ?? true {
-        didSet {
-            UserDefaults.standard.set(autoAdd, forKey: "kitty.autoAdd")
-            if !autoAdd { cancelCountdown() }
-        }
-    }
-
     /// The engine picked in the menu when its model is on the phone; Apple Speech otherwise, or if that engine fails to load.
     private var speech: any TurnRecognizer = VoiceConversation.makeRecognizer()
     /// Decides when speech might be a finished thought, and makes the one model call for it.
-    private let turns = VoiceTurnManager()
+    private let turns: VoiceTurnManager
     private var pauseProfile = PauseProfile.current()   // how long this person pauses mid-sentence, learned over time
     private var lastActedRaw = ""      // the speech Kitty last acted on, so the same words are not judged twice
+    private var finalTried = ""        // the words already judged as final: silence alone never sends them to the model again
     private var carry = ""             // text from earlier recognition sessions in this turn
     private var sessionText = ""       // the current recognition session (cumulative)
     private var processedText = ""     // the text the current preview or question was built from
     private var lastChange = Date()
     private var generation = 0
-    private var active = false         // the screen is open
+    private var active = false { didSet { refreshScreenAwake() } }        // the screen is open
+
+    // The screen stays awake only while Kitty is listening, speaking or working on the Talk screen (see `ScreenAwake`).
+    /// Asks the system to keep the screen on or lets it sleep again. Replaced in tests so UIKit is never touched.
+    var keepScreenAwake: @MainActor (Bool) -> Void = { ScreenAwake.apply($0) }
+    private var appInForeground = true { didSet { refreshScreenAwake() } }
+    private var screenKeptAwake = false
+
+    /// The app moved to or from the foreground. Going to the background always releases the hold; coming back reapplies it.
+    func appForegroundChanged(_ foreground: Bool) { appInForeground = foreground }
+
+    private func refreshScreenAwake() {
+        let want = ScreenAwake.wanted(screenOpen: active, appInForeground: appInForeground, micOn: micOn,
+                                      isSpeaking: isSpeaking, working: stage == .thinking)
+        guard want != screenKeptAwake else { return }
+        screenKeptAwake = want
+        keepScreenAwake(want)
+    }
     private var processingTask: Task<Void, Never>?
-    private var countdownTask: Task<Void, Never>?
     private var watcherTask: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
     private var restarts: [Date] = []
     private var micWanted = true       // false when you typed instead: don't open the mic behind your back
+    private var nudgedText = ""        // the words "Anything else?" was already said for, so it is said once per stretch of speech
+    /// Quiet after a dangling last word before the nudge. Tests set it short.
+    var nudgeDelay: TimeInterval = Endpointing.nudgeDelay
+    /// Called whenever the fixed nudge fires (tests).
+    var onNudge: (() -> Void)?
+    private var lastWaitKind = ""      // the last "not sent yet" reason printed in the trace, so it is not repeated every tick
 
     /// A quiet line while the accurate speech model is getting ready (first run only), so a slower start is explained.
     @Published private(set) var speechNotice: String?
     private var accurateObserver: AnyCancellable?
 
-    init() {
+    init(turns: VoiceTurnManager? = nil) {
+        self.turns = turns ?? VoiceTurnManager()
         configureSpeech()
         accurateObserver = WhisperAccurate.shared.$status
             .receive(on: DispatchQueue.main)
@@ -176,9 +209,11 @@ final class VoiceConversation: ObservableObject {
     // MARK: Open and close
 
     /// Opens the conversation. With `seed` (typed on the home screen) it starts working right away; otherwise it listens.
-    func open(seed: String?) {
+    /// With `voice` (a request from Siri) the seed runs the same way, but the mic stays wanted: the answer is spoken and Kitty listens on.
+    func open(seed: String?, voice: Bool = false) {
         active = true
         errorMessage = nil
+        micNotice = nil
         userMuted = false
         micBlocked = false
         if Self.engine(of: speech) != SpeechEngineChoice.effective() {     // the menu choice changed since the last conversation
@@ -188,12 +223,13 @@ final class VoiceConversation: ObservableObject {
         }
         speech.bargeIn = BargeIn.enabled        // one duplex audio setup for the whole conversation
         lines = []
+        requestRecords = []
         turns.state.reset()
         resetTurn()
         stage = .idle
         startWatcher()
         let typed = (seed ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        micWanted = typed.isEmpty
+        micWanted = typed.isEmpty || voice
         if typed.isEmpty {
             Task {
                 try? await Task.sleep(nanoseconds: 400_000_000)   // let the screen finish appearing
@@ -207,18 +243,58 @@ final class VoiceConversation: ObservableObject {
     }
 
     func close() {
+        // Closing the screen never saves anything by itself: a model call still running finishes in the background and, like a
+        // preview waiting for a tap, says it was not saved.
+        if stage == .thinking, processingTask != nil {
+            backgroundGenerations.insert(generation)
+            processingTask = nil                // detached on purpose: nothing below may cancel it
+        } else if stage == .preview, let p = proposal {
+            LaunchRouter.shared.post("“\(p.title)” wasn't saved, so nothing changed.")
+        }
         active = false
         processingTask?.cancel()
-        countdownTask?.cancel()
         watcherTask?.cancel()
         idleTask?.cancel()
-        countdownActive = false
         speech.bargeIn = false                  // let the audio session shut down with the screen
         speech.cancel()
         unloadModelSoon()
         Speaker.stopIfActive()
         micOn = false
+        proposal = nil
+        stage = .idle
         generation += 1
+    }
+
+    /// A model call that was still running when the screen closed has come back. Nothing is saved by itself: a preview or a
+    /// question is left alone, and the home screen says so. Only finishing or reopening one clear task runs at once.
+    private func finishInBackground(_ result: TurnResult) async {
+        switch result {
+        case .proposal(let p):
+            if p.runImmediately {
+                await applyInBackground(p)
+            } else {
+                LaunchRouter.shared.post("“\(p.title)” wasn't saved, so nothing changed. Open Talk to Kitty to try again.")
+            }
+        case .question:
+            LaunchRouter.shared.post("Kitty needed an answer, so nothing was added. Open Talk to Kitty to try again.")
+        case .reply(let reply):
+            if reply.didAdd { LaunchRouter.shared.post(reply.message) }
+        case .wait, .handled:
+            break
+        }
+    }
+
+    private func applyInBackground(_ p: Proposal) async {
+        // An approval belongs to the draft version it was shown with: a changed draft is not saved from here.
+        guard p.approves(currentDraftVersion: turns.state.drafts.version) else {
+            LaunchRouter.shared.post("The list changed, so I didn't save “\(p.title)”. Open Talk to Kitty to check it.")
+            return
+        }
+        guard turns.state.confirmation.consume(p.id) else { return }       // still exactly once
+        let reply = await p.apply()
+        if reply.report?.persistenceFailed == true { turns.state.confirmation.rearm(p.id) }     // nothing stored: the approval stays valid
+        keepDetails(for: reply)
+        LaunchRouter.shared.post(reply.message)
     }
 
     // MARK: Listening
@@ -263,6 +339,7 @@ final class VoiceConversation: ObservableObject {
         micOn = speech.isRecording
         if micOn {
             errorMessage = nil
+            micNotice = nil
             if stage == .idle { stage = .listening }
             armIdle()
         }
@@ -280,30 +357,56 @@ final class VoiceConversation: ObservableObject {
         userMuted = true                        // an explicit mute (or the idle timeout): the watchdog respects it
         speech.cancel()
         micOn = false
-        if stage == .listening { stage = .idle }
+        if stage == .listening {
+            // A preview that was dimmed because you were talking comes back whole; switching the mic off never hides it.
+            if proposal != nil { stage = .preview; isStale = false } else { stage = .idle }
+        }
     }
 
-    /// Tap the mic: "I'm done" while you are talking, mute when there is nothing said, or start listening.
+    /// Tap the mic. It is a listening switch (see `MicTap`): "I'm done" when there are new words, otherwise it stops or
+    /// starts listening, in every state, and never cancels work that is under way.
     func micTapped() {
-        if isSpeaking {
+        let text = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasNewWords = !text.isEmpty && norm(text) != norm(processedText)
+        switch MicTap.decide(micOn: micOn, isSpeaking: isSpeaking, stage: stage, hasNewWords: hasNewWords) {
+        case .stopSpeaking:
             micWanted = true                    // tapping the mic is asking to talk
             userMuted = false
             stopSpeaking()
-            return
-        }
-        if micOn {
-            let text = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if stage == .listening, !text.isEmpty, norm(SpeechCleaner.clean(text).text) != norm(processedText) {
-                beginProcessing()          // don't wait for the pause
-            } else if stage == .listening, text.isEmpty {
-                pauseListening()
-            }
-        } else {
+        case .processNow:
+            beginProcessing()                   // don't wait for the pause
+        case .stopListening:
+            pauseListening()
+        case .startListening:
             micWanted = true
             userMuted = false
             micBlocked = false
             Task { await startMic() }
         }
+    }
+
+    /// Whether the thinking card can offer Cancel: the model is working on your words (saving a confirmed task cannot be stopped).
+    var canCancelWork: Bool { stage == .thinking && processingTask != nil }
+
+    /// Stop the work that is under way and drop the words. The mic is left as it is.
+    func cancelWork() {
+        guard canCancelWork else { return }
+        processingTask?.cancel()
+        processingTask = nil
+        let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+        lines.append(ChatLine(role: .kitty, text: "Okay, I didn't change anything."))
+        if proposal != nil {
+            // A preview waiting to be saved prevails: cancelling the work on a change to it leaves the preview as it was.
+            committedWords = turnText.split(whereSeparator: { $0.isWhitespace }).count
+            processedText = turnText
+            isStale = false
+            stage = .preview
+            Task { await resumeListening() }
+            return
+        }
+        resetTurn()
+        Task { await resumeListening() }        // stays off if you turned the mic off
     }
 
     private func heard(_ incoming: String) {
@@ -326,7 +429,7 @@ final class VoiceConversation: ObservableObject {
         }
         guard !text.isEmpty else { return }
         // A partial that starts over (it holds only the new sentence) is added to the turn, not put in place of it.
-        let merged = TurnAccumulator.absorb(carry: carry, session: sessionText, partial: text)
+        let merged = TurnAccumulator.absorb(carry: carry, session: sessionText, partial: text, replacedBySettle: speech.lastChangeWasSettle)
         if merged.reset { Breadcrumb.log("partials restarted: kept “\(sessionText.prefix(40))”") }
         carry = merged.carry
         sessionText = merged.session
@@ -335,36 +438,11 @@ final class VoiceConversation: ObservableObject {
         turnText = full
         lastChange = Date()
         armIdle()
-        updateHearingChip()
-        // "done" at the end is not new content, and cleaning means "um" or "no wait" alone don't count as new words either.
-        let spoken = SpeechCleaner.clean(VoiceTurnManager.splitFinalizer(full).text).text
+        // "done" at the end is not new content.
+        let spoken = VoiceTurnManager.splitFinalizer(full).text
         if stage == .thinking || stage == .preview || stage == .question, norm(spoken) != norm(processedText) {
             interrupt()                    // you kept talking
         }
-    }
-
-    /// At most every 0.5 s. A partial skipped by the throttle is looked at once the interval has passed, so the last words count.
-    private func updateHearingChip() {
-        guard stage == .listening else { return }
-        if hearingThrottle.allow(at: Date()) {
-            hearingTask?.cancel()
-            hearingTask = nil
-            hearingTasks = HearingChip.count(in: liveText, words: speech.words)
-        } else if hearingTask == nil {
-            hearingTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 550_000_000)
-                guard !Task.isCancelled, let self else { return }
-                self.hearingTask = nil
-                if self.stage == .listening { self.hearingTasks = HearingChip.count(in: self.liveText, words: self.speech.words) }
-            }
-        }
-    }
-
-    private func hideHearingChip() {
-        hearingTask?.cancel()
-        hearingTask = nil
-        hearingThrottle.reset()
-        hearingTasks = nil
     }
 
     /// The recognizer ended on its own (time limit). Keep what was heard and listen again.
@@ -401,7 +479,6 @@ final class VoiceConversation: ObservableObject {
         processingTask?.cancel()
         processingTask = nil
         generation += 1
-        cancelCountdown()
         isStale = proposal != nil
         stage = .listening
     }
@@ -415,8 +492,41 @@ final class VoiceConversation: ObservableObject {
                 try? await Task.sleep(nanoseconds: 120_000_000)
                 guard let self else { return }
                 self.watchdog()
+                self.stuckCheck()
                 self.tick()
             }
+        }
+    }
+
+    /// A turn that cannot end by itself is ended here, so no state lasts forever: a model call that never comes back, or words that were
+    /// already looked at and sit there with nothing happening.
+    private func stuckCheck() {
+        guard active else { return }
+        let now = Date()
+        if stage == .thinking, processingTask != nil, now.timeIntervalSince(stageSince) > Self.thinkingTimeout {
+            Breadcrumb.log("watchdog: thinking for over \(Int(Self.thinkingTimeout)) s, the work is cancelled and the turn starts again")
+            Trace.note("WARNING", "turn ended: idle (stuck while thinking for over \(Int(Self.thinkingTimeout)) s)")
+            processingTask?.cancel()
+            processingTask = nil
+            resetTurn()
+            restartAfterWatchdog(notice: "That took too long, so I stopped. Say it again, or type it.")
+            return
+        }
+        let said = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if stage == .listening, !isSpeaking, micOn, proposal == nil, !said.isEmpty, norm(said) == norm(lastActedRaw),
+           now.timeIntervalSince(lastChange) > Self.staleWordsTimeout {
+            Breadcrumb.log("watchdog: words that were already looked at stayed for over \(Int(Self.staleWordsTimeout)) s, dropped")
+            Trace.note("WARNING", "turn ended: idle (the same words sat unchanged for over \(Int(Self.staleWordsTimeout)) s)")
+            resetTurn()
+            restartAfterWatchdog(notice: nil)
+        }
+    }
+
+    private func restartAfterWatchdog(notice: String?) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.resumeListening()
+            if let notice { self.micNotice = notice }       // after the restart: starting the mic clears notices
         }
     }
 
@@ -431,7 +541,7 @@ final class VoiceConversation: ObservableObject {
     }
 
     private func tick() {
-        guard active, stage == .listening else { return }
+        guard active, stage == .listening, !isSpeaking else { return }
         let raw = turnText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
 
@@ -443,9 +553,26 @@ final class VoiceConversation: ObservableObject {
         }
 
         let silence = Date().timeIntervalSince(lastChange)
-        switch VoiceTurnManager.gate(utterance: raw, silence: silence, lastActed: lastActedRaw, profile: pauseProfile) {
-        case .keepListening, .hold:
-            break                                   // a short pause, or unfinished speech: no model call
+        let judged = VoiceTurnManager.judge(utterance: raw, silence: silence, lastActed: lastActedRaw, profile: pauseProfile,
+                                            finalTried: finalTried)
+        switch judged.gate {
+        case .keepListening:
+            // A short pause: no model call. The trace says why, once per reason.
+            if judged.kind != lastWaitKind {
+                lastWaitKind = judged.kind
+                Trace.note("SWIFT", "NOT SENT TO THE MODEL YET: \(judged.why)")
+            }
+        case .holdDangling:
+            // The last word cannot end a thought ("…and the"): the mic stays open, the model is not called. After a short quiet
+            // Kitty says "Anything else?" once, from the device.
+            if judged.kind != lastWaitKind {
+                lastWaitKind = judged.kind
+                Trace.note("SWIFT", "NOT SENT TO THE MODEL: \(judged.why)")
+            }
+            if Endpointing.shouldNudge(silence: silence, text: raw, alreadyNudgedFor: nudgedText, delay: nudgeDelay) {
+                nudgedText = raw
+                nudge()
+            }
         case .evaluate(let text):
             beginProcessing(text: text)
         case .forceEvaluate(let text):
@@ -456,59 +583,60 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
-    /// A long silence on unfinished speech. Never "Are you done?": a pending preview comes back as it was, a dangling
-    /// "add a task to…" gets a real question about the missing task, and anything else is dropped quietly.
+    /// The fixed on-device nudge: no model call. Spoken when read-aloud is on, a system chime otherwise. What was said stays in the turn.
+    private func nudge() {
+        Trace.note("SWIFT", "NOT SENT TO THE MODEL: \"\(Endpointing.nudgePhrase)\" is a fixed phrase after a dangling word")
+        onNudge?()
+        guard speakReplies else {
+            Chime.play()
+            lastChange = Date()
+            return
+        }
+        carry = turnText                     // what was said stays; the recognition that restarts after the nudge continues it
+        sessionText = ""
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.speakAndResume(Endpointing.nudgePhrase)
+            self.lastChange = Date()
+        }
+    }
+
+    /// A long silence: the words are processed as final (a model "wait" is no longer an answer). A pending preview that was
+    /// showing comes back as it was.
     private func handleLongSilence(_ raw: String) {
         if proposal != nil {
             isStale = false
             stage = .preview
+            Trace.note("SWIFT", "NOT SENT TO THE MODEL: a long silence after unfinished words; the preview that was showing stays as it was")
             return
         }
-        if let q = turns.nudgeQuestion(for: raw) {
-            lastActedRaw = turnText
-            processedText = SpeechCleaner.clean(turnText).text
-            turns.state.markProcessed(turnText)
-            showQuestion(q)
-            Breadcrumb.log("question: \(q.prefix(60))")
-            speakQuestion(q)
-        } else {
-            // Nothing to ask. If there was real content before a trailing "and" or "the", act on that. Never just drop it.
-            let trimmed = VoiceTurnManager.dropTrailingFiller(SpeechCleaner.clean(raw).text)
-            if trimmed.split(separator: " ").count >= 2, VoiceTurnManager.norm(trimmed) != VoiceTurnManager.norm(processedText) {
-                beginProcessing(text: trimmed, final: true)
-            } else if trimmed.split(separator: " ").count >= 3 {
-                beginProcessing(text: trimmed, final: true)          // the model already said "wait" and you stopped: answer anyway
-            } else {
-                resetTurn()
-                if !micOn, micWanted { Task { await startMic() } }
-            }
-        }
+        beginProcessing(text: raw, final: true)
     }
 
     // MARK: Working out what you meant
 
     private func beginProcessing(text override: String? = nil, typed: Bool = false, final: Bool = false) {
-        // Everything downstream works on the cleaned words. The chat keeps the raw ones (see `liveAttributed`).
-        let text = SpeechCleaner.clean((override ?? turnText).trimmingCharacters(in: .whitespacesAndNewlines)).text
+        // The raw transcript goes on as heard: the model reads it whole.
+        let text = (override ?? turnText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
         // "yes" after a preview saves it, "cancel" throws it away. A bare "no" is not a discard: Kitty asks what to change.
         if proposal != nil {
-            // A repeated word is collapsed by the cleaner ("yes … yes"): then the new words are looked for in what was heard.
             var fresh = newPart(of: text, after: processedText)
             if fresh.isEmpty { fresh = newPart(of: turnText, after: lastActedRaw) }
             switch ConfirmationManager.interpret(fresh) {
-            case .yes where turns.state.pendingContextDue == nil: confirm(); return     // with a due-date question open, "yes" answers it
+            case .yes: confirm(); return
             case .cancel: discard(); return
-            case .yes, .no, .other: break
+            case .no, .other: break
             }
         }
 
-        hideHearingChip()
+        lastWaitKind = ""
         Breadcrumb.log("pause: working on “\(text.prefix(60))”")
         if !typed, !speech.words.isEmpty { pauseProfile = PauseProfile.record(words: speech.words) }
         lastActedRaw = turnText
         processedText = text
+        if final { finalTried = text }
         stage = .thinking
         generation += 1
         let g = generation
@@ -517,7 +645,10 @@ final class VoiceConversation: ObservableObject {
             guard let self else { return }
             self.turns.heardWords = typed ? [] : self.speech.words      // per-word confidence, for the "Did you say…?" check
             let result = await self.turns.decide(utterance: text, final: final || typed)
-            guard !Task.isCancelled, g == self.generation else { return }
+            guard !Task.isCancelled else { self.adoptLatestPreview(); return }     // the draft may have changed all the same
+            if let record = self.turns.lastRecord { self.requestRecords = Array((self.requestRecords + [record]).suffix(6)) }
+            if self.backgroundGenerations.remove(g) != nil { await self.finishInBackground(result); return }   // the screen was closed
+            guard g == self.generation else { self.adoptLatestPreview(); return }     // you spoke on: the preview still shows the latest draft
             self.finishProcessing(result, typed: typed)
         }
     }
@@ -528,7 +659,20 @@ final class VoiceConversation: ObservableObject {
         case .wait:
             Breadcrumb.log("decision: wait")
             stage = .listening                      // the model thinks you are still speaking: say nothing, keep listening
-            if typed { handleLongSilence(turnText.trimmingCharacters(in: .whitespacesAndNewlines)) }   // typing has no pause to wait for
+
+        case .handled:
+            // The words were used up and there is nothing to show (a question that was shown twice, no question came back, a repeat):
+            // the words go into the chat as yours and the turn starts clean, so nothing can run them again.
+            Breadcrumb.log("decision: handled")
+            let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+            isStale = false
+            if proposal != nil {
+                stage = .preview                    // the preview is still built from those words: they stay
+            } else {
+                consumeTurnWords()
+                stage = .listening
+            }
 
         case .reply(let reply):
             let said = liveText
@@ -541,15 +685,115 @@ final class VoiceConversation: ObservableObject {
             if p.runImmediately { confirm(); return }
             stage = .preview
             Breadcrumb.log("preview: \(p.title)")
-            if p.autoConfirm && autoAdd { startCountdown() }
+            commitWordsToChat()         // what you said is a line of its own: the next thing you say starts a new one
+            if let answer = p.reply { showReviewAnswer(answer) }
 
         case .question(let q):
             proposal = nil
             isStale = false
             showQuestion(q)
             Breadcrumb.log("question: \(q.prefix(60))")
+            consumeTurnWords()                      // the stage stays .question: the next words are the answer, not the old ones again
             speakQuestion(q)
         }
+    }
+
+    /// The words of this turn are used up (answered with a question, or handled with nothing to show). They are removed everywhere, and
+    /// the recogniser is restarted, because it reports cumulative text: without the restart its next partial would bring them back.
+    /// A preview's words are not cleared: the preview is still built from them.
+    private func consumeTurnWords() {
+        lastActedRaw = ""
+        finalTried = ""
+        nudgedText = ""
+        carry = ""
+        sessionText = ""
+        turnText = ""
+        committedWords = 0
+        processedText = ""
+        lastWaitKind = ""
+        sessionEchoLead = 0
+        Breadcrumb.log("turn words consumed; recognition restarted")
+        guard active, micWanted, !userMuted, !isSpeaking else { return }
+        if speech.isRecording, speech.restartRecognition() { return }
+        Task { await startMic() }
+    }
+
+    /// The draft behind the card is the one the turn manager holds. A result dropped because you spoke on has still changed
+    /// that draft, so the card is brought up to date. This only refreshes the card: it never saves the newer version unseen.
+    @discardableResult
+    private func adoptLatestPreview() -> Bool {
+        guard active, turns.state.drafts.hasContent, let latest = turns.state.pendingProposal, proposal?.id != latest.id else { return false }
+        proposal = latest
+        Breadcrumb.log("preview brought up to date: \(latest.title)")
+        return true
+    }
+
+    /// The words Kitty has just worked on go into the chat as your line, and the live bubble starts again after them. Words spoken
+    /// while Kitty was thinking are not counted: they stay in the bubble as the next line.
+    private func commitWordsToChat() {
+        let all = turnText.split(whereSeparator: { $0.isWhitespace })
+        let handled = min(all.count, processedText.split(whereSeparator: { $0.isWhitespace }).count)
+        guard handled > committedWords else { return }
+        let said = all[committedWords..<handled].joined(separator: " ")
+        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+        committedWords = handled
+    }
+
+    /// Kitty answers something said about the draft (why a task was missed, what changed): your words and her answer go into the
+    /// chat, the draft stays on the card, and nothing is saved.
+    private func showReviewAnswer(_ answer: String) {
+        commitWordsToChat()
+        lines.append(ChatLine(role: .kitty, text: answer))
+        Breadcrumb.log("draft review: \(answer.prefix(60))")
+        guard speakReplies else { return }
+        let g = generation
+        Task { @MainActor [weak self] in
+            guard let self, self.active, self.stage == .preview, g == self.generation else { return }
+            await self.speakAndResume(Speaker.spokenForm(of: answer, isList: false, hint: nil))
+        }
+    }
+
+    // MARK: Changing the draft by hand
+
+    /// True while the edit sheet is open: the microphone is off, so nothing said to someone else changes the draft.
+    @Published private(set) var editingDraft = false
+    private var micWasOnForEdit = false
+
+    func beginManualEdit() {
+        guard proposal != nil, !editingDraft else { return }
+        editingDraft = true
+        stopSpeaking()
+        micWasOnForEdit = micOn
+        pauseListening()
+    }
+
+    func endManualEdit() {
+        guard editingDraft else { return }
+        editingDraft = false
+        guard micWasOnForEdit, active else { return }
+        micWanted = true
+        userMuted = false
+        Task { await startMic() }
+    }
+
+    func draftItem(_ id: UUID) -> DraftItem? { turns.state.drafts.item(id: id) }
+    var knownPeople: [String] { turns.knownPeople() }
+
+    func saveDraftEdit(_ item: DraftItem) { adopt(turns.editDraft(item)) }
+    func deleteDraftItem(_ id: UUID) { adopt(turns.removeDraftItem(id: id)) }
+    /// The user said to include a flagged task: it stays, is marked, and the card is rebuilt for the new draft version.
+    func includeDraftItem(_ id: UUID) { adopt(turns.includeFlaggedItem(id: id)) }
+    /// What was said for the draft that waits, as heard. Shown beside the model's quote.
+    var draftSpokenText: String { turns.state.drafts.spokenText }
+    func addDraftItem(_ item: DraftItem) { adopt(turns.addDraftItem(item)) }
+
+    /// The preview after a change by hand; with nothing left in it, the draft is thrown away.
+    private func adopt(_ p: Proposal?) {
+        guard let p else { discard(); return }
+        proposal = p
+        isStale = false
+        question = ""
+        stage = .preview
     }
 
     /// A question is spoken after a beat. If you carry on in that moment it is dropped, so Kitty never talks over the rest
@@ -566,43 +810,42 @@ final class VoiceConversation: ObservableObject {
 
     // MARK: Confirming
 
-    private func startCountdown() {
-        countdownTask?.cancel()
-        countdownActive = true
-        countdownTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(Self.autoAddDelay * 1_000_000_000))
-            guard !Task.isCancelled, let self else { return }
-            guard self.countdownActive, self.stage == .preview else { return }
-            self.countdownTask = nil       // detach first: confirm() cancels the countdown, and that must not be us
-            self.countdownActive = false
-            self.confirm()
-        }
-    }
-
-    func cancelCountdown() {
-        countdownTask?.cancel()
-        countdownTask = nil
-        if countdownActive { countdownActive = false }
-    }
-
     /// Apply the preview.
     func confirm() {
+        // Approval belongs to the exact draft you saw. If the draft changed since, the card is refreshed and nothing is saved.
+        let changed = (proposal.map { !$0.approves(currentDraftVersion: turns.state.drafts.version) } ?? false) && turns.state.drafts.hasContent
+        if !changed { adoptLatestPreview() }
+        if changed {
+            adoptLatestPreview()
+            stage = .preview
+            isStale = false
+            showReviewAnswer("The list changed while you were deciding, so I haven't saved anything. Check the latest and say yes again.")
+            return
+        }
         guard let p = proposal else { return }
-        guard turns.state.confirmation.consume(p.id) else { return }       // yes, a tap and the countdown: it runs exactly once
-        cancelCountdown()
+        guard turns.state.confirmation.consume(p.id) else { return }       // a "yes" and a tap together: it runs exactly once
         processingTask?.cancel()
+        processingTask = nil
         generation += 1
         let said = liveText
         stage = .thinking
         Task {
             let reply = await p.apply()
+            if reply.report?.persistenceFailed == true {
+                // Nothing was stored. The draft stays on screen exactly as approved, the same approval can be given again, and the
+                // reply says so instead of reporting a save.
+                turns.state.confirmation.rearm(p.id)
+                stage = .preview
+                showReviewAnswer(reply.message)
+                return
+            }
             await finishTurn(you: said, reply: reply)
         }
     }
 
     /// Throw the preview away and start over.
     func discard() {
-        cancelCountdown()
+        requestRecords = []
         processingTask?.cancel()
         generation += 1
         let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -628,26 +871,39 @@ final class VoiceConversation: ObservableObject {
 
     // MARK: Finishing a turn
 
+    /// The turns behind a reply that made tasks go with those tasks. A finished reply ends the request either way.
+    private func keepDetails(for reply: AgentReply) {
+        // Model calls made while saving (the time of day of each task) come after the turns, as one more record.
+        let records = TaskDetailsFormat.withSavingCalls(requestRecords, calls: ModelTape.drain())
+        if !reply.created.isEmpty { detailsStore.attach(records, to: reply.created) }
+        requestRecords = []
+    }
+
     private func finishTurn(you: String, reply: AgentReply) async {
+        keepDetails(for: reply)
+        // The screen was closed while this saved: say what happened on the home screen. Never speak or listen from nowhere.
+        guard active else { LaunchRouter.shared.post(reply.message); return }
         let said = you.trimmingCharacters(in: .whitespacesAndNewlines)
         if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
         lines.append(ChatLine(role: .kitty, text: reply.message, filter: reply.spec.map { PanelFilter(spec: $0) },
-                              taskIDs: reply.created))
+                              taskIDs: reply.created + reply.shown.filter { !reply.created.contains($0) }))
         let made = reply.created.compactMap { id in TaskStore.shared.tasks.first { $0.id == id } }.map { (title: $0.title, id: $0.id) }
         turns.state.noteCreated(made)
         resetTurn()
         if speakReplies {
-            await speakAndResume(Speaker.spokenForm(of: reply.message, isList: reply.spec != nil, hint: reply.hint))
+            await speakAndResume(Speaker.spokenForm(of: reply.message, isList: reply.spec != nil || !reply.shown.isEmpty, hint: reply.hint))
         } else {
             await resumeListening()        // a fresh recognition for the next thing you say
         }
     }
 
     private func resetTurn() {
-        hideHearingChip()
+        lastWaitKind = ""
+        finalTried = ""
         turns.state.clearPending()
         sessionEchoLead = 0
         lastActedRaw = ""
+        nudgedText = ""
         carry = ""
         sessionText = ""
         turnText = ""
@@ -656,9 +912,6 @@ final class VoiceConversation: ObservableObject {
         proposal = nil
         question = ""
         isStale = false
-        countdownTask?.cancel()
-        countdownTask = nil
-        countdownActive = false
         processingTask?.cancel()
         processingTask = nil
         generation += 1
@@ -738,22 +991,20 @@ final class VoiceConversation: ObservableObject {
         idleTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 90_000_000_000)
             guard !Task.isCancelled, let self else { return }
-            if self.stage == .listening, self.turnText.isEmpty { self.pauseListening() }   // nobody is talking: stop listening
+            if self.stage == .listening, self.turnText.isEmpty {                             // nobody is talking: stop listening
+                self.pauseListening()
+                self.micNotice = "Mic turned off after a quiet minute. Tap it to talk."
+            }
         }
     }
 
     /// What you have said since the last thing Kitty asked: the live bubble, and the line added to the chat.
     var liveText: String {
-        let words = turnText.split(whereSeparator: { $0.isWhitespace })
-        return words.dropFirst(min(committedWords, words.count)).joined(separator: " ")
+        SpokenText.tail(of: turnText, droppingWords: committedWords)
     }
 
-    /// Which words of `liveText` the cleaner removed (fillers, repeats, taken-back clauses). The bubble strikes them through.
-    var liveRemoved: Set<Int> {
-        let removed = SpeechCleaner.clean(turnText).removed
-        let offset = committedWords
-        return Set(removed.compactMap { $0 >= offset ? $0 - offset : nil })
-    }
+    /// Nothing is struck through: Kitty shows the words exactly as they were heard.
+    var liveRemoved: Set<Int> { [] }
 
     /// Kitty asks a question: what you said so far and the question both go into the chat, so the whole exchange stays visible.
     private func showQuestion(_ q: String) {
@@ -792,7 +1043,39 @@ final class VoiceConversation: ObservableObject {
 final class LaunchRouter: ObservableObject {
     static let shared = LaunchRouter()
     @Published var conversationRequested = false
-    func requestConversation() { conversationRequested = true }
+    /// A short note for the home screen ("Added 2 tasks") when something finished after the Talk screen was closed.
+    @Published private(set) var notice: String?
+    private var noticeTask: Task<Void, Never>?
+
+    func post(_ text: String) {
+        notice = text
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.notice = nil
+        }
+    }
+
+    func clearNotice() {
+        noticeTask?.cancel()
+        notice = nil
+    }
+    /// What Siri asked Kitty to do, when it was more than "start listening" ("what are my tasks for today").
+    private(set) var pendingRequest: String?
+
+    /// Opens the conversation. With `request`, Kitty runs those words as if you had said them, speaks the answer and goes on listening.
+    func requestConversation(request: String? = nil) {
+        let text = request?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        pendingRequest = text.isEmpty ? nil : text
+        conversationRequested = true
+    }
+
+    /// Hands the waiting request over, once.
+    func takeRequest() -> String? {
+        defer { pendingRequest = nil }
+        return pendingRequest
+    }
 }
 
 // MARK: - "Hey Kitty" while the app is open
@@ -904,34 +1187,315 @@ struct FilterSheet: Identifiable {
     var filter: PanelFilter
 }
 
+/// "What Kitty is doing": the steps of the turn as they happen. What was heard, what Swift did, the exact text sent to the model, the
+/// model's answer as it is written, each search of your tasks, what Swift checked, and the result (or why it failed). It stays until
+/// the next turn starts, so a slow or failed turn can be read afterwards.
+struct LiveModelPanel: View {
+    @ObservedObject var feed: LiveFeed
+    let working: Bool
+    /// Closed at first: while Kitty thinks, and beside the preview, the panel is one button, "See details". Tapping it opens the
+    /// steps, and the way to close them is at the bottom, after the last step, where the reading ends.
+    @State private var expanded: Bool
+
+    init(feed: LiveFeed, working: Bool, startsOpen: Bool = false) {
+        _feed = ObservedObject(wrappedValue: feed)
+        self.working = working
+        _expanded = State(initialValue: startsOpen)
+    }
+
+    /// The newest step in a few words, so the closed button says what Kitty is doing right now.
+    private var latest: String {
+        guard let step = feed.steps.last else { return "" }
+        let first = step.text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
+        return LiveStepRow.label(step.stage, text: first) + (first.isEmpty ? "" : ": " + first)
+    }
+
+    var body: some View {
+        Group { panel }
+            // A new turn starts closed again: what the last turn left open is not shown over the next one.
+            .onChange(of: feed.started) { _, _ in expanded = false }
+    }
+
+    @ViewBuilder private var panel: some View {
+        if !feed.steps.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                if expanded {
+                    title
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(feed.steps) { step in LiveStepRow(step: step) }
+                    }
+                    collapse
+                } else {
+                    seeDetails
+                }
+            }
+            .padding(12)
+            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.secondary.opacity(0.15)))
+        }
+    }
+
+    /// The closed state: one button, with the live status line under it while the model works, and Share beside it.
+    private var seeDetails: some View {
+        HStack(spacing: 8) {
+            Button { withAnimation { expanded = true } } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: working ? "waveform.path.ecg" : "doc.text.magnifyingglass").foregroundStyle(working ? Color.accentColor : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("See details").font(.subheadline.weight(.semibold))
+                        Text(latest).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer()
+                    elapsed
+                    Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Shows what Kitty is doing, step by step")
+            TraceShareButton()
+        }
+    }
+
+    /// The open state's heading. It is not a button: closing is at the bottom.
+    private var title: some View {
+        HStack(spacing: 8) {
+            Image(systemName: working ? "waveform.path.ecg" : "checkmark.circle").foregroundStyle(working ? Color.accentColor : .secondary)
+            Text("What Kitty is doing").font(.subheadline.weight(.semibold))
+            Spacer()
+            elapsed
+            TraceShareButton()
+        }
+    }
+
+    /// After the last step, so it is reached at the end of the reading and the thread stays where it was.
+    private var collapse: some View {
+        Button { withAnimation { expanded = false } } label: {
+            HStack(spacing: 6) {
+                Spacer()
+                Image(systemName: "chevron.up").font(.caption.weight(.bold))
+                Text("Hide details").font(.footnote.weight(.semibold))
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Running seconds while the turn works; the total once it has finished.
+    @ViewBuilder private var elapsed: some View {
+        if working, let start = feed.started {
+            TimelineView(.periodic(from: .now, by: 0.5)) { ctx in
+                Text(String(format: "%.0f s", max(0, ctx.date.timeIntervalSince(start)))).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        } else if let last = feed.steps.last {
+            Text(String(format: "%.1f s", last.at)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The trace of the turn on screen (and the last one), as a plain text file. The text is built when the share sheet is used, so
+/// it holds everything up to that moment, even while a model call is still running.
+nonisolated struct TraceExport: Transferable {
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .plainText) { _ in
+            let stamp = String(Int(Date().timeIntervalSince1970))
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("Kitty-trace-\(stamp).txt")
+            try TurnTraceFormat.text().write(to: url, atomically: true, encoding: .utf8)
+            return SentTransferredFile(url)
+        }
+    }
+}
+
+struct TraceShareButton: View {
+    var titled = false
+
+    var body: some View {
+        ShareLink(item: TraceExport(), preview: SharePreview("Kitty trace")) {
+            if titled {
+                Label("Share trace", systemImage: "square.and.arrow.up").font(.caption.weight(.semibold))
+            } else {
+                Image(systemName: "square.and.arrow.up").font(.subheadline)
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.accentColor)
+        .accessibilityLabel("Share trace")
+        .accessibilityHint("Shares everything sent to the model and written back in this turn")
+    }
+}
+
+fileprivate struct LiveStepRow: View {
+    let step: LiveStep
+    @State private var open = false
+
+    private var lines: [String] { step.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) }
+    private var first: String { lines.first ?? "" }
+    private var rest: String { lines.dropFirst().joined(separator: "\n") }
+    /// A step opens only when tapped. The model's answer while it is written shows a short readable tail instead, and a long text
+    /// shows its first lines with "Show all".
+    private var isOpen: Bool { open }
+    @State private var showAll = false
+    private static let openLines = 14
+    private static let tailCharacters = 320
+
+    /// The last few lines of the answer as written so far, at a normal size.
+    private var tail: String {
+        let text = rest.replacingOccurrences(of: "\n", with: " ")
+        return text.count > Self.tailCharacters ? "…" + text.suffix(Self.tailCharacters) : text
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(String(format: "%.1f", step.at)).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 34, alignment: .trailing)
+                Text(Self.label(step.stage, text: first)).font(.caption.weight(.semibold)).foregroundStyle(Self.color(step.stage, text: first))
+                Text(first).font(.caption).foregroundStyle(.secondary).lineLimit(isOpen ? nil : 2)
+                if !rest.isEmpty {
+                    Spacer(minLength: 0)
+                    Image(systemName: open ? "chevron.up" : "chevron.down").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            if isOpen, !rest.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Self.sectioned(rest, stage: step.stage))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(showAll ? nil : Self.openLines)
+                        .textSelection(.enabled)
+                    if !showAll, rest.split(separator: "\n", omittingEmptySubsequences: false).count > Self.openLines {
+                        Button("Show all") { showAll = true }.font(.caption.weight(.semibold)).buttonStyle(.plain)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else if step.writing, !rest.isEmpty {
+                Text(tail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { if !rest.isEmpty { withAnimation { open.toggle() } } }
+    }
+
+    /// The labels of the prompt's sections, in bold, so what was sent reads as STATE, ITEMS, RECENT CHANGES, USER and so on.
+    static let promptSections = ["STATE:", "QUESTION:", "ITEMS", "RECENT CHANGES", "LINES SO FAR", "THIS LINE:", "LIKELY ITEMS:", "ORIGINAL REQUEST:", "HEARD BUT NOT MADE INTO TASKS:", "USER:",
+                                 "Today:", "Transcript:", "Pending draft", "Clarification so far:", "Reference vocabulary", "left out to fit:"]
+
+    static func sectioned(_ text: String, stage: String) -> AttributedString {
+        guard stage == "TO MODEL" || stage == "BUDGET" else { return AttributedString(text) }
+        var out = AttributedString()
+        for (n, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            var row = AttributedString((n == 0 ? "" : "\n") + line)
+            if let label = promptSections.first(where: { line.hasPrefix($0) }), let r = row.range(of: label) {
+                row[r].font = .system(.caption2, design: .monospaced).bold()
+                row[r].foregroundColor = .primary
+            }
+            out += row
+        }
+        return out
+    }
+
+    /// The step where the app, not the model, searched the saved tasks (`searched: day today -> 3 results`).
+    static func isSearch(_ stage: String, _ text: String) -> Bool { stage == "SWIFT" && text.hasPrefix("searched:") }
+
+    static func label(_ stage: String, text: String = "") -> String {
+        if isSearch(stage, text) { return "Swift searched" }
+        switch stage {
+        case "HEARD": return "Heard"
+        case "CLEANED": return "Cleaned"
+        case "SWIFT": return "Swift"
+        case "TO MODEL": return "Sent to model"
+        case "INSTRUCTIONS": return "Instructions sent"
+        case "SCHEMA": return "Schema sent"
+        case "MODEL WRITING": return "Model writing"
+        case "FROM MODEL": return "Model answered"
+        case "BUDGET": return "Budget"
+        case "LINE": return "New line"
+        case "RESULT": return "Result"
+        case "WARNING": return "Warning"
+        case "CLARIFY": return "Question"
+        default: return stage.capitalized
+        }
+    }
+
+    static func color(_ stage: String, text: String = "") -> Color {
+        if isSearch(stage, text) { return .blue }
+        switch stage {
+        case "WARNING": return .orange
+        case "RESULT": return .green
+        case "TO MODEL", "MODEL WRITING", "FROM MODEL", "INSTRUCTIONS", "SCHEMA": return .purple
+        case "BUDGET": return .teal
+        case "LINE": return .orange
+        default: return .secondary
+        }
+    }
+}
+
+/// When the thread may move by itself. A user who is scrolling, or who has scrolled up to read, is never pulled to the bottom.
+enum AutoScroll {
+    enum Cause {
+        case line       // a new line of the chat, or the stage changed: the answer to what was just said
+        case words      // the user's words as they speak
+        case step       // a new step of the live panel
+    }
+
+    static func shouldFollow(_ cause: Cause, userTouching: Bool, nearBottom: Bool) -> Bool {
+        guard !userTouching else { return false }
+        switch cause {
+        case .line: return true                 // a new answer appears: show it, even if the user had scrolled up
+        case .words, .step: return nearBottom   // background updates only follow a reader who is already at the bottom
+        }
+    }
+}
+
 struct ConversationView: View {
     @ObservedObject var convo: VoiceConversation
     var seed: String? = nil
+    var seedIsVoice = false
     @Environment(\.dismiss) private var dismiss
-    @State private var sendFill: CGFloat = 0
+    @Environment(\.scenePhase) private var scenePhase
     @State private var typed = ""
+    @State private var typedFocused = false
     @State private var sheet: FilterSheet?
+    @State private var editTarget: DraftEditTarget?
+    /// Lists on a review card that were opened past the first few tasks (by list name; a card is short-lived).
+    @State private var openedLists: Set<String> = []
+    /// The thread follows new content only while the user is not scrolling it and is at (or near) the bottom.
+    @State private var touching = false
+    @State private var nearBottom = true
 
     var body: some View {
         ZStack {
             Color.screenBackground.ignoresSafeArea()
+                .onTapGesture { typedFocused = false }
             VStack(spacing: 0) {
                 topBar
                 thread
                 bottomBar
             }
         }
-        .onChange(of: convo.countdownActive) { _, active in
-            if active {
-                sendFill = 0
-                withAnimation(.linear(duration: VoiceConversation.autoAddDelay)) { sendFill = 1 }
-            } else {
-                withAnimation(.easeOut(duration: 0.2)) { sendFill = 0 }
-            }
+        .onAppear {
+            convo.appForegroundChanged(scenePhase == .active)
+            convo.open(seed: seed, voice: seedIsVoice)
         }
-        .onAppear { convo.open(seed: seed) }
         .onDisappear { convo.close() }
+        .onChange(of: scenePhase) { _, phase in convo.appForegroundChanged(phase == .active) }
         .sheet(item: $sheet) { item in TasksView(filter: item.filter) }
+        .sheet(item: $editTarget, onDismiss: { convo.endManualEdit() }) { target in
+            DraftEditSheet(convo: convo, target: target)
+        }
+    }
+
+    private func openEditor(_ target: DraftEditTarget) {
+        convo.beginManualEdit()
+        editTarget = target
     }
 
     // MARK: Top bar
@@ -940,14 +1504,15 @@ struct ConversationView: View {
         HStack {
             Menu {
                 Toggle("Read replies aloud", isOn: $convo.speakReplies)
-                Toggle("Add automatically after 2 seconds", isOn: $convo.autoAdd)
                 Toggle("Listen for English (India)", isOn: $convo.indianEnglish)
                 Picker("Speech engine", selection: $convo.speechEngine) {
                     ForEach(SpeechEngineChoice.menuChoices) { choice in
                         Text(choice.isAvailable ? choice.label : choice.label + " (not installed)").tag(choice)
                     }
                 }
-                Toggle("Trust the transcript as spoken", isOn: $convo.rawTranscript)
+                Toggle("Live model view", isOn: $convo.liveView)
+                Toggle("Save task details", isOn: $convo.saveDetails)
+                Button("Delete saved task details", role: .destructive) { convo.detailsStore.clear(); UtteranceStore.shared.clear() }
             } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.title3)
@@ -980,6 +1545,11 @@ struct ConversationView: View {
                     ForEach(convo.lines) { line in lineView(line) }
                     if !convo.liveText.isEmpty { youBubble }
                     responseArea
+                    if convo.liveView { LiveModelPanel(feed: LiveFeed.shared, working: convo.stage == .thinking) }
+                    else if convo.stage == .thinking || TurnCapture.shared.callCount > 0 {
+                        // The live view is off: the trace of this turn can still be shared, while Kitty thinks and after.
+                        HStack { Spacer(); TraceShareButton(titled: true) }
+                    }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -987,14 +1557,31 @@ struct ConversationView: View {
                 .padding(.bottom, 12)
             }
             .scrollIndicators(.hidden)
-            .onChange(of: convo.turnText) { _, _ in scrollDown(proxy) }
-            .onChange(of: convo.lines.count) { _, _ in scrollDown(proxy) }
-            .onChange(of: convo.stage) { _, _ in scrollDown(proxy) }
+            .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(TapGesture().onEnded { typedFocused = false })
+            .onScrollPhaseChange { _, phase in touching = phase == .interacting || phase == .decelerating }
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 80
+            } action: { _, near in nearBottom = near }
+            .onChange(of: convo.turnText) { _, _ in follow(.words, proxy) }
+            .onChange(of: convo.lines.count) { _, _ in follow(.line, proxy) }
+            .onChange(of: convo.stage) { _, _ in follow(.line, proxy) }
+            // Only a step that is ADDED moves the thread. The model's streamed answer grows a step many times a second and must not.
+            .onReceive(LiveFeed.shared.$steps.map(\.count).removeDuplicates()) { count in
+                if convo.liveView, count > 0 { follow(.step, proxy) }
+            }
         }
     }
 
-    private func scrollDown(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+    /// Follows new content to the bottom unless the user is scrolling or has scrolled away (`AutoScroll`).
+    private func follow(_ cause: AutoScroll.Cause, _ proxy: ScrollViewProxy) {
+        guard AutoScroll.shouldFollow(cause, userTouching: touching, nearBottom: nearBottom) else { return }
+        scrollDown(proxy, animated: cause != .step)
+    }
+
+    private func scrollDown(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        if animated { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) } }
+        else { proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
     private var welcome: some View {
@@ -1011,11 +1598,11 @@ struct ConversationView: View {
         .padding(.horizontal, 12)
     }
 
-    /// Your words as you said them. Anything the cleaner took out stays visible, struck through and dimmed.
+    /// Your words as you said them: line breaks you typed stay line breaks, runs of spaces collapse to one.
     private func spoken(_ text: String, struck: Set<Int>) -> AttributedString {
         var out = AttributedString()
-        for (i, w) in SpeechCleaner.words(of: text).enumerated() {
-            var part = AttributedString(i == 0 ? w : " " + w)
+        for (i, piece) in SpokenText.pieces(text).enumerated() {
+            var part = AttributedString(piece.separator + piece.word)
             if struck.contains(i) {
                 part.strikethroughStyle = .single
                 part.foregroundColor = .secondary
@@ -1030,6 +1617,7 @@ struct ConversationView: View {
             Spacer(minLength: 48)
             (Text(spoken(text, struck: struck)) + Text(live ? " …" : "").foregroundStyle(.secondary))
                 .font(.body)
+                .multilineTextAlignment(.leading)
                 .padding(12)
                 .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
@@ -1038,16 +1626,6 @@ struct ConversationView: View {
     private var youBubble: some View {
         VStack(alignment: .trailing, spacing: 6) {
             youBubbleView(convo.liveText, struck: convo.liveRemoved, live: convo.stage == .listening)
-            if let n = convo.hearingTasks, convo.stage == .listening {
-                Label(HearingChip.label(n), systemImage: "ear")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.secondary.opacity(0.12), in: Capsule())
-                    .transition(.opacity)
-                    .accessibilityLabel(HearingChip.label(n))
-            }
         }
     }
 
@@ -1088,20 +1666,27 @@ struct ConversationView: View {
     private var responseArea: some View {
         switch convo.stage {
         case .thinking:
+            // The preview stays on screen (dimmed) while the model works: it is never swapped for a spinner.
+            if let p = convo.proposal { proposalCard(p, dimmed: true) }
             thinkingCard
         case .preview:
             if let p = convo.proposal { proposalCard(p, dimmed: false) }
         case .question:
             questionCard
         case .listening, .idle:
-            if let p = convo.proposal, convo.isStale {
-                proposalCard(p, dimmed: true)
+            if let p = convo.proposal {
+                proposalCard(p, dimmed: convo.isStale)
             } else if !convo.question.isEmpty {
                 questionCard
             } else if let error = convo.errorMessage {
                 Text(error)
                     .font(.footnote)
                     .foregroundStyle(.red)
+                    .padding(.horizontal, 4)
+            } else if let note = convo.micNotice {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
             } else if let notice = convo.speechNotice {
                 Text(notice)
@@ -1113,10 +1698,26 @@ struct ConversationView: View {
     }
 
     private var thinkingCard: some View {
-        HStack(spacing: 10) {
+        let words = convo.liveText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return HStack(spacing: 10) {
             ProgressView()
-            Text("Thinking…").font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(words.isEmpty ? "Working on it…" : "Working on “\(words)”")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                if !convo.micOn {
+                    Text("Mic is off. It still gets done.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Spacer()
+            if convo.canCancelWork {
+                Button("Cancel") { convo.cancelWork() }
+                    .font(.callout.weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(.secondary)
+            }
         }
         .padding(14)
         .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1124,7 +1725,7 @@ struct ConversationView: View {
 
     /// The question itself is in the chat above, so this is only a quiet hint.
     private var questionCard: some View {
-        Text("Just answer. I'm listening.")
+        Text(convo.micOn ? "Just answer. I'm listening." : "Just answer. Type it below, or tap the mic.")
             .font(.footnote)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 4)
@@ -1141,16 +1742,13 @@ struct ConversationView: View {
         }
     }
 
-    private func proposalCard(_ p: Proposal, dimmed: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: p.destructive ? "exclamationmark.triangle.fill" : "sparkles")
-                    .foregroundStyle(p.destructive ? Color.red : Color.accentColor)
-                Text(dimmed ? "Updating as you speak…" : p.title).font(.headline)
-                Spacer()
-            }
-
-            ForEach(p.rows) { row in
+    /// One task of a review card: a tile with its title and what Kitty understood about it.
+    @ViewBuilder
+    private func proposalRow(_ row: PreviewRow, p: Proposal, dimmed: Bool) -> some View {
+                let editable = row.draftID != nil && !dimmed && !p.destructive
+                SwipeToDeleteRow(enabled: editable, label: "Delete \(row.title)") {
+                    if let id = row.draftID { withAnimation { convo.deleteDraftItem(id) } }
+                } content: {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: row.icon)
                         .foregroundStyle(p.destructive ? Color.red : Color.accentColor)
@@ -1158,16 +1756,102 @@ struct ConversationView: View {
                         .padding(.top, 2)
                     VStack(alignment: .leading, spacing: 6) {
                         Text(row.title).font(.system(.body, design: .rounded).weight(.semibold))
-                        if !row.tags.isEmpty {
+                        DetailLinesView(lines: row.details)
+                        let status = row.tags.filter { !$0.isLabel }
+                        if !status.isEmpty {
                             FlowLayout(spacing: 6) {
-                                ForEach(row.tags) { tag in
+                                ForEach(status) { tag in
                                     TagPill(text: tag.text, icon: tag.icon, color: color(tag.color))
                                 }
                             }
                         }
+                        LabelRow(labels: row.tags.filter(\.isLabel).map(\.text), scrolls: false)
+                    }
+                    Spacer(minLength: 0)
+                    if editable {
+                        Image(systemName: "pencil")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                    }
+                }
+                // Each task is its own tile: padded inside, a gap between tiles, rounded to match the card.
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: SwipeToDeleteRow<EmptyView>.tileRadius, style: .continuous))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if editable, let id = row.draftID { openEditor(DraftEditTarget(itemID: id)) }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityHint(editable ? "Double tap to change this task" : "")
+                .accessibilityAddTraits(editable ? .isButton : [])
+                }
+    }
+
+    /// The most tasks of one list shown before "Show all".
+    private static let sectionPreview = 6
+
+    /// One list on a review card: its name and a line saying whether it is new, then its tasks. A list is a group of tasks, never a
+    /// task of its own, and its name is shown as the user said it.
+    @ViewBuilder
+    private func proposalSection(_ section: PreviewSection, p: Proposal, dimmed: Bool) -> some View {
+        let key = section.listName ?? ""
+        let open = openedLists.contains(key) || section.rows.count <= Self.sectionPreview + 1
+        let shown = open ? section.rows : Array(section.rows.prefix(Self.sectionPreview))
+        VStack(alignment: .leading, spacing: 8) {
+            if section.listName != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: section.icon).foregroundStyle(Color.accentColor).frame(width: 22)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(section.listName ?? "").font(.system(.subheadline, design: .rounded).weight(.bold))
+                        Text(section.subtitle).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
+            } else if p.sections.count > 1 {
+                Text(section.subtitle).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            ForEach(shown) { row in proposalRow(row, p: p, dimmed: dimmed) }
+            if !open {
+                Button { withAnimation { _ = openedLists.insert(key) } } label: {
+                    Text("Show all \(section.rows.count)").font(.footnote.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+            }
+        }
+    }
+
+    private func proposalCard(_ p: Proposal, dimmed: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: p.destructive || p.recovery != nil ? "exclamationmark.triangle.fill" : "sparkles")
+                    .foregroundStyle(p.destructive ? Color.red : (p.recovery != nil ? Color.orange : Color.accentColor))
+                Text(dimmed ? "Updating as you speak…" : p.title).font(.headline)
+                Spacer()
+            }
+
+            if p.sections.isEmpty {
+                VStack(spacing: 8) {
+                    ForEach(p.rows) { row in proposalRow(row, p: p, dimmed: dimmed) }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(p.sections) { section in proposalSection(section, p: p, dimmed: dimmed) }
+                }
+            }
+
+            if !dimmed, !p.destructive, p.rows.contains(where: { $0.draftID != nil }) {
+                Button { openEditor(DraftEditTarget(itemID: nil)) } label: {
+                    Label("Add a task", systemImage: "plus.circle")
+                        .font(.footnote.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
             }
 
             ForEach(p.notes, id: \.self) { note in
@@ -1200,6 +1884,48 @@ struct ConversationView: View {
 
             if let prompt = p.prompt, !dimmed {
                 Text(prompt).font(.callout.weight(.medium))
+                    .foregroundStyle(p.recovery == nil ? Color.primary : Color.orange)
+            }
+
+            // A flagged task nobody has decided on: include it or remove it. Save below still saves everything shown.
+            if let flagged = p.flagQuestionItemID, !dimmed {
+                FlowLayout(spacing: 8) {
+                    Button { convo.includeDraftItem(flagged) } label: {
+                        Label("Include", systemImage: "checkmark.circle").font(.footnote.weight(.semibold)).lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    Button { convo.deleteDraftItem(flagged) } label: {
+                        Label("Remove", systemImage: "minus.circle").font(.footnote.weight(.semibold)).lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(.secondary)
+                    Button { openEditor(DraftEditTarget(itemID: flagged)) } label: {
+                        Label("See what you said", systemImage: "text.quote").font(.footnote.weight(.semibold)).lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(.secondary)
+                }
+            }
+
+            // The last words could not be applied: the list above is as it was. Try the same words again, or fix an item by hand.
+            if let r = p.recovery, !dimmed {
+                FlowLayout(spacing: 8) {
+                    Button { convo.submitTyped(r.retryWords) } label: {
+                        Label("Try again", systemImage: "arrow.clockwise").font(.footnote.weight(.semibold)).lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    ForEach(r.items, id: \.id) { item in
+                        Button { openEditor(DraftEditTarget(itemID: item.id)) } label: {
+                            Label("Edit “\(item.title)”", systemImage: "pencil").font(.footnote.weight(.semibold)).lineLimit(1).truncationMode(.tail)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                    }
+                }
             }
 
             HStack(spacing: 10) {
@@ -1212,29 +1938,18 @@ struct ConversationView: View {
                 .tint(.secondary)
 
                 Button { convo.confirm() } label: {
-                    Label(convo.countdownActive ? "\(p.confirmLabel)…" : p.confirmLabel,
-                          systemImage: p.destructive ? "trash" : "checkmark")
+                    Label(p.confirmLabel, systemImage: p.destructive ? "trash" : "checkmark")
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.capsule)
                 .tint(p.destructive ? Color.red : Color.accentColor)
-                .overlay(alignment: .leading) {
-                    // Fills in 2 seconds; when it reaches the end, Kitty applies it.
-                    GeometryReader { geo in
-                        Capsule()
-                            .fill(Color.white.opacity(0.3))
-                            .frame(width: geo.size.width * sendFill)
-                    }
-                    .allowsHitTesting(false)
-                    .clipShape(Capsule())
-                }
             }
             .disabled(dimmed)
 
-            Text(p.autoConfirm && convo.autoAdd
-                 ? "Adding automatically. Keep talking to add more, or tap Discard."
-                 : "Say “yes” or tap to confirm. Keep talking to change it.")
+            Text(p.destructive ? "Say “yes” or tap to confirm."
+                 : p.flagQuestionItemID != nil ? "Say “yes” to include it or “no” to remove it. Nothing is saved until you tap Save, and Save saves every task shown here."
+                 : "Nothing is saved until you tap Save or say “yes”. Keep talking, tap a task to change it, or swipe it left to remove it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1247,51 +1962,58 @@ struct ConversationView: View {
     // MARK: Bottom: status, type instead, and the mic
 
     private var statusText: String {
-        switch convo.stage {
-        case .listening where convo.isSpeaking: return "Kitty is speaking. Tap to stop and talk"
-        case .listening: return convo.turnText.isEmpty ? "Listening…" : "Listening… tap the mic when you're done"
-        case .thinking: return "Thinking…"
-        case .preview: return convo.proposal?.autoConfirm == true && convo.autoAdd ? "Say “discard” to stop, or keep talking" : "Say “yes” to confirm, or keep talking"
-        case .question: return "Go ahead, I'm listening"
-        case .idle: return convo.isSpeaking ? "Kitty is speaking. Tap to stop and talk" : (convo.micOn ? "" : "Tap the mic to talk")
-        }
+        ConversationStatus.text(stage: convo.stage, micOn: convo.micOn, isSpeaking: convo.isSpeaking,
+                                hasWords: !convo.turnText.isEmpty,
+                                needsTask: convo.stage == .listening && !convo.turnText.isEmpty
+                                    && !TaskMeaning.hasContent(VoiceTurnManager.splitFinalizer(convo.turnText).text))
     }
 
     private func sendTyped() {
-        let text = typed
+        let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
         typed = ""
         convo.submitTyped(text)
     }
+
+    /// Height of the typing box with one line in it (its padding plus one line of body text).
+    @ScaledMetric(relativeTo: .body) private var oneLineBoxHeight: CGFloat = 44
 
     private var bottomBar: some View {
         VStack(spacing: 8) {
             Text(statusText)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-                .frame(height: 16)
-            HStack(spacing: 12) {
-                TextField("Or type here", text: $typed)
-                    .submitLabel(.send)
-                    .onSubmit { sendTyped() }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .background(Color.cardBackground, in: Capsule())
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(minHeight: 16)
+            HStack(alignment: .bottom, spacing: 12) {
+                // The same box as the home screen (`TypedInputBox`).
+                TypedInputBox(placeholder: "Type a message", text: $typed, isFocused: $typedFocused) { sendTyped() }
+                // The mic's centre sits level with the middle of a one-line box (the mic is taller than the box, so bottoms alone
+                // would put it too high); when the box grows, the mic stays level with its last line.
                 MicButton(on: convo.micOn, busy: convo.stage == .thinking, speaking: convo.isSpeaking) { convo.micTapped() }
+                    .alignmentGuide(.bottom) { $0.height / 2 + oneLineBoxHeight / 2 }
             }
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
-        .padding(.bottom, 10)
+        .padding(.bottom, 0)        // the mic's frame already reaches below the box
     }
 }
 
 /// The microphone: pulses while Kitty is listening.
 struct MicButton: View {
     let on: Bool
-    var busy = false
+    var busy = false               // Kitty is working on what you said: a ring turns around the button, the mic is still a switch
     var speaking = false           // Kitty is talking: the button becomes "stop"
     var action: () -> Void
     @State private var pulse = false
+
+    private var label: String {
+        if speaking { return "Stop Kitty speaking" }
+        if on { return busy ? "Microphone on, working. Tap to stop listening" : "Microphone on. Tap to stop listening" }
+        return busy ? "Microphone off, still working. Tap to listen" : "Microphone off. Tap to listen"
+    }
 
     var body: some View {
         Button(action: action) {
@@ -1304,11 +2026,18 @@ struct MicButton: View {
                 Image(systemName: speaking ? "stop.fill" : (on ? "mic.fill" : "mic.slash.fill"))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
+                if busy && !speaking {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(on ? Color.accentColor : Color.secondary)
+                        .scaleEffect(1.6)
+                        .frame(width: 82, height: 82)
+                }
             }
             .frame(width: 82, height: 82)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(speaking ? "Stop Kitty speaking" : (on ? "Microphone on" : "Microphone off"))
+        .accessibilityLabel(label)
         .onAppear {
             withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { pulse = true }
         }
@@ -1323,18 +2052,48 @@ struct ResultsBlock: View {
 
     var body: some View {
         let data = store.panel(filter)
-        let all = data.overdue + data.due
-        let stacks = TaskStacking.stacks(all)
+        let order = PanelOrder(data, filter: filter)
+        let inline = order.inline(limit: 5)
+        let total = order.flat.count
+        let moreStacks = TaskStacking.stacks(order.flat).count > inline.shown
         VStack(alignment: .leading, spacing: 8) {
-            if all.isEmpty {
+            if total == 0 {
                 Text("Nothing to show.").font(.footnote).foregroundStyle(.secondary)
             }
-            ForEach(Array(stacks.prefix(5))) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
-            if stacks.count > 5 {
-                Button("See all \(all.count)") { onSeeAll() }
+            // What was asked for first, in the order the spoken answer gives it. Overdue comes after.
+            ForEach(inline.cards) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
+            if !inline.overdueCards.isEmpty {
+                overdueLabel(count: order.overdue.count)
+                ForEach(inline.overdueCards) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
+            }
+            if inline.overdueHidden > 0 {
+                Button { onSeeAll() } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill").font(.caption.weight(.bold))
+                        Text(order.spot == .noteBelow ? filter.noteText(count: inline.overdueHidden) : "\(inline.overdueHidden) more overdue")
+                            .font(.footnote.weight(.bold))
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.bold))
+                    }
+                    .foregroundStyle(.red)
+                    .padding(.top, 4)
+                }
+                .buttonStyle(.plain)
+            }
+            if moreStacks && inline.overdueHidden == 0 {
+                Button("See all \(total)") { onSeeAll() }
                     .font(.subheadline.weight(.semibold))
             }
         }
+    }
+
+    private func overdueLabel(count: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.caption.weight(.bold))
+            Text("Overdue \(count)").font(.footnote.weight(.bold))
+        }
+        .foregroundStyle(.red)
+        .padding(.top, 4)
     }
 }
 
@@ -1354,6 +2113,282 @@ struct TasksView: View {
                     ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
                 }
         }
+    }
+}
+
+// MARK: - One tap to a label's tasks
+
+/// Where the home screen's sheet goes: the whole list, one of the smart views, or one label's tasks.
+enum TasksRoute: Identifiable, Equatable {
+    case all
+    case overdue
+    case today
+    case new
+    case label(String)
+
+    var id: String {
+        switch self {
+        case .all: return "all"
+        case .overdue: return "overdue"
+        case .today: return "today"
+        case .new: return "new"
+        case .label(let name): return "label:" + TaskLabels.stemKey(name)
+        }
+    }
+
+    /// The route a home chip opens.
+    init(_ chip: HomeChip) {
+        switch chip.kind {
+        case .all: self = .all
+        case .overdue: self = .overdue
+        case .today: self = .today
+        case .new: self = .new
+        case .label: self = .label(chip.name)
+        }
+    }
+}
+
+/// What "New" lists: open tasks created in the last week, newest first, in one plain list.
+struct NewTasksView: View {
+    @ObservedObject private var store = TaskStore.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var since = HomeLabels.newSince()
+
+    var body: some View {
+        let data = store.panel(PanelFilter(who: .all, category: nil, day: .all, status: .open, addedSince: since))
+        let tasks = (data.overdue + data.due).sorted { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if tasks.isEmpty {
+                        Text("Nothing new this week.").font(.headline).frame(maxWidth: .infinity).padding(.top, 40)
+                    } else {
+                        Text("\(tasks.count) added in the last \(HomeLabels.newDays) days")
+                            .font(.subheadline).foregroundStyle(.secondary).padding(.top, 2)
+                        ForEach(TaskStacking.stacks(tasks)) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(.hidden)
+            .background(Color.screenBackground.ignoresSafeArea())
+            .navigationTitle("New")
+            .largeNavTitle()
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+/// One chip: a smart view (a symbol and a count), or a label (its name, how many tasks are open, a dot for a person, an icon for a
+/// list or a category, a small red dot when something is late).
+struct LabelChip: View {
+    let chip: HomeChip
+    var selected = false
+    let action: () -> Void
+
+    private var tint: Color {
+        if selected { return .white }
+        switch chip.kind {
+        case .overdue: return .red
+        case .today: return .accentColor
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                leading
+                Text(chip.name).lineLimit(1)
+                if chip.kind != .all { Text("\(chip.open)").opacity(0.65) }
+                if chip.hasOverdue {
+                    Circle().fill(selected ? Color.white : Color.red).frame(width: 6, height: 6)
+                }
+                if chip.kind == .all { Image(systemName: "chevron.right").font(.caption.weight(.bold)).opacity(0.65) }
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 14)
+            .frame(minHeight: 44)
+            .foregroundStyle(selected ? Color.white : (chip.kind == .overdue ? Color.red : Color.primary))
+            .background(selected ? Color.accentColor : Color.cardBackground, in: Capsule())
+            .shadow(color: .black.opacity(selected ? 0 : 0.05), radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(chip.spoken)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    @ViewBuilder
+    private var leading: some View {
+        switch chip.kind {
+        case .overdue: Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(tint)
+        case .today: Image(systemName: "sun.max.fill").font(.caption).foregroundStyle(tint)
+        case .new: Image(systemName: "sparkles").font(.caption).foregroundStyle(tint)
+        case .all: EmptyView()
+        case .label:
+            if chip.isPerson {
+                Circle().fill(selected ? Color.white : Assignee.color(for: chip.name)).frame(width: 8, height: 8)
+            } else if chip.isList {
+                Image(systemName: "tray.full.fill").font(.caption).foregroundStyle(tint)
+            } else if chip.isCategory {
+                Image(systemName: "folder.fill").font(.caption).foregroundStyle(tint)
+            }
+        }
+    }
+}
+
+/// The tasks of one label, and nothing else: overdue first, then today, then what is coming up. A row of chips switches to
+/// another label without closing. The full filters are one step away. Everything is read from the tasks in memory.
+struct LabelTasksView: View {
+    @ObservedObject private var store = TaskStore.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var label: String
+    @State private var names: [String]              // the switcher's order, fixed when this opens so it never jumps
+    @State private var kinds: [String: TaskTag.Kind]  // which of them are people, lists or categories (the chip icon), also fixed when this opens
+    @State private var showCompleted = false
+    @State private var showFilters = false
+
+    init(label: String) {
+        _label = State(initialValue: label)
+        let index = TaskStore.shared.tagIndex
+        let shown = HomeLabels.chips(index: index, tasks: TaskStore.shared.tasks, recentTaps: RecentLabels.list(),
+                                     limit: 8, profiles: TaskStore.shared.profiles, tapDates: RecentLabels.dates()).map(\.name)
+        let all = shown.contains { TaskLabels.same($0, label) } ? shown : [label] + shown
+        _names = State(initialValue: all)
+        var kinds: [String: TaskTag.Kind] = [:]
+        for e in index {
+            let key = TaskLabels.stemKey(e.name)
+            if e.kinds.contains(.person) { kinds[key] = .person }
+            else if e.kinds.contains(.list) { kinds[key] = .list }
+            else if e.kinds.contains(.category) { kinds[key] = .category }
+        }
+        _kinds = State(initialValue: kinds)
+    }
+
+    /// Narrowed to a label, so what is current comes first and the overdue ones follow (see `PanelFilter.overdueSpot`).
+    var filter: PanelFilter { PanelFilter(who: .all, category: nil, day: .all, status: .open, label: label, requestedFirst: true) }
+
+    private func chip(_ name: String) -> HomeChip {
+        let s = HomeLabels.stats(for: name, in: store.tasks)
+        let kind = kinds[TaskLabels.stemKey(name)]
+        var chip = HomeChip(name: name, open: s.open, overdue: s.overdue, isPerson: kind == .person)
+        chip.isList = kind == .list
+        chip.isCategory = kind == .category
+        return chip
+    }
+
+    var body: some View {
+        let data = store.panel(filter)
+        let groups = LabelSections.make(overdue: data.overdue, due: data.due)
+        let open = data.overdue.count + data.due.count
+        let done = store.panel(PanelFilter(who: .all, category: nil, day: .all, status: .done, label: label)).due
+
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if names.count > 1 { switcher }
+                    if open > 0 {
+                        Text("\(open) open" + (data.overdue.isEmpty ? "" : " · \(data.overdue.count) overdue"))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                    }
+                    if open == 0 {
+                        Text("Nothing open for \(label).")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                    }
+                    ForEach(groups, id: \.kind) { group in
+                        switch group.kind {
+                        case .today:
+                            section(groups.count > 1 ? "Today" : nil, icon: "sun.max.fill", color: .accentColor, tasks: group.tasks)
+                        case .comingUp:
+                            section("Coming up", icon: "calendar", color: .secondary, tasks: group.tasks)
+                        case .overdue:
+                            section("Overdue", icon: "exclamationmark.triangle.fill", color: .red, tasks: group.tasks)
+                        }
+                    }
+                    if !done.isEmpty {
+                        Button {
+                            withAnimation { showCompleted.toggle() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: showCompleted ? "chevron.down" : "chevron.right").font(.caption.weight(.bold))
+                                Text(showCompleted ? "Hide completed" : "Show completed (\(done.count))").font(.footnote.weight(.semibold))
+                                Spacer()
+                            }
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 8)
+                        }
+                        .buttonStyle(.plain)
+                        if showCompleted { ForEach(done) { TaskCard(task: $0) } }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(.hidden)
+            .background(Color.screenBackground.ignoresSafeArea())
+            .navigationTitle(label)
+            .largeNavTitle()
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Button { showFilters = true } label: { Label("More filters", systemImage: "line.3.horizontal.decrease.circle") }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                }
+            }
+            .navigationDestination(isPresented: $showFilters) {
+                TaskPanelPage(filter: PanelFilter(who: .all, category: nil, day: .all, status: .open, label: label, requestedFirst: true))
+            }
+            .onAppear { store.refreshRoutines() }
+        }
+    }
+
+    private var switcher: some View {
+        CenteredFlowLayout(spacing: 8) {
+            ForEach(names, id: \.self) { name in
+                LabelChip(chip: chip(name), selected: TaskLabels.same(name, label)) {
+                    guard !TaskLabels.same(name, label) else { return }
+                    RecentLabels.note(name)
+                    withAnimation(.easeInOut(duration: 0.15)) { label = name; showCompleted = false }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func section(_ title: String?, icon: String, color: Color, tasks: [TaskItem]) -> some View {
+        if !tasks.isEmpty {
+            if let title {
+                HStack(spacing: 6) {
+                    Image(systemName: icon).font(.caption.weight(.bold))
+                    Text(title).font(.footnote.weight(.bold)).textCase(.uppercase)
+                    Text("\(tasks.count)").font(.footnote).opacity(0.7)
+                    Spacer()
+                }
+                .foregroundStyle(color)
+                .padding(.top, 8)
+            }
+            ForEach(TaskStacking.stacks(tasks)) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
+        }
+    }
+}
+
+/// The full panel with its filters, pushed from a label's list for the rare time they are needed.
+struct TaskPanelPage: View {
+    @State var filter: PanelFilter
+
+    var body: some View {
+        TaskPanel(filter: $filter)
+            .padding(.horizontal, 16)
+            .background(Color.screenBackground.ignoresSafeArea())
+            .navigationTitle("Filters")
+            .inlineNavTitle()
     }
 }
 
@@ -1382,6 +2417,15 @@ extension View {
     func inlineNavTitle() -> some View {
         #if os(iOS)
         self.navigationBarTitleDisplayMode(.inline)
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func largeNavTitle() -> some View {
+        #if os(iOS)
+        self.navigationBarTitleDisplayMode(.large)
         #else
         self
         #endif
@@ -1437,7 +2481,9 @@ struct FlowLayout: Layout {
         let maxWidth = proposal.width ?? .infinity
         var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0, widest: CGFloat = 0
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
+            // A pill wider than the line (a long quote) is given the line's width, never its own: otherwise it makes the card,
+            // and the whole thread with it, wider than the screen.
+            let size = sub.sizeThatFits(ProposedViewSize(width: maxWidth.isFinite ? maxWidth : nil, height: nil))
             if x > 0, x + size.width > maxWidth { x = 0; y += rowHeight + spacing; rowHeight = 0 }
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
@@ -1449,11 +2495,53 @@ struct FlowLayout: Layout {
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
+            let size = sub.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
             if x > bounds.minX, x + size.width > bounds.maxX { x = bounds.minX; y += rowHeight + spacing; rowHeight = 0 }
             sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
+/// Like `FlowLayout`, but every row is centred in the width it is given (the home screen's label chips).
+struct CenteredFlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    private func rows(_ subviews: Subviews, maxWidth: CGFloat) -> [[Int]] {
+        var out: [[Int]] = [[]]
+        var x: CGFloat = 0
+        for (i, sub) in subviews.enumerated() {
+            let w = sub.sizeThatFits(ProposedViewSize(width: maxWidth.isFinite ? maxWidth : nil, height: nil)).width
+            if x > 0, x + w > maxWidth { out.append([]); x = 0 }
+            out[out.count - 1].append(i)
+            x += w + spacing
+        }
+        return out
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var height: CGFloat = 0, widest: CGFloat = 0
+        for (r, row) in rows(subviews, maxWidth: maxWidth).enumerated() {
+            let sizes = row.map { subviews[$0].sizeThatFits(ProposedViewSize(width: maxWidth.isFinite ? maxWidth : nil, height: nil)) }
+            height += (r > 0 ? spacing : 0) + (sizes.map(\.height).max() ?? 0)
+            widest = max(widest, sizes.map(\.width).reduce(0, +) + spacing * CGFloat(max(row.count - 1, 0)))
+        }
+        return CGSize(width: proposal.width ?? widest, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(subviews, maxWidth: bounds.width) {
+            let sizes = row.map { subviews[$0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil)) }
+            let width = sizes.map(\.width).reduce(0, +) + spacing * CGFloat(max(row.count - 1, 0))
+            var x = bounds.minX + max(0, (bounds.width - width) / 2)
+            for (k, i) in row.enumerated() {
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sizes[k]))
+                x += sizes[k].width + spacing
+            }
+            y += (sizes.map(\.height).max() ?? 0) + spacing
         }
     }
 }
@@ -1469,7 +2557,7 @@ struct TagPill: View {
             if let icon {
                 Image(systemName: icon).font(.system(size: 10, weight: .bold))
             }
-            Text(text).font(.caption2.weight(.semibold))
+            Text(text).font(.caption2.weight(.semibold)).lineLimit(1).truncationMode(.tail)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -1478,13 +2566,133 @@ struct TagPill: View {
     }
 }
 
-/// The tags under a task: overdue, repeats, who, when, category, routine, playbook.
+/// How the label row should lay out: a single scrolling line, with an expand control only when it overflows.
+enum LabelRowLayout {
+    static func needsExpand(content: CGFloat, available: CGFloat) -> Bool { available > 0 && content > available + 1 }
+}
+
+/// What a tap on a label pill does. The task panel sets it to "show only this label"; elsewhere pills are plain.
+private struct LabelTapKey: EnvironmentKey {
+    static let defaultValue: ((String) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var labelTap: ((String) -> Void)? {
+        get { self[LabelTapKey.self] }
+        set { self[LabelTapKey.self] = newValue }
+    }
+}
+
+/// A task's labels in one line. Scroll sideways, or tap the chevron to wrap them all into view.
+struct LabelRow: View {
+    let labels: [String]
+    @Environment(\.labelTap) private var labelTap
+    var icon: String = "tag.fill"
+    var icons: [String: String] = [:]          // a pill's own icon, by its text: person, folder, tag, list, flag
+    /// False inside a row that has its own sideways swipe (the preview): the labels wrap instead of scrolling.
+    var scrolls = true
+    @State private var expanded = false
+    @State private var content: CGFloat = 0
+    @State private var available: CGFloat = 0
+
+    private struct WidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    }
+
+    private var overflows: Bool { LabelRowLayout.needsExpand(content: content, available: available) }
+
+    private func pills() -> some View {
+        ForEach(labels, id: \.self) { label in
+            if let labelTap {
+                Button { labelTap(label) } label: { TagPill(text: label, icon: icons[label] ?? icon, color: .secondary) }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Shows only tasks with this tag")
+            } else {
+                TagPill(text: label, icon: icons[label] ?? icon, color: .secondary)
+            }
+        }
+    }
+
+    var body: some View {
+        if labels.isEmpty {
+            EmptyView()
+        } else if expanded || !scrolls {
+            HStack(alignment: .top, spacing: 6) {
+                FlowLayout(spacing: 6) { pills() }
+                if expanded { chevron }
+            }
+        } else {
+            HStack(spacing: 4) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) { pills() }
+                        .background(GeometryReader { Color.clear.preference(key: WidthKey.self, value: $0.size.width) })
+                }
+                .onPreferenceChange(WidthKey.self) { content = $0 }
+                .background(GeometryReader { g in Color.clear.onAppear { available = g.size.width }.onChange(of: g.size.width) { _, w in available = w } })
+                .mask(
+                    HStack(spacing: 0) {
+                        Rectangle()
+                        if overflows {
+                            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 16)
+                        }
+                    }
+                )
+                if overflows { chevron }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var chevron: some View {
+        Button { withAnimation(.snappy) { expanded.toggle() } } label: {
+            Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(expanded ? "Show fewer labels" : "Show all labels")
+    }
+}
+
+/// The tags under a task. One pill style, with an icon for the type: person, folder (category), tag (label), list, flag (priority).
+/// Every tag pill opens the tag filter. Overdue, the day, the time and "+N more" are status, not tags, and stay as chips.
 struct TaskTags: View {
     let task: TaskItem
     var showGroup = true
     var extra = 0                      // the same chore listed again: "+2 more"
+    @Environment(\.labelTap) private var labelTap
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            statusTags
+            let shown = task.tagNames
+            LabelRow(labels: shown, icons: Dictionary(shown.map { ($0, icon(of: $0)) }, uniquingKeysWith: { a, _ in a }))
+        }
+    }
+
+    /// The type icon of a tag on this task: its list or its category.
+    private func icon(of name: String) -> String {
+        if let list = task.listName, TaskLabels.same(list, name) || TaskLabels.same(TaskLabels.listShort(list), name) { return TaskTag.Kind.list.icon }
+        if TaskLabels.same(task.categoryLabel, name) { return TaskTag.Kind.category.icon }
+        return TaskTag.Kind.category.icon
+    }
+
+    /// A tag pill that opens the tag filter when the panel allows it.
+    @ViewBuilder
+    private func tag(_ name: String, icon: String, color: Color) -> some View {
+        if let labelTap {
+            Button { labelTap(name) } label: { TagPill(text: name, icon: icon, color: color) }
+                .buttonStyle(.plain)
+                .accessibilityHint("Shows only tasks with this tag")
+        } else {
+            TagPill(text: name, icon: icon, color: color)
+        }
+    }
+
+    private var statusTags: some View {
         FlowLayout(spacing: 6) {
             if task.isOverdue {
                 TagPill(text: "\(task.daysOverdue) \(task.daysOverdue == 1 ? "day" : "days") overdue",
@@ -1493,17 +2701,44 @@ struct TaskTags: View {
             if extra > 0 {
                 TagPill(text: "+\(extra) more", icon: "square.stack.fill", color: task.isOverdue ? .red : .secondary)
             }
-            TagPill(text: task.effectiveAssignee, icon: "person.fill", color: Assignee.color(for: task.effectiveAssignee))
-            TagPill(text: task.dueLabel, icon: "calendar", color: task.isOverdue ? .red : .secondary)
+            if !task.effectiveAssignee.isEmpty {
+                tag(task.effectiveAssignee, icon: TaskTag.Kind.person.icon, color: Assignee.color(for: task.effectiveAssignee))
+            }
+            if let soft = task.softDue, task.dueDate == nil {
+                TagPill(text: soft, icon: "calendar.badge.clock", color: .secondary)      // as said ("next week"): never turned into a date
+            } else {
+                TagPill(text: task.dueLabel, icon: "calendar", color: task.isOverdue ? .red : .secondary)
+            }
             if let time = task.timeLabel {
                 TagPill(text: time, icon: task.sortSlot.symbol, color: .indigo)
             }
             if let p = task.priority {
-                TagPill(text: p.capitalized, icon: "flag.fill", color: p == "high" ? .red : (p == "medium" ? .orange : .secondary))
+                tag(p.capitalized, icon: TaskTag.Kind.priority.icon, color: p == "high" ? .red : (p == "medium" ? .orange : .secondary))
             }
-            TagPill(text: task.categoryLabel, icon: task.effectiveCategory.symbol, color: .secondary)
             if task.routineID != nil { TagPill(text: "Routine", icon: "repeat", color: .purple) }
-            if showGroup, let g = task.group { TagPill(text: g, icon: "list.bullet.rectangle", color: .orange) }
+            // A playbook step shows its playbook. A list item shows its list as a tag below, like any other.
+            if showGroup, task.profileID == nil, let g = task.group { tag(g, icon: TaskTag.Kind.playbook.icon, color: .orange) }
+        }
+    }
+}
+
+/// The lines under a task's title: why, how, repeat and timeframe, as the user said them. A line Kitty could not read is orange.
+struct DetailLinesView: View {
+    let lines: [TaskDetailLine]
+
+    var body: some View {
+        ForEach(lines) { line in
+            Group {
+                if line.label.isEmpty {
+                    Text(line.value)
+                } else {
+                    Text(line.label + ": ").fontWeight(.semibold) + Text(line.value)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(line.isFlag ? Color.orange : Color.secondary)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -1529,9 +2764,7 @@ struct TaskRowBody: View {
                     .font(.system(.body, design: .rounded).weight(.semibold))
                     .strikethrough(task.isDone)
                     .foregroundStyle(task.isDone ? Color.secondary : Color.primary)
-                if let notes = task.notes, !notes.isEmpty {
-                    Text(notes).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
+                DetailLinesView(lines: TaskDetailLines.lines(for: task, shownAsTag: [.forWhom]))
                 TaskTags(task: task, showGroup: showGroup, extra: extra)
             }
             Spacer(minLength: 0)
@@ -1544,8 +2777,18 @@ struct TaskRowBody: View {
 struct TaskActions: View {
     let task: TaskItem
     var siblings: [TaskItem] = []      // the same chore listed again
+    /// Set when the details of how this task was made were kept: adds "See details".
+    var onDetails: (() -> Void)? = nil
+    /// Opens the edit form for this task.
+    var onEdit: (() -> Void)? = nil
 
     var body: some View {
+        if let onEdit {
+            Button(action: onEdit) { Label("Edit", systemImage: "pencil") }
+        }
+        if let onDetails {
+            Button(action: onDetails) { Label("See details", systemImage: "doc.text.magnifyingglass") }
+        }
         if siblings.count > 1 {
             Button("Mark all \(siblings.count) done") {
                 for t in siblings where !t.isDone { TaskStore.shared.complete(t.id) }
@@ -1583,8 +2826,22 @@ struct TaskCard: View {
     let task: TaskItem
     var showGroup = true
     var siblings: [TaskItem] = []
+    /// Swipe the card left to delete it, in every list. A stack of the same chore loses one at a time, like ticking does.
+    var swipeToDelete = true
 
     var body: some View {
+        if swipeToDelete {
+            SwipeToDelete(onDelete: { withAnimation { TaskStore.shared.remove(task.id) } }) { card }
+                .accessibilityAction(named: "Delete") { withAnimation { TaskStore.shared.remove(task.id) } }
+        } else {
+            card
+        }
+    }
+
+    @State private var showDetails = false
+    @State private var editing = false
+
+    private var card: some View {
         TaskRowBody(task: task, showGroup: showGroup, extra: max(siblings.count - 1, 0)) {
             withAnimation { TaskStore.shared.toggle(task.id) }
         }
@@ -1606,7 +2863,111 @@ struct TaskCard: View {
             }
         }
         .shadow(color: .black.opacity(0.05), radius: 6, y: 2)
-        .contextMenu { TaskActions(task: task, siblings: siblings) }
+        // One tap opens the form with every field, to change and save. The checkbox keeps its own tap.
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .onTapGesture { editing = true }
+        .accessibilityAction(named: "Edit") { editing = true }
+        .contextMenu {
+            TaskActions(task: task, siblings: siblings, onDetails: TaskDetailsStore.shared.has(task.id) ? { showDetails = true } : nil,
+                        onEdit: { editing = true })
+        }
+        .sheet(isPresented: $showDetails) { TaskDetailsView(task: task) }
+        .sheet(isPresented: $editing) { TaskEditSheet(task: task) }
+    }
+}
+
+/// The form for a saved task: the same fields as the draft sheet (`TaskFieldsForm`), plus what only a saved task has. Nothing is written
+/// until Save; Cancel throws the changes away. It edits this one task: for a repeating chore's copy for today, or a playbook step, the
+/// routine or playbook behind it is left as it is. If the change cannot be stored, the sheet stays open and says so.
+struct TaskEditSheet: View {
+    let taskID: UUID
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = TaskStore.shared
+
+    @State private var form: TaskFormState
+    @State private var isDone: Bool
+    @State private var category: TaskCategory
+    @State private var saveFailed = false
+    private let originalCategory: TaskCategory
+    private let originalList: String?
+
+    init(task: TaskItem) {
+        taskID = task.id
+        // The task as it is saved now, not as the card was drawn.
+        let base = TaskStore.shared.tasks.first { $0.id == task.id } ?? task
+        let bigger = base.routineID != nil || (base.profileID == nil && base.group != nil)
+        _form = State(initialValue: TaskFormState(draft: TaskFormBridge.draft(from: base), mode: .saved(routineCopy: base.routineID != nil, partOfBigger: bigger)))
+        _isDone = State(initialValue: base.isDone)
+        _category = State(initialValue: base.effectiveCategory)
+        originalCategory = base.effectiveCategory
+        originalList = base.listName
+    }
+
+    private var people: [String] {
+        var names = store.allAssigneeNames
+        if let a = form.item.assignee.map(Assignee.normalize), !a.isEmpty, !names.contains(where: { $0.lowercased() == a.lowercased() }) { names.append(a) }
+        return names
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TaskFieldsForm(form: $form, people: people, noPersonLabel: "Not set")
+                Section("Status") {
+                    Toggle("Done", isOn: $isDone)
+                }
+                Section("Category") {
+                    Picker("Category", selection: $category) {
+                        ForEach(TaskCategory.allCases, id: \.self) { Text("\($0.emoji) \($0.label)").tag($0) }
+                    }
+                }
+                Section {
+                    Button("Delete this task", role: .destructive) {
+                        withAnimation { store.remove(taskID) }
+                        dismiss()
+                    }
+                } footer: {
+                    if saveFailed { Text("Couldn't save the change.").foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle("Edit task")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save", action: commit).disabled(!form.canSave) }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    private func commit() {
+        guard let current = store.tasks.first(where: { $0.id == taskID }) else { saveFailed = true; return }
+        let draft = form.commit()
+        var out = TaskFormBridge.apply(draft, to: current)
+        out.isDone = isDone
+        if category != originalCategory { out.category = category; out.categoryName = nil }
+        // The list: left alone when the name is as it was; otherwise an existing list, a new one made now (the user's own Save), or none.
+        var madeList: TaskProfile?
+        let named = TaskDraftMapper.clean(draft.listName)
+        if !(named == nil && originalList == nil), !(named != nil && originalList != nil && TaskLabels.same(named ?? "", originalList ?? "")) {
+            if let named {
+                if let known = store.profile(named: named) { out.profileID = known.id }
+                else {
+                    let made = store.ensureProfile(named)
+                    out.profileID = made.profile.id
+                    if made.created { madeList = made.profile }
+                }
+            } else {
+                out.profileID = nil
+            }
+        }
+        guard store.update(out) else {
+            // Not stored: the task is as it was (the store put it back), a list made for it is taken back, and the sheet stays.
+            if let madeList { store.removeProfile(madeList.id, deleteItems: false) }
+            saveFailed = true
+            return
+        }
+        dismiss()
     }
 }
 
@@ -1620,6 +2981,7 @@ struct SwipeToDelete<Content: View>: View {
         ZStack(alignment: .trailing) {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color.red)
+                .opacity(offset < 0 ? 1 : 0)            // hidden at rest, so it never peeks out from behind the card
                 .overlay(alignment: .trailing) {
                     Image(systemName: "trash.fill")
                         .font(.title3)
@@ -1644,7 +3006,8 @@ struct SwipeToDelete<Content: View>: View {
                             }
                         })
         }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        // Clip to the card while it slides, but leave room for its shadow at rest.
+        .mask { RoundedRectangle(cornerRadius: 18, style: .continuous).padding(offset == 0 ? -24 : 0) }
     }
 }
 
@@ -1657,9 +3020,7 @@ struct CreatedTasks: View {
         let tasks = ids.compactMap { id in store.tasks.first { $0.id == id } }
         VStack(alignment: .leading, spacing: 8) {
             ForEach(tasks) { task in
-                SwipeToDelete(onDelete: { store.remove(task.id) }) {
-                    TaskCard(task: task)
-                }
+                TaskCard(task: task)             // swipes away by itself
             }
             if !tasks.isEmpty {
                 Text("Swipe a task left to delete it.")
@@ -1711,7 +3072,7 @@ struct GroupHeader: View {
 
     var body: some View {
         let done = tasks.filter(\.isDone).count
-        let people = Array(Set(tasks.map(\.effectiveAssignee))).sorted()
+        let people = Array(Set(tasks.map(\.effectiveAssignee).filter { !$0.isEmpty })).sorted()
         let listID = tasks.first?.profileID
         let icon = listID.flatMap { id in TaskStore.shared.profiles.first(where: { $0.id == id })?.symbol } ?? "list.bullet.rectangle.fill"
         VStack(alignment: .leading, spacing: 8) {
@@ -1723,6 +3084,7 @@ struct GroupHeader: View {
             }
             ProgressView(value: Double(done), total: Double(max(tasks.count, 1)))
                 .tint(.orange)
+                .accessibilityHidden(true)
             FlowLayout(spacing: 6) {
                 if tasks.contains(where: \.isOverdue) {
                     TagPill(text: "Overdue steps", icon: "exclamationmark.triangle.fill", color: .red, filled: true)
@@ -1741,6 +3103,14 @@ struct TaskPanel: View {
     @Binding var filter: PanelFilter
     @State private var expanded: Set<String> = []
     @State private var showCompleted = false
+    @State private var showEarlier = false          // tomorrow's view: the overdue note expanded
+    // The list card: which lists show every open task, which show their finished ones, a name being typed, an item being added.
+    @State private var showAllOpen: Set<String> = []
+    @State private var showDone: Set<String> = []
+    @State private var renaming: TaskProfile?
+    @State private var renameText = ""
+    @State private var newItem: [String: String] = [:]
+    @State private var notice: String?
 
     private var choices: [AssigneeChoice] {
         var list: [AssigneeChoice] = [.all, .mine]
@@ -1753,7 +3123,7 @@ struct TaskPanel: View {
 
     private var activeCount: Int {
         (filter.who != .all ? 1 : 0) + (filter.category != nil ? 1 : 0) + (filter.day != .all ? 1 : 0) + (filter.status != .all ? 1 : 0)
-            + (filter.profileID != nil ? 1 : 0)
+            + (filter.profileID != nil ? 1 : 0) + (filter.label != nil ? 1 : 0)
     }
 
     private var summary: String {
@@ -1761,6 +3131,7 @@ struct TaskPanel: View {
         if let pid = filter.profileID, let list = store.profiles.first(where: { $0.id == pid }) { parts.append(list.name) }
         if filter.who != .all { parts.append(filter.who.title) }
         if let c = filter.category { parts.append(c.label) }
+        if let l = filter.label { parts.append("#" + l) }
         if filter.day != .all { parts.append(filter.day.rawValue) }
         if filter.status != .all { parts.append(filter.status.rawValue) }
         return parts.isEmpty ? "Everything" : parts.joined(separator: " · ")
@@ -1813,11 +3184,18 @@ struct TaskPanel: View {
                 }
                 .pickerStyle(.segmented)
                 categoryMenu
+                labelMenu
             }
 
             if let cat = filter.category {
                 Button { filter.category = nil } label: {
                     TagPill(text: "\(cat.label)  ✕", icon: cat.symbol, color: .accentColor, filled: true)
+                }
+                .buttonStyle(.plain)
+            }
+            if let label = filter.label {
+                Button { filter.label = nil } label: {
+                    TagPill(text: "\(label)  ✕", icon: "tag.fill", color: .accentColor, filled: true)
                 }
                 .buttonStyle(.plain)
             }
@@ -1837,6 +3215,10 @@ struct TaskPanel: View {
             }
             .scrollIndicators(.hidden)
         }
+        .environment(\.labelTap, { name in
+            filter.label = name
+            withAnimation(.easeInOut(duration: 0.2)) { showFilters = true }
+        })
         .onAppear { store.refreshRoutines(includeTomorrow: filter.day == .tomorrow) }
         .onChange(of: filter.day) { _, day in store.refreshRoutines(includeTomorrow: day == .tomorrow) }
         .onChange(of: filter.who) { _, who in
@@ -1945,6 +3327,27 @@ struct TaskPanel: View {
         .buttonStyle(.plain)
     }
 
+    /// Every tag on open tasks, whatever its type (person, category, list or label), with how many tasks carry it and an icon for
+    /// the type: tap one to see only those tasks.
+    private var labelMenu: some View {
+        let counts = Array(store.tagIndex.prefix(40))
+        func icon(_ e: TagEntry) -> String { e.kinds.count == 1 ? (e.kinds.first?.icon ?? "tag.fill") : "tag.fill" }
+        return Menu {
+            Button { filter.label = nil } label: {
+                Label("All tags", systemImage: filter.label == nil ? "checkmark" : "tag")
+            }
+            ForEach(counts, id: \.name) { item in
+                Button { filter.label = item.name } label: {
+                    Label("\(item.name) (\(item.count))", systemImage: filter.label.map { TaskLabels.same($0, item.name) } == true ? "checkmark" : icon(item))
+                }
+            }
+        } label: {
+            Image(systemName: filter.label == nil ? "tag" : "tag.fill").font(.title2)
+        }
+        .disabled(counts.isEmpty)
+        .accessibilityLabel("Filter by tag")
+    }
+
     private var categoryMenu: some View {
         Menu {
             Button { filter.category = nil } label: {
@@ -2013,7 +3416,15 @@ struct TaskPanel: View {
         switch filter.day {
         case .today: return "Due today"
         case .tomorrow: return "Due tomorrow"
-        case .all: return "Coming up"
+        case .all:
+            // After a question, the section is named for what was asked: "Zomato", "Househelp", "Bathroom".
+            if filter.requestedFirst {
+                if let l = filter.label { return l }
+                if filter.who != .all { return filter.who.title }
+                if let c = filter.category { return c.label }
+                return "Open now"
+            }
+            return "Coming up"
         }
     }
 
@@ -2055,12 +3466,16 @@ struct TaskPanel: View {
             .padding(.top, 36)
         }
 
-        if !data.overdue.isEmpty {
-            sectionHeader(filter.day == .tomorrow ? "Still open from earlier" : "Overdue",
-                          icon: "exclamationmark.triangle.fill",
-                          count: data.overdue.count,
-                          color: filter.day == .tomorrow ? .orange : .red)
+        let spot = filter.overdueSpot
+        let overdueBelow = spot == .noteBelow
+
+        if !data.overdue.isEmpty && spot == .top {
+            sectionHeader("Overdue", icon: "exclamationmark.triangle.fill", count: data.overdue.count, color: .red)
             ForEach(TaskStacking.stacks(data.overdue)) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
+        }
+
+        if overdueBelow && openLoose.isEmpty && groups.isEmpty && !data.overdue.isEmpty {
+            Text(filter.day == .today ? "Nothing due today" : "Nothing due tomorrow").font(.headline).padding(.top, 8)
         }
 
         if !openLoose.isEmpty || !groups.isEmpty {
@@ -2085,6 +3500,31 @@ struct TaskPanel: View {
             }
         }
 
+        if spot == .sectionBelow && !data.overdue.isEmpty {
+            // The overdue tasks match the question too, so they are listed, open, after the ones that are current.
+            sectionHeader("Overdue", icon: "exclamationmark.triangle.fill", count: data.overdue.count, color: .red)
+            ForEach(TaskStacking.stacks(data.overdue)) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
+        }
+
+        if overdueBelow && !data.overdue.isEmpty {
+            Button {
+                withAnimation { showEarlier.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.caption.weight(.bold))
+                    Text(filter.noteText(count: data.overdue.count)).font(.footnote.weight(.bold))
+                    Spacer()
+                    Image(systemName: showEarlier ? "chevron.down" : "chevron.right").font(.caption.weight(.bold))
+                }
+                .foregroundStyle(.red)
+                .padding(.top, 8)
+            }
+            .buttonStyle(.plain)
+            if showEarlier {
+                ForEach(TaskStacking.stacks(data.overdue)) { stack in TaskCard(task: stack.lead, siblings: stack.items) }
+            }
+        }
+
         if !doneLoose.isEmpty {
             Button {
                 withAnimation { showCompleted.toggle() }
@@ -2105,16 +3545,75 @@ struct TaskPanel: View {
         }
     }
 
-    /// A playbook as one collapsible card; its steps appear when opened.
+    /// The most open tasks of a list shown before "Show N more".
+    private static let listPreview = 6
+
+    /// A list (or a playbook) as one collapsible card. A list shows its name and progress, its open tasks first as a checklist, the
+    /// finished ones under "Done (N)", and a menu for what can be done to the whole list. Playbooks and lists the user marked
+    /// "Steps in order" are numbered; a list never is unless the user said so.
     private func groupCard(_ name: String, _ items: [TaskItem]) -> some View {
         let isOpen = Binding<Bool>(
             get: { expanded.contains(name) },
             set: { newValue in
                 if newValue { _ = expanded.insert(name) } else { _ = expanded.remove(name) }
             })
+        let list = items.first?.profileID.flatMap { id in store.profiles.first(where: { $0.id == id }) }
+        let open = items.filter { !$0.isDone }
+        let done = items.filter(\.isDone)
+        let numbered = list.map { $0.isOrdered } ?? (items.first?.profileID == nil)
+        let visible = showAllOpen.contains(name) || open.count <= Self.listPreview + 1 ? open : Array(open.prefix(Self.listPreview))
         return DisclosureGroup(isExpanded: isOpen) {
             VStack(spacing: 8) {
-                ForEach(items) { task in TaskCard(task: task, showGroup: false) }
+                if let list {
+                    HStack {
+                        Spacer()
+                        listMenu(list, items: items)
+                    }
+                }
+                ForEach(Array(visible.enumerated()), id: \.element.id) { n, task in
+                    HStack(alignment: .top, spacing: 6) {
+                        if numbered { Text("\(n + 1)").font(.caption.weight(.bold)).foregroundStyle(.secondary).frame(width: 18).padding(.top, 18) }
+                        TaskCard(task: task, showGroup: false)
+                    }
+                }
+                if visible.count < open.count {
+                    Button { withAnimation { _ = showAllOpen.insert(name) } } label: {
+                        Text("Show \(open.count - visible.count) more").font(.footnote.weight(.medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                }
+                if !done.isEmpty {
+                    Button {
+                        withAnimation { if showDone.contains(name) { _ = showDone.remove(name) } else { _ = showDone.insert(name) } }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: showDone.contains(name) ? "chevron.down" : "chevron.right").font(.caption.weight(.bold))
+                            Text("Done (\(done.count))").font(.footnote.weight(.semibold))
+                            Spacer()
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    if showDone.contains(name) { ForEach(done) { task in TaskCard(task: task, showGroup: false) } }
+                }
+                if let list {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle").foregroundStyle(.secondary)
+                        TextField("Add item", text: Binding(get: { newItem[name] ?? "" }, set: { newItem[name] = $0 }))
+                            .submitLabel(.done)
+                            .onSubmit {
+                                let text = (newItem[name] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !text.isEmpty else { return }
+                                store.addItems([text], to: list)
+                                newItem[name] = ""
+                            }
+                    }
+                    .font(.subheadline)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
             }
             .padding(.top, 10)
         } label: {
@@ -2128,5 +3627,516 @@ struct TaskPanel: View {
                 for t in items where !t.isDone { TaskStore.shared.complete(t.id) }
             }
         }
+    }
+
+    /// What can be done to a whole list.
+    private func listMenu(_ list: TaskProfile, items: [TaskItem]) -> some View {
+        Menu {
+            Button { for t in items where !t.isDone { store.complete(t.id) } } label: { Label("Mark all done", systemImage: "checkmark.circle") }
+            Button { renameText = list.name; renaming = list } label: { Label("Rename", systemImage: "pencil") }
+            Button {
+                store.setOrdered(!list.isOrdered, for: list.id)
+            } label: { Label(list.isOrdered ? "Steps in order (on)" : "Steps in order", systemImage: "list.number") }
+            Button {
+                notice = store.savePlaybook(fromList: list) ? "Saved “\(list.name)” as a playbook." : "There is nothing on this list to save."
+            } label: { Label("Save as playbook", systemImage: "square.and.arrow.down") }
+            Button(role: .destructive) {
+                if filter.profileID == list.id { filter.profileID = nil }
+                store.removeProfile(list.id, deleteItems: true)
+            } label: { Label("Delete list", systemImage: "trash") }
+        } label: {
+            Image(systemName: "ellipsis.circle").font(.title3).foregroundStyle(.secondary)
+        }
+        .accessibilityLabel("List actions for \(list.name)")
+        .alert("Rename list", isPresented: Binding(get: { renaming?.id == list.id }, set: { if !$0 { renaming = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("Rename") { store.renameProfile(list.id, to: renameText); renaming = nil }
+            Button("Cancel", role: .cancel) { renaming = nil }
+        }
+        .alert(notice ?? "", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
+            Button("OK", role: .cancel) { notice = nil }
+        }
+    }
+}
+
+
+// MARK: - How a task was made
+
+/// What was said, what the model was sent and answered, what Swift checked, and what was saved: one card per step, one block
+/// per turn (a task made after a question has two).
+struct TaskDetailsView: View {
+    let task: TaskItem
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let records = TaskDetailsStore.shared.records(for: task.id)
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if records.isEmpty {
+                        Text("No details were kept for this task.").font(.headline).padding(.top, 40).frame(maxWidth: .infinity)
+                    }
+                    if !records.isEmpty {
+                        NavigationLink {
+                            FullTraceView(task: task, records: records)
+                        } label: {
+                            Label("Full trace: every model call, word for word", systemImage: "list.bullet.rectangle")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                                .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    ForEach(Array(records.enumerated()), id: \.element.id) { n, record in
+                        if record.route == "saving" {
+                            card(nil, title: "Model calls while saving", symbol: "tray.and.arrow.down.fill") {
+                                ForEach(record.calls) { call in ModelCallBlock(call: call, part: .both) }
+                            }
+                        } else {
+                        if records.count > 1 { turnHeader(n + 1, of: records.count, record) }
+                        ForEach(TaskDetailsFormat.sections(for: record).filter { $0.section != .savedAs }, id: \.section) { part in
+                            card(part.section) { sectionContent(part.section, part.stages, record) }
+                        }
+                        if !record.result.isEmpty {
+                            card(nil, title: "Kitty said", symbol: "bubble.left.fill") { Text(record.result).font(.callout) }
+                        }
+                        }
+                    }
+                    card(.savedAs) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(TaskDetailsFormat.savedRows(task).enumerated()), id: \.offset) { _, row in fieldRow(row.key, row.value) }
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color.screenBackground.ignoresSafeArea())
+            .navigationTitle("How this was made")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) {
+                    ShareLink(item: TaskDetailsFormat.fullTrace(task: task, records: records)) { Image(systemName: "square.and.arrow.up") }
+                        .disabled(records.isEmpty)
+                }
+            }
+        }
+    }
+
+    private func turnHeader(_ n: Int, of total: Int, _ record: TaskTurnRecord) -> some View {
+        HStack {
+            Text("Turn \(n) of \(total)").font(.headline)
+            Spacer()
+            Text(record.date.formatted(date: .omitted, time: .shortened)).font(.footnote).foregroundStyle(.secondary)
+        }
+        .padding(.top, 8)
+    }
+
+    private func card<Content: View>(_ section: DetailSection?, title: String? = nil, symbol: String? = nil,
+                                     @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title ?? section?.title ?? "", systemImage: symbol ?? section?.symbol ?? "circle")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func fieldRow(_ key: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if !key.isEmpty { Text(key.capitalized).font(.footnote).foregroundStyle(.secondary).frame(width: 84, alignment: .leading) }
+            Text(value).font(.callout).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+        }
+    }
+
+    /// A turn with recorded model calls shows them exactly (instructions, history, prompt, reply); otherwise the shorter lines.
+    @ViewBuilder
+    private func sectionContent(_ section: DetailSection, _ stages: [TraceStage], _ record: TaskTurnRecord) -> some View {
+        if !record.calls.isEmpty && (section == .sentToModel || section == .modelReplied) {
+            ForEach(record.calls) { call in ModelCallBlock(call: call, part: section == .sentToModel ? .sent : .received) }
+        } else {
+            stagesView(section, stages)
+        }
+    }
+
+    @ViewBuilder
+    private func stagesView(_ section: DetailSection, _ stages: [TraceStage]) -> some View {
+        if stages.isEmpty {
+            Text(section.empty).font(.callout).foregroundStyle(.secondary)
+        }
+        ForEach(Array(stages.enumerated()), id: \.offset) { _, s in
+            switch s.stage {
+            case "TO MODEL":
+                let parts = TaskDetailsFormat.split(s.text)
+                Text(parts.summary).font(.callout)
+                if !parts.body.isEmpty { raw("Show full prompt", parts.body) }
+            case "FROM MODEL":
+                let parts = TaskDetailsFormat.split(s.text)
+                Text(parts.summary).font(.footnote).foregroundStyle(.secondary)
+                ForEach(Array(parts.body.split(separator: "\n").enumerated()), id: \.offset) { _, line in
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(TaskDetailsFormat.fields(of: String(line)).enumerated()), id: \.offset) { _, f in fieldRow(f.key, f.value) }
+                    }
+                }
+                if !parts.body.isEmpty { raw("Show raw reply", parts.body) }
+            case "HEARD", "CLEANED":
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(s.stage == "HEARD" ? "Heard" : "Cleaned").font(.footnote).foregroundStyle(.secondary)
+                    Text(s.text).font(.callout).textSelection(.enabled)
+                }
+            default:
+                check(s.text)
+            }
+        }
+    }
+
+    private func check(_ text: String) -> some View {
+        let kind = TaskDetailsFormat.checkKind(text)
+        let icon: (String, Color) = {
+            switch kind {
+            case .dropped: return ("minus.circle.fill", .orange)
+            case .added: return ("plus.circle.fill", .blue)
+            case .kept: return ("checkmark.circle.fill", .green)
+            case .info: return ("info.circle.fill", .secondary)
+            }
+        }()
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon.0).foregroundStyle(icon.1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(lines.first ?? "").font(.callout)
+                if lines.count > 1 {
+                    Text(lines.dropFirst().joined(separator: "\n")).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                }
+            }
+            .textSelection(.enabled)
+        }
+    }
+
+    private func raw(_ title: String, _ text: String) -> some View {
+        DisclosureGroup(title) {
+            ScrollView(.horizontal) {
+                Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled).padding(.top, 6)
+            }
+        }
+        .font(.footnote.weight(.semibold))
+        .tint(.secondary)
+    }
+}
+
+
+/// One model call, exactly: what the session already held, what was sent, what came back, how long it took and any error.
+struct ModelCallBlock: View {
+    enum Part { case sent, received, both }
+    let call: ModelCallRecord
+    var part: Part = .both
+    var number: Int? = nil
+
+    private var history: String {
+        call.history.map { "[\($0.role)]\n\($0.text)" }.joined(separator: "\n\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text((number.map { "Model call \($0): " } ?? "") + call.kind)
+                .font(.callout.weight(.semibold))
+            Text(call.mode + (call.seconds > 0 ? String(format: " · %.1f s", call.seconds) : ""))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if part != .received {
+                Text("Instructions \(Trace.size(call.instructions)) · history \(call.history.count) \(call.history.count == 1 ? "entry" : "entries") · prompt \(Trace.size(call.prompt))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                disclosure("Show instructions", call.instructions.isEmpty ? "(none recorded)" : call.instructions)
+                if !call.history.isEmpty { disclosure("Show session history (\(call.history.count))", history) }
+                disclosure("Show exact prompt", call.prompt)
+            }
+            if part != .sent {
+                if let error = call.error {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+                if !call.rawReply.isEmpty {
+                    Text("Exact reply").font(.footnote).foregroundStyle(.secondary)
+                    Text(call.rawReply)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                } else if call.error == nil {
+                    Text("The model gave no reply.").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func disclosure(_ title: String, _ text: String) -> some View {
+        DisclosureGroup(title) {
+            ScrollView(.horizontal) {
+                Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled).padding(.top, 6)
+            }
+        }
+        .font(.footnote.weight(.semibold))
+        .tint(.secondary)
+    }
+}
+
+/// Everything that happened while a task was made, in the order it happened: what was heard, each Swift step and each model
+/// call, word for word.
+struct FullTraceView: View {
+    let task: TaskItem
+    let records: [TaskTurnRecord]
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                ForEach(TaskDetailsFormat.timeline(for: records)) { item in
+                    switch item.kind {
+                    case .header(let title):
+                        Text(title).font(.headline).padding(.top, 10)
+                    case .step(let step):
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(step.stage).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                            Text(step.text).font(.callout).textSelection(.enabled)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    case .call(let call, let number):
+                        ModelCallBlock(call: call, part: .both, number: number)
+                            .padding(14)
+                            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(Color.screenBackground.ignoresSafeArea())
+        .navigationTitle("Full trace")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                ShareLink(item: TaskDetailsFormat.fullTrace(task: task, records: records)) { Image(systemName: "square.and.arrow.up") }
+            }
+        }
+    }
+}
+
+
+// MARK: - Changing a task of the draft by hand
+
+/// Which task the edit sheet is for; `itemID` is nil for a new one.
+struct DraftEditTarget: Identifiable {
+    let id = UUID()
+    var itemID: UUID?
+}
+
+/// One task in the draft, or a new task: the same fields as the saved-task sheet (`TaskFieldsForm`). Nothing here saves to the list:
+/// it changes the draft, which still waits for Save.
+struct DraftEditSheet: View {
+    @ObservedObject var convo: VoiceConversation
+    let target: DraftEditTarget
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var form: TaskFormState
+    private let isNew: Bool
+
+    init(convo: VoiceConversation, target: DraftEditTarget) {
+        self.convo = convo
+        self.target = target
+        let existing = target.itemID.flatMap { convo.draftItem($0) }
+        isNew = existing == nil
+        _form = State(initialValue: TaskFormState(draft: existing ?? DraftItem(title: "")))
+    }
+
+    private var item: DraftItem { form.item }
+
+    private var people: [String] {
+        var names = convo.knownPeople
+        if let a = item.assignee, !a.isEmpty, !names.contains(a) { names.append(a) }
+        return names
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TaskFieldsForm(form: $form, people: people) {
+                    if !isNew, item.heardAs != nil || item.quoteUnverified {
+                        // The model's quote is the model's, not the user's speech. The original transcript is shown beside it so the
+                        // user can judge for themselves; a quote that matches is not proof that the task is right either.
+                        Section("Evidence") {
+                            if let quote = item.heardAs {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.quoteUnverified ? "Model's quote (not found word for word in what you said)" : "Model's quote")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    Text("“\(quote)”").font(.callout)
+                                }
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("What you said").font(.caption).foregroundStyle(.secondary)
+                                Text(convo.draftSpokenText.isEmpty ? "Not available" : convo.draftSpokenText).font(.callout)
+                            }
+                            if item.quoteUnverified {
+                                Button(item.reviewed ? "Included" : "Include this task") {
+                                    if let id = target.itemID { convo.includeDraftItem(id) }
+                                    dismiss()
+                                }
+                                .disabled(item.reviewed)
+                                Button("Remove this task", role: .destructive) {
+                                    if let id = target.itemID { convo.deleteDraftItem(id) }
+                                    dismiss()
+                                }
+                            }
+                        }
+                    }
+                }
+                if !isNew {
+                    Section {
+                        Button("Delete this task", role: .destructive) {
+                            if let id = target.itemID { convo.deleteDraftItem(id) }
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .navigationTitle(isNew ? "Add a task" : "Change task")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button(isNew ? "Add" : "Done", action: commit).disabled(!form.canSave) }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    private func commit() {
+        let out = form.commit()
+        if isNew { convo.addDraftItem(out) } else { convo.saveDraftEdit(out) }
+        dismiss()
+    }
+}
+
+
+/// The system chime that stands in for "Anything else?" when read-aloud is off.
+enum Chime {
+    static func play() { AudioServicesPlaySystemSound(1057) }
+}
+
+
+// MARK: - Swipe left to delete, for rows that are not in a List
+
+/// A row that slides left to show a red trash button, and deletes with a long swipe or a tap on the button. The preview card is not
+/// a `List`, so it has no built-in swipe actions. It reacts only to a mostly sideways drag, so scrolling the thread still works.
+/// VoiceOver gets a "Delete" action instead.
+struct SwipeToDeleteRow<Content: View>: View {
+    let enabled: Bool
+    var label = "Delete"
+    let onDelete: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    @State private var offset: CGFloat = 0
+    @State private var open = false
+    private let reveal: CGFloat = 84
+    private let fullSwipe: CGFloat = 200
+    /// The corner radius of a task tile, shared with the action behind it so the two read as one shape.
+    static var tileRadius: CGFloat { 14 }
+    private let gap: CGFloat = 8
+
+    var body: some View {
+        if !enabled {
+            content()
+        } else {
+            ZStack(alignment: .trailing) {
+                Button(role: .destructive, action: onDelete) {
+                    VStack(spacing: 3) {
+                        Image(systemName: "trash.fill").font(.body.weight(.semibold))
+                        Text("Remove").font(.caption2.weight(.semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(width: reveal - gap)
+                    .frame(maxHeight: .infinity)
+                    .background(Color.red, in: RoundedRectangle(cornerRadius: Self.tileRadius, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .opacity(offset < 0 ? 1 : 0)
+                .accessibilityHidden(true)
+
+                content()
+                    .offset(x: offset)
+                    .allowsHitTesting(!open)
+                    .overlay {
+                        // Open: a tap anywhere on the row closes it instead of opening the editor.
+                        if open { Color.clear.contentShape(Rectangle()).offset(x: offset).onTapGesture { close() } }
+                    }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 16)
+                    .onChanged { v in
+                        guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                        offset = min(0, max(-fullSwipe - 40, (open ? -reveal : 0) + v.translation.width))
+                    }
+                    .onEnded { v in
+                        guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                        let end = (open ? -reveal : 0) + v.translation.width
+                        if end < -fullSwipe {
+                            onDelete()
+                            close()
+                        } else if end < -reveal / 2 {
+                            withAnimation(.snappy) { open = true; offset = -reveal }
+                        } else {
+                            close()
+                        }
+                    }
+            )
+            .accessibilityAction(named: Text(label), onDelete)
+        }
+    }
+
+    private func close() {
+        withAnimation(.snappy) { open = false; offset = 0 }
+    }
+}
+
+
+/// How your words are laid out in the chat. Words are what the app counts (`committedWords`, struck indices), but the spaces between
+/// them are kept as written: a line break you typed stays a line break, any other run of spaces becomes one space.
+enum SpokenText {
+    struct Piece: Equatable { var separator: String; var word: String }
+
+    static func pieces(_ text: String) -> [Piece] {
+        var out: [Piece] = []
+        var gap = ""
+        var word = ""
+        func flush() {
+            guard !word.isEmpty else { return }
+            let sep: String
+            if out.isEmpty { sep = "" }
+            else {
+                let breaks = gap.filter { $0.isNewline }.count
+                sep = breaks > 0 ? String(repeating: "\n", count: breaks) : " "
+            }
+            out.append(Piece(separator: sep, word: word))
+            word = ""; gap = ""
+        }
+        for ch in text {
+            if ch.isWhitespace {
+                if !word.isEmpty { flush() }
+                gap.append(ch)
+            } else {
+                word.append(ch)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// Everything after the first `n` words, as written (line breaks kept), without the gap in front of the first word kept.
+    static func tail(of text: String, droppingWords n: Int) -> String {
+        let all = pieces(text)
+        let rest = all.dropFirst(min(max(n, 0), all.count))
+        return rest.enumerated().map { $0.offset == 0 ? $0.element.word : $0.element.separator + $0.element.word }.joined()
     }
 }

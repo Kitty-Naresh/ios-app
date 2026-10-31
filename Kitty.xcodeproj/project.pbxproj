@@ -7,13 +7,30 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C196E2064DEE7352D7B60174 /* HybridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C096E2064DEE7352D7B60174 /* HybridTests.swift */; };
+		D2A5C00000000000000000I1 /* TurnCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000I1 /* TurnCaptureTests.swift */; };
+		D2A5C00000000000000000J1 /* ExtractionExperimentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000J1 /* ExtractionExperimentTests.swift */; };
+		D2A5C00000000000000000K1 /* CorrectionReplayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K1 /* CorrectionReplayTests.swift */; };
+		D2A5C00000000000000000K2 /* InvalidOutputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K2 /* InvalidOutputTests.swift */; };
+		D2A5C00000000000000000K3 /* ReviewBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K3 /* ReviewBoundaryTests.swift */; };
+		D2A5C00000000000000000K4 /* SplitMatrixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K4 /* SplitMatrixTests.swift */; };
+		D2A5C00000000000000000S1 /* ScoreboardRunTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S1 /* ScoreboardRunTests.swift */; };
+		D2A5C00000000000000000S2 /* PromptArmExperimentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S2 /* PromptArmExperimentTests.swift */; };
+		D2A5C00000000000000000S6 /* TaskExtraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S6 /* TaskExtraction.swift */; };
+		D2A5C00000000000000000S7 /* TaskResolvers.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S7 /* TaskResolvers.swift */; };
+		D2A5C00000000000000000K9 /* FlatEdit.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K9 /* FlatEdit.swift */; };
+		D2A5C00000000000000000S8 /* TokenBudgetService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S8 /* TokenBudgetService.swift */; };
+		D2A5C00000000000000000K6 /* TaskExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K6 /* TaskExtractionTests.swift */; };
+		D2A5C000000000000000HT01 /* HybridTranscriptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C000000000000000HT01 /* HybridTranscriptTests.swift */; };
+		D2A5C00000000000000000K7 /* ListExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K7 /* ListExtractionTests.swift */; };
+		D2A5C00000000000000000K8 /* HomeChipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K8 /* HomeChipTests.swift */; };
+		D2A5C00000000000000000K5 /* SplitExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K5 /* SplitExtractionTests.swift */; };
 		C1CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */; };
 		C118D23642BEFFC5D56B72CA /* TurboSettler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C018D23642BEFFC5D56B72CA /* TurboSettler.swift */; };
 		C1E0156CE15A2FCC99A38AEF /* HybridTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E0156CE15A2FCC99A38AEF /* HybridTranscript.swift */; };
+		D2A5C00000000000000000C1 /* QuestionComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000C1 /* QuestionComposer.swift */; };
+		D2A5C00000000000000000A1 /* ClarificationDossier.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000A1 /* ClarificationDossier.swift */; };
 		C164107D7EB5C0D47B505D73 /* AudioPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = C064107D7EB5C0D47B505D73 /* AudioPipeline.swift */; };
 		C1FC89527F0980C2E1654219 /* WhisperAccurate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */; };
-		C1D84C66B2C902A29EE2313E /* WhisperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D84C66B2C902A29EE2313E /* WhisperTests.swift */; };
 		C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */; };
 		C1075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */; };
 		C1ED6F343195FB3D795107B8 /* WhisperEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0ED6F343195FB3D795107B8 /* WhisperEngine.swift */; };
@@ -21,9 +38,16 @@
 		AB00570000000000000000E2 /* whisper.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E1 /* whisper.xcframework */; };
 		AB00570000000000000000E4 /* whisper.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E1 /* whisper.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		AB00570000000000000000E5 /* Whisper in Resources */ = {isa = PBXBuildFile; fileRef = AB00570000000000000000E3 /* Whisper */; };
-		C11E15C0B99369D9BD105989 /* SpeechPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01E15C0B99369D9BD105989 /* SpeechPipelineTests.swift */; };
-		C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */; };
-		C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C033EDD0E8E54141063861E4 /* BrandFixer.swift */; };
+		C1E6E25D2150592B59BB8438 /* Trace.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25D2150592B59BB8438 /* Trace.swift */; };
+		C1E6E25D2150592B59BB843A /* PromptBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25D2150592B59BB843A /* PromptBudget.swift */; };
+		C1E6E25E2150592B59BB843B /* TaskSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB843B /* TaskSearch.swift */; };
+		C1E6E25E2150592B59BB84AA /* TaskTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB84AA /* TaskTools.swift */; };
+		C1E6E25E2150592B59BB8502 /* TaskFieldsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB8502 /* TaskFieldsForm.swift */; };
+		C1E6E25E2150592B59BB8501 /* TaskDetailLines.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB8501 /* TaskDetailLines.swift */; };
+		C1E6E25E2150592B59BB8601 /* WhenReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB8601 /* WhenReader.swift */; };
+		C1E6E25E2150592B59BB8701 /* EvidenceGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB8701 /* EvidenceGate.swift */; };
+		C1E6E25E2150592B59BB84BB /* MinimalPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB84BB /* MinimalPath.swift */; };
+		C1E6E25E2150592B59BB84AB /* ContextAssembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB84AB /* ContextAssembler.swift */; };
 		C184B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift in Sources */ = {isa = PBXBuildFile; fileRef = C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */; };
 		C17D1021BFFEC3A83E05C971 /* AppleSpeech.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */; };
 		A10000000000000000000302 /* Agent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000301 /* Agent.swift */; };
@@ -33,23 +57,9 @@
 		A1000000000000000000030A /* QuickTasksApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000309 /* QuickTasksApp.swift */; };
 		A1000000000000000000030C /* Intents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030B /* Intents.swift */; };
 		A1000000000000000000030E /* SpeechRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030D /* SpeechRecognizer.swift */; };
-		A10000000000000000000310 /* KittyVoiceTurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030F /* KittyVoiceTurnTests.swift */; };
-		A10000000000000000000312 /* KittyEvals.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000311 /* KittyEvals.swift */; };
 		A10000000000000000000403 /* SpeechLexicon.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000402 /* SpeechLexicon.swift */; };
-		FA9E00000000000000000012 /* VaguePlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA9E00000000000000000011 /* VaguePlaceholder.swift */; };
-		A10000000000000000000405 /* SpeechCleaner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000404 /* SpeechCleaner.swift */; };
-		A10000000000000000000407 /* SpeechCleanerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000406 /* SpeechCleanerTests.swift */; };
 		A10000000000000000000409 /* VocabularyProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000408 /* VocabularyProvider.swift */; };
-		A1000000000000000000040B /* VocabularyMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040A /* VocabularyMatcher.swift */; };
-		A1000000000000000000040D /* VocabularyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040C /* VocabularyTests.swift */; };
 		A1000000000000000000040F /* BargeIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040E /* BargeIn.swift */; };
-		A10000000000000000000501 /* LongTurn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000500 /* LongTurn.swift */; };
-		A10000000000000000000503 /* LongTurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000502 /* LongTurnTests.swift */; };
-		FA9E00000000000000000002 /* VaguePlaceholderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA9E00000000000000000001 /* VaguePlaceholderTests.swift */; };
-		B0A7C0DE0000000000000002 /* BulkRoutineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0A7C0DE0000000000000001 /* BulkRoutineTests.swift */; };
-		A10000000000000000000411 /* BargeInTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000410 /* BargeInTests.swift */; };
-		A10000000000000000000601 /* UnclearAnswer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000600 /* UnclearAnswer.swift */; };
-		A10000000000000000000603 /* UnclearAnswerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000602 /* UnclearAnswerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,22 +73,46 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		C096E2064DEE7352D7B60174 /* HybridTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000I1 /* TurnCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnCaptureTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000J1 /* ExtractionExperimentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractionExperimentTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K1 /* CorrectionReplayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorrectionReplayTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K2 /* InvalidOutputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvalidOutputTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K3 /* ReviewBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewBoundaryTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K4 /* SplitMatrixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitMatrixTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S1 /* ScoreboardRunTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScoreboardRunTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S2 /* PromptArmExperimentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptArmExperimentTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S6 /* TaskExtraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskExtraction.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S7 /* TaskResolvers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskResolvers.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K9 /* FlatEdit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlatEdit.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S8 /* TokenBudgetService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenBudgetService.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K6 /* TaskExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskExtractionTests.swift; sourceTree = "<group>"; };
+		D1A5C000000000000000HT01 /* HybridTranscriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridTranscriptTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K7 /* ListExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListExtractionTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K8 /* HomeChipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeChipTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000K5 /* SplitExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitExtractionTests.swift; sourceTree = "<group>"; };
 		C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridRecognizer.swift; sourceTree = "<group>"; };
 		C018D23642BEFFC5D56B72CA /* TurboSettler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurboSettler.swift; sourceTree = "<group>"; };
 		C0E0156CE15A2FCC99A38AEF /* HybridTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridTranscript.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000C1 /* QuestionComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionComposer.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000A1 /* ClarificationDossier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClarificationDossier.swift; sourceTree = "<group>"; };
 		C064107D7EB5C0D47B505D73 /* AudioPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPipeline.swift; sourceTree = "<group>"; };
 		C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperAccurate.swift; sourceTree = "<group>"; };
-		C0D84C66B2C902A29EE2313E /* WhisperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperTests.swift; sourceTree = "<group>"; };
 		C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechEngineChoice.swift; sourceTree = "<group>"; };
 		C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperRecognizer.swift; sourceTree = "<group>"; };
 		C0ED6F343195FB3D795107B8 /* WhisperEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperEngine.swift; sourceTree = "<group>"; };
 		C08ECB0958EC263D88F5634F /* WhisperAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperAudio.swift; sourceTree = "<group>"; };
 		AB00570000000000000000E1 /* whisper.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = whisper.xcframework; path = WhisperSetup/build-apple/whisper.xcframework; sourceTree = "<group>"; };
 		AB00570000000000000000E3 /* Whisper */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Whisper; sourceTree = "<group>"; };
-		C01E15C0B99369D9BD105989 /* SpeechPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPipelineTests.swift; sourceTree = "<group>"; };
-		C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPolicy.swift; sourceTree = "<group>"; };
-		C033EDD0E8E54141063861E4 /* BrandFixer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandFixer.swift; sourceTree = "<group>"; };
+		C0E6E25D2150592B59BB8438 /* Trace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trace.swift; sourceTree = "<group>"; };
+		C0E6E25D2150592B59BB843A /* PromptBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptBudget.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB843B /* TaskSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSearch.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB84AA /* TaskTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTools.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB8502 /* TaskFieldsForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskFieldsForm.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB8501 /* TaskDetailLines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailLines.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB8601 /* WhenReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhenReader.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB8701 /* EvidenceGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvidenceGate.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB84BB /* MinimalPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinimalPath.swift; sourceTree = "<group>"; };
+		C0E6E25E2150592B59BB84AB /* ContextAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextAssembler.swift; sourceTree = "<group>"; };
 		C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndianVocabulary.swift; sourceTree = "<group>"; };
 		C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSpeech.swift; sourceTree = "<group>"; };
 		A10000000000000000000301 /* Agent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Agent.swift; sourceTree = "<group>"; };
@@ -88,25 +122,11 @@
 		A10000000000000000000309 /* QuickTasksApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickTasksApp.swift; sourceTree = "<group>"; };
 		A1000000000000000000030B /* Intents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Intents.swift; sourceTree = "<group>"; };
 		A1000000000000000000030D /* SpeechRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizer.swift; sourceTree = "<group>"; };
-		A1000000000000000000030F /* KittyVoiceTurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyVoiceTurnTests.swift; sourceTree = "<group>"; };
-		A10000000000000000000311 /* KittyEvals.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyEvals.swift; sourceTree = "<group>"; };
 		A10000000000000000000028 /* Kitty.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kitty.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000029 /* KittyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KittyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000402 /* SpeechLexicon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechLexicon.swift; sourceTree = "<group>"; };
-		FA9E00000000000000000011 /* VaguePlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaguePlaceholder.swift; sourceTree = "<group>"; };
-		A10000000000000000000404 /* SpeechCleaner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCleaner.swift; sourceTree = "<group>"; };
-		A10000000000000000000406 /* SpeechCleanerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCleanerTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000408 /* VocabularyProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyProvider.swift; sourceTree = "<group>"; };
-		A1000000000000000000040A /* VocabularyMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyMatcher.swift; sourceTree = "<group>"; };
-		A1000000000000000000040C /* VocabularyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000040E /* BargeIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BargeIn.swift; sourceTree = "<group>"; };
-		A10000000000000000000500 /* LongTurn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTurn.swift; sourceTree = "<group>"; };
-		A10000000000000000000502 /* LongTurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTurnTests.swift; sourceTree = "<group>"; };
-		FA9E00000000000000000001 /* VaguePlaceholderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaguePlaceholderTests.swift; sourceTree = "<group>"; };
-		B0A7C0DE0000000000000001 /* BulkRoutineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BulkRoutineTests.swift; sourceTree = "<group>"; };
-		A10000000000000000000410 /* BargeInTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BargeInTests.swift; sourceTree = "<group>"; };
-		A10000000000000000000600 /* UnclearAnswer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnclearAnswer.swift; sourceTree = "<group>"; };
-		A10000000000000000000602 /* UnclearAnswerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnclearAnswerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -153,24 +173,33 @@
 				A1000000000000000000030B /* Intents.swift */,
 				A1000000000000000000030D /* SpeechRecognizer.swift */,
 				A10000000000000000000402 /* SpeechLexicon.swift */,
-				FA9E00000000000000000011 /* VaguePlaceholder.swift */,
-				A10000000000000000000404 /* SpeechCleaner.swift */,
 				A10000000000000000000408 /* VocabularyProvider.swift */,
-				A1000000000000000000040A /* VocabularyMatcher.swift */,
 				A1000000000000000000040E /* BargeIn.swift */,
-				A10000000000000000000600 /* UnclearAnswer.swift */,
-				A10000000000000000000500 /* LongTurn.swift */,
 				C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */,
 				C018D23642BEFFC5D56B72CA /* TurboSettler.swift */,
 				C0E0156CE15A2FCC99A38AEF /* HybridTranscript.swift */,
+				D1A5C00000000000000000C1 /* QuestionComposer.swift */,
+				D1A5C00000000000000000A1 /* ClarificationDossier.swift */,
 				C064107D7EB5C0D47B505D73 /* AudioPipeline.swift */,
 				C0FC89527F0980C2E1654219 /* WhisperAccurate.swift */,
 				C0AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift */,
 				C0075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift */,
 				C0ED6F343195FB3D795107B8 /* WhisperEngine.swift */,
 				C08ECB0958EC263D88F5634F /* WhisperAudio.swift */,
-				C0E6E25C2150592B59BB8437 /* TranscriptPolicy.swift */,
-				C033EDD0E8E54141063861E4 /* BrandFixer.swift */,
+				C0E6E25D2150592B59BB8438 /* Trace.swift */,
+				C0E6E25D2150592B59BB843A /* PromptBudget.swift */,
+				C0E6E25E2150592B59BB843B /* TaskSearch.swift */,
+				C0E6E25E2150592B59BB84AA /* TaskTools.swift */,
+				C0E6E25E2150592B59BB8502 /* TaskFieldsForm.swift */,
+				C0E6E25E2150592B59BB8501 /* TaskDetailLines.swift */,
+				C0E6E25E2150592B59BB8601 /* WhenReader.swift */,
+				C0E6E25E2150592B59BB8701 /* EvidenceGate.swift */,
+				D1A5C00000000000000000S8 /* TokenBudgetService.swift */,
+				D1A5C00000000000000000S7 /* TaskResolvers.swift */,
+				D1A5C00000000000000000K9 /* FlatEdit.swift */,
+				D1A5C00000000000000000S6 /* TaskExtraction.swift */,
+				C0E6E25E2150592B59BB84BB /* MinimalPath.swift */,
+				C0E6E25E2150592B59BB84AB /* ContextAssembler.swift */,
 				C084B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift */,
 				C07D1021BFFEC3A83E05C971 /* AppleSpeech.swift */,
 				AB00570000000000000000E3 /* Whisper */,
@@ -192,18 +221,19 @@
 		A10000000000000000000020 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
-				A1000000000000000000030F /* KittyVoiceTurnTests.swift */,
-				A10000000000000000000410 /* BargeInTests.swift */,
-				A10000000000000000000602 /* UnclearAnswerTests.swift */,
-				A10000000000000000000502 /* LongTurnTests.swift */,
-				C096E2064DEE7352D7B60174 /* HybridTests.swift */,
-				C0D84C66B2C902A29EE2313E /* WhisperTests.swift */,
-				C01E15C0B99369D9BD105989 /* SpeechPipelineTests.swift */,
-				FA9E00000000000000000001 /* VaguePlaceholderTests.swift */,
-				B0A7C0DE0000000000000001 /* BulkRoutineTests.swift */,
-				A1000000000000000000040C /* VocabularyTests.swift */,
-				A10000000000000000000406 /* SpeechCleanerTests.swift */,
-				A10000000000000000000311 /* KittyEvals.swift */,
+				D1A5C00000000000000000I1 /* TurnCaptureTests.swift */,
+				D1A5C00000000000000000J1 /* ExtractionExperimentTests.swift */,
+				D1A5C00000000000000000K1 /* CorrectionReplayTests.swift */,
+				D1A5C00000000000000000K2 /* InvalidOutputTests.swift */,
+				D1A5C00000000000000000K3 /* ReviewBoundaryTests.swift */,
+				D1A5C00000000000000000K4 /* SplitMatrixTests.swift */,
+				D1A5C00000000000000000S1 /* ScoreboardRunTests.swift */,
+				D1A5C00000000000000000S2 /* PromptArmExperimentTests.swift */,
+				D1A5C00000000000000000K5 /* SplitExtractionTests.swift */,
+				D1A5C00000000000000000K6 /* TaskExtractionTests.swift */,
+				D1A5C000000000000000HT01 /* HybridTranscriptTests.swift */,
+				D1A5C00000000000000000K7 /* ListExtractionTests.swift */,
+				D1A5C00000000000000000K8 /* HomeChipTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -311,26 +341,35 @@
 				A1000000000000000000030C /* Intents.swift in Sources */,
 				A1000000000000000000030E /* SpeechRecognizer.swift in Sources */,
 				A1000000000000000000040F /* BargeIn.swift in Sources */,
-				A10000000000000000000601 /* UnclearAnswer.swift in Sources */,
-				A10000000000000000000501 /* LongTurn.swift in Sources */,
 				C1CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift in Sources */,
 				C118D23642BEFFC5D56B72CA /* TurboSettler.swift in Sources */,
 				C1E0156CE15A2FCC99A38AEF /* HybridTranscript.swift in Sources */,
+				D2A5C00000000000000000C1 /* QuestionComposer.swift in Sources */,
+				D2A5C00000000000000000A1 /* ClarificationDossier.swift in Sources */,
 				C164107D7EB5C0D47B505D73 /* AudioPipeline.swift in Sources */,
 				C1FC89527F0980C2E1654219 /* WhisperAccurate.swift in Sources */,
 				C1AAADDD3E7222382AC87CEA /* SpeechEngineChoice.swift in Sources */,
 				C1075BFE7B6BDC15E8FA6143 /* WhisperRecognizer.swift in Sources */,
 				C1ED6F343195FB3D795107B8 /* WhisperEngine.swift in Sources */,
 				C18ECB0958EC263D88F5634F /* WhisperAudio.swift in Sources */,
-				C1E6E25C2150592B59BB8437 /* TranscriptPolicy.swift in Sources */,
-				C133EDD0E8E54141063861E4 /* BrandFixer.swift in Sources */,
+				C1E6E25D2150592B59BB8438 /* Trace.swift in Sources */,
+				C1E6E25D2150592B59BB843A /* PromptBudget.swift in Sources */,
+				C1E6E25E2150592B59BB843B /* TaskSearch.swift in Sources */,
+				C1E6E25E2150592B59BB84AA /* TaskTools.swift in Sources */,
+				C1E6E25E2150592B59BB8502 /* TaskFieldsForm.swift in Sources */,
+				C1E6E25E2150592B59BB8501 /* TaskDetailLines.swift in Sources */,
+				C1E6E25E2150592B59BB8601 /* WhenReader.swift in Sources */,
+				C1E6E25E2150592B59BB8701 /* EvidenceGate.swift in Sources */,
+				D2A5C00000000000000000S8 /* TokenBudgetService.swift in Sources */,
+				D2A5C00000000000000000S7 /* TaskResolvers.swift in Sources */,
+				D2A5C00000000000000000K9 /* FlatEdit.swift in Sources */,
+				D2A5C00000000000000000S6 /* TaskExtraction.swift in Sources */,
+				C1E6E25E2150592B59BB84BB /* MinimalPath.swift in Sources */,
+				C1E6E25E2150592B59BB84AB /* ContextAssembler.swift in Sources */,
 				C184B9FCCCE063C65CB3E8B7 /* IndianVocabulary.swift in Sources */,
 				C17D1021BFFEC3A83E05C971 /* AppleSpeech.swift in Sources */,
-				A1000000000000000000040B /* VocabularyMatcher.swift in Sources */,
 				A10000000000000000000409 /* VocabularyProvider.swift in Sources */,
-				A10000000000000000000405 /* SpeechCleaner.swift in Sources */,
 				A10000000000000000000403 /* SpeechLexicon.swift in Sources */,
-				FA9E00000000000000000012 /* VaguePlaceholder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -338,18 +377,19 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000310 /* KittyVoiceTurnTests.swift in Sources */,
-				A10000000000000000000411 /* BargeInTests.swift in Sources */,
-				A10000000000000000000603 /* UnclearAnswerTests.swift in Sources */,
-				A10000000000000000000503 /* LongTurnTests.swift in Sources */,
-				C196E2064DEE7352D7B60174 /* HybridTests.swift in Sources */,
-				C1D84C66B2C902A29EE2313E /* WhisperTests.swift in Sources */,
-				C11E15C0B99369D9BD105989 /* SpeechPipelineTests.swift in Sources */,
-				FA9E00000000000000000002 /* VaguePlaceholderTests.swift in Sources */,
-				B0A7C0DE0000000000000002 /* BulkRoutineTests.swift in Sources */,
-				A1000000000000000000040D /* VocabularyTests.swift in Sources */,
-				A10000000000000000000407 /* SpeechCleanerTests.swift in Sources */,
-				A10000000000000000000312 /* KittyEvals.swift in Sources */,
+				D2A5C00000000000000000I1 /* TurnCaptureTests.swift in Sources */,
+				D2A5C00000000000000000J1 /* ExtractionExperimentTests.swift in Sources */,
+				D2A5C00000000000000000K1 /* CorrectionReplayTests.swift in Sources */,
+				D2A5C00000000000000000K2 /* InvalidOutputTests.swift in Sources */,
+				D2A5C00000000000000000K3 /* ReviewBoundaryTests.swift in Sources */,
+				D2A5C00000000000000000K4 /* SplitMatrixTests.swift in Sources */,
+				D2A5C00000000000000000S1 /* ScoreboardRunTests.swift in Sources */,
+				D2A5C00000000000000000S2 /* PromptArmExperimentTests.swift in Sources */,
+				D2A5C00000000000000000K5 /* SplitExtractionTests.swift in Sources */,
+				D2A5C00000000000000000K6 /* TaskExtractionTests.swift in Sources */,
+				D2A5C000000000000000HT01 /* HybridTranscriptTests.swift in Sources */,
+				D2A5C00000000000000000K7 /* ListExtractionTests.swift in Sources */,
+				D2A5C00000000000000000K8 /* HomeChipTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -19,24 +19,23 @@ import FoundationModels
 enum Words {
     static func trim(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    static let stop: Set<String> = ["the", "a", "an", "my", "our", "your", "task", "tasks", "item", "items", "one", "step", "please",
-                                    "it", "that", "this", "to", "for", "of", "and", "also", "too", "from", "with", "on", "in", "at", "as",
-                                    "again", "now", "then", "so", "just"]
+    /// The one small normaliser: lower case, letters and digits only. Two titles with the same key are the same title.
+    static func key(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
+
+    /// The words of a sentence, lower case, without punctuation.
+    static func tokens(_ text: String) -> [String] {
+        text.lowercased()
+            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: "…", with: " ")
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "'" })
+            .map(String.init)
+    }
 
     static func stem(_ w: String) -> String {
         var s = w
         if s.hasSuffix("ies"), s.count > 4 { s = String(s.dropLast(3)) + "y" }
         else if s.hasSuffix("s"), !s.hasSuffix("ss"), s.count > 3 { s.removeLast() }
         return s
-    }
-
-    /// Meaningful words: no filler, no action verbs. "Take out the trash task" gives ["take"? no: verbs dropped] -> ["out", "trash"].
-    static func nouns(_ text: String) -> [String] {
-        LocalSemanticPrechecker.tokens(text).filter { !stop.contains($0) && !ActionLexicon.verbs.contains($0) }.map(stem)
-    }
-
-    static func nounOverlap(_ a: String, _ b: String) -> Int {
-        Set(nouns(a)).intersection(Set(nouns(b))).count
     }
 
     /// "a, b, and c"
@@ -75,21 +74,46 @@ enum Rx {
 
 struct TaskDraftValue: Equatable {
     var title = ""
+    var reason = ""
     var category = ""
     var dueDate = ""
-    var dueTime = ""
+    var dueTime = ""                  // HH:mm
+    var timeOfDay = ""                // morning, afternoon, evening, night or anytime
     var priority = ""
     var assignee = ""
     var notes = ""
+    var heardAs = ""                  // the transcript words the model says this task comes from
+    /// Filled only when the speaker asked for this same item more than once (the words, as said). Swift checks that it is not empty
+    /// and nothing more: such an item is kept next to an identical one instead of being combined with it (also when it joins a draft that waits).
+    var distinctBecause = ""
 }
 
 struct RoutineDraftValue: Equatable {
     var title = ""
+    var reason = ""
     var category = ""
-    var frequency = ""
-    var schedule = ""
+    var frequency = ""                // once, daily, weekly, monthly or custom
+    var schedule = ""                 // the repeat in the speaker's words: kept as heard, shown, and kept in the notes if it cannot be read
+    var weekdays: [Int] = []          // 1 = Sunday ... 7 = Saturday (the calendar's numbering)
+    var everyNWeeks = 0               // 2 = every other week; 0 = not given
+    var intervalDays = 0              // 2 = every other day; 0 = not given
+    var dayOfMonth = 0                // monthly; 0 = not given
+    var dueTime = ""                  // HH:mm
+    var timeOfDay = ""                // morning, afternoon, evening, night or anytime
     var assignee = ""
     var notes = ""
+    var heardAs = ""
+    var distinctBecause = ""
+}
+
+extension RoutineDraftValue {
+    /// A routine on named weekdays, for tests and scripted engines: `weekly(["Water Plants"], days: [1, 2])`.
+    static func weekly(_ title: String, days: [Int], schedule: String = "", category: String = "", everyNWeeks: Int = 0) -> RoutineDraftValue {
+        RoutineDraftValue(title: title, category: category, frequency: "weekly", schedule: schedule, weekdays: days, everyNWeeks: everyNWeeks)
+    }
+    static func daily(_ title: String, schedule: String = "every day", category: String = "", timeOfDay: String = "") -> RoutineDraftValue {
+        RoutineDraftValue(title: title, category: category, frequency: "daily", schedule: schedule, timeOfDay: timeOfDay)
+    }
 }
 
 struct PlaybookDraftValue: Equatable {
@@ -99,333 +123,235 @@ struct PlaybookDraftValue: Equatable {
     var steps: [TaskDraftValue] = []
 }
 
+/// A repeat as the model gives it for an edit: structured numbers, plus the words as said. Swift reads the numbers (ranges only);
+/// it never parses the words.
+struct RepeatValue: Equatable {
+    var frequency = ""                // once, daily, weekly, monthly or custom
+    var weekdays: [Int] = []
+    var everyNWeeks = 0
+    var intervalDays = 0
+    var dayOfMonth = 0
+    var words = ""
+}
+
+/// A proposed change to a task that already exists. The task is named by the id a search tool returned, never by words.
+struct OperationValue: Equatable {
+    var op = ""                       // complete, reopen, delete, update, assign, reschedule or rename
+    var taskID = ""                   // the short id from a tool result
+    var changes: TaskDraftValue? = nil
+}
+
+/// The one thing the model returns for every turn: the tasks, routines or playbook it found, proposed changes to existing tasks,
+/// an answer built from tool results, a question, or "unfinished".
 struct BulkDecisionValue: Equatable {
+    var wait = false
     var action = ""
     var tasks: [TaskDraftValue] = []
     var routines: [RoutineDraftValue] = []
     var playbook: PlaybookDraftValue? = nil
+    var operations: [OperationValue] = []
+    var answer = ""                               // unrelated: a short reply
+    var query: TaskQueryValue? = nil              // lookup: what to find; Swift runs the search
     var clarifyingQuestion = ""
-    var spokenResponse = ""
+    /// The list the user named, for the items of this response (the full path). Blank when none.
+    var listName = ""
+    /// The flat path's answer. When it is set the validator reads this and nothing else.
+    var extraction: ExtractionValue? = nil
 }
 
-#if canImport(FoundationModels)
-@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
-@Generable
-struct TaskDraft {
-    @Guide(description: "Short actionable title: an action and an object, for example 'Clean bathroom'")
-    var title: String
-    @Guide(description: "Specific household category such as Bathroom or Groceries, or empty")
-    var category: String
-    @Guide(description: "ISO date only if the user said a day, otherwise empty")
-    var dueDate: String
-    @Guide(description: "ISO time only if the user said a time, otherwise empty")
-    var dueTime: String
-    @Guide(description: "low, medium, high, or empty. Only if the user said it")
-    var priority: String
-    @Guide(description: "Assignee only if the user named one, otherwise empty")
-    var assignee: String
-    @Guide(description: "Optional notes, or empty")
-    var notes: String
+/// What a read-only question about saved tasks needs Swift to look for. The model only fills these in; it never sees the tasks.
+struct TaskQueryValue: Equatable {
+    var text = ""          // words that appear in the title, notes or category
+    var status = ""        // open, done or all (open when empty)
+    var day = ""           // today, tomorrow, overdue, any, or an ISO date
+    var assignee = ""
+    var list = ""         // the name of a list
 
-    var value: TaskDraftValue {
-        TaskDraftValue(title: title, category: category, dueDate: dueDate, dueTime: dueTime, priority: priority,
-                       assignee: assignee, notes: notes)
+    var isEmpty: Bool { [text, status, day, assignee, list].allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty } }
+    /// "day today | assignee Me", for the trace and the reply.
+    var described: String {
+        [("words", text), ("status", status), ("day", day), ("assignee", assignee), ("list", list)]
+            .compactMap { name, value -> String? in
+                let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return v.isEmpty ? nil : "\(name) \(v)"
+            }.joined(separator: ", ")
     }
 }
 
+#if canImport(FoundationModels)
+/// One item the user asked for, as the model writes it. ONE shape for a task and a routine (a routine is an item with `repeating`),
+/// so one request has one representation. Every field that is not part of what was said is optional: the model leaves it out, and
+/// "omitted" means "not said". No guide carries an example: examples in a schema come back as tasks.
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @Generable
-struct RoutineDraft {
-    @Guide(description: "Short actionable title: an action and an object")
+struct ItemDraft {
+    @Guide(description: "The shortest unbroken run of the user's own words this item comes from, in their order. Never join separate parts of the speech.")
+    var heardAs: String
+    @Guide(description: "Verb first, Title Case: the action and one specific target. When the user names a list and provides items, create one item per independently completable or purchasable thing. Set listName to the list name. Do not create a task for the list name itself. Do not combine list items into one task unless the user explicitly asks for one combined task.")
     var title: String
-    @Guide(description: "Specific household category, or empty")
-    var category: String
-    @Guide(description: "once, daily, weekly, monthly, custom, or empty")
-    var frequency: String
-    @Guide(description: "The schedule in the user's words, for example 'every Monday' or 'every morning'")
-    var schedule: String
-    @Guide(description: "Assignee only if the user named one, otherwise empty")
-    var assignee: String
-    @Guide(description: "Optional notes, or empty")
-    var notes: String
+    @Guide(description: "Only if the user said why, in their own words. Otherwise omit.")
+    var reason: String?
+    @Guide(description: "One broad category in Title Case, preferably one of the reference categories. Omit if unsure.")
+    var category: String?
+    @Guide(description: "ISO date YYYY-MM-DD, only if the user said a day or date (work it out from today's date). Today's date is not a default: otherwise omit.")
+    var dueDate: String?
+    @Guide(description: "Clock time HH:mm in 24 hours, only if the user said a clock time. Otherwise omit.")
+    var time: String?
+    @Guide(description: "morning, afternoon, evening, night or anytime, only if the user said when in the day. Otherwise omit.")
+    var timeOfDay: String?
+    @Guide(description: "low, medium or high, only if the user said it. Otherwise omit.")
+    var priority: String?
+    @Guide(description: "A person's name, only if the user explicitly says the work is for them. Never infer an assignee from an ingredient, product, brand, place, list name, or descriptive phrase. Otherwise omit.")
+    var assignee: String?
+    @Guide(description: "Only user-provided execution details or context for this item. Never use notes to hold a requested item that belongs in the items array. Otherwise omit.")
+    var notes: String?
+    @Guide(description: "Only if the user said this item repeats. Otherwise omit.")
+    var repeating: RepeatDraft?
+    @Guide(description: "Only if the user asked for this same item more than once: their words. Otherwise omit.")
+    var distinctBecause: String?
 
-    var value: RoutineDraftValue {
-        RoutineDraftValue(title: title, category: category, frequency: frequency, schedule: schedule, assignee: assignee, notes: notes)
+    var taskValue: TaskDraftValue {
+        TaskDraftValue(title: title, reason: reason ?? "", category: category ?? "", dueDate: dueDate ?? "", dueTime: time ?? "",
+                       timeOfDay: timeOfDay ?? "", priority: priority ?? "", assignee: assignee ?? "", notes: notes ?? "",
+                       heardAs: heardAs, distinctBecause: distinctBecause ?? "")
+    }
+
+    /// A routine only when the item repeats: a frequency other than "once". Anything else is a task.
+    var routineValue: RoutineDraftValue? {
+        guard let rd = repeating else { return nil }
+        let r = rd.value
+        let f = r.frequency.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !["", "once", "one-time", "none"].contains(f) else { return nil }
+        return RoutineDraftValue(title: title, reason: reason ?? "", category: category ?? "", frequency: r.frequency, schedule: r.words,
+                                 weekdays: r.weekdays, everyNWeeks: r.everyNWeeks, intervalDays: r.intervalDays, dayOfMonth: r.dayOfMonth,
+                                 dueTime: time ?? "", timeOfDay: timeOfDay ?? "", assignee: assignee ?? "", notes: notes ?? "",
+                                 heardAs: heardAs, distinctBecause: distinctBecause ?? "")
+    }
+
+    func read(into tasks: inout [TaskDraftValue], routines: inout [RoutineDraftValue]) {
+        if let r = routineValue { routines.append(r) } else { tasks.append(taskValue) }
     }
 }
 
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @Generable
 struct PlaybookDraft {
-    @Guide(description: "Playbook name, under five words")
+    @Guide(description: "Playbook name in Title Case, under five words.")
     var name: String
-    @Guide(description: "ISO date only if the user said a day, otherwise empty")
-    var dueDate: String
-    @Guide(description: "Assignee only if the user named one, otherwise empty")
-    var assignee: String
-    @Guide(description: "Ordered steps")
-    var steps: [TaskDraft]
+    @Guide(description: "ISO date YYYY-MM-DD, only if a day was said. Otherwise omit.")
+    var dueDate: String?
+    @Guide(description: "A person's name, only if said. Otherwise omit.")
+    var assignee: String?
+    @Guide(description: "Ordered steps, each verb first in Title Case.")
+    var steps: [ItemDraft]
 
     var value: PlaybookDraftValue {
-        PlaybookDraftValue(name: name, dueDate: dueDate, assignee: assignee, steps: steps.map(\.value))
+        PlaybookDraftValue(name: name, dueDate: dueDate ?? "", assignee: assignee ?? "", steps: steps.map(\.taskValue))
+    }
+}
+
+@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+@Generable
+struct RepeatDraft {
+    @Guide(description: "once (not repeating), daily, weekly, monthly or custom")
+    var frequency: String
+    @Guide(description: "Weekly: the days as numbers, 1 = Sunday to 7 = Saturday. Empty otherwise.")
+    var weekdays: [Int]
+    @Guide(description: "2 for every other week, 3 for every third week. 0 if not said.")
+    var everyNWeeks: Int
+    @Guide(description: "Custom: days between repeats, 2 for every other day. 0 if not said.")
+    var intervalDays: Int
+    @Guide(description: "Monthly: the day of the month, 1 to 31. 0 if not said.")
+    var dayOfMonth: Int
+    @Guide(description: "The repeat exactly as the user said it.")
+    var words: String
+
+    var value: RepeatValue {
+        RepeatValue(frequency: frequency, weekdays: weekdays, everyNWeeks: everyNWeeks, intervalDays: intervalDays,
+                    dayOfMonth: dayOfMonth, words: words)
+    }
+}
+
+@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+@Generable
+struct TaskOperation {
+    @Guide(description: "What to do to the existing task.", .anyOf(["complete", "reopen", "delete", "update"]))
+    var op: String
+    @Guide(description: "The id of the task, exactly as a search tool returned it.")
+    var taskID: String
+    @Guide(description: "update only: just the fields to change (leave the title empty when it does not change). Otherwise omit.")
+    var changes: ItemDraft?
+
+    var value: OperationValue { OperationValue(op: op, taskID: taskID, changes: changes?.taskValue) }
+}
+
+/// The parameters of a read-only lookup. The model never sees the saved tasks: it says what to look for, Swift searches.
+@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+@Generable
+struct TaskQueryDraft {
+    @Guide(description: "Words that appear in the title, notes or category of the tasks wanted. Omit if none.")
+    var text: String?
+    @Guide(description: "open, done or all. Omit for open.")
+    var status: String?
+    @Guide(description: "today, tomorrow, overdue, any, or an ISO date YYYY-MM-DD. Omit if no day was said.")
+    var day: String?
+    @Guide(description: "A person's name, only to see that person's tasks. Omit otherwise.")
+    var assignee: String?
+    @Guide(description: "The name of a list, only to see that list's tasks. Omit otherwise.")
+    var list: String?
+
+    var value: TaskQueryValue {
+        TaskQueryValue(text: text ?? "", status: status ?? "", day: day ?? "", assignee: assignee ?? "", list: list ?? "")
     }
 }
 
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @Generable
 struct BulkAgentDecision {
-    @Guide(description: "create_tasks, create_routines, create_playbook, clarify, wait, update, or unrelated")
+    @Guide(description: "True only when the speech is unfinished and nothing can be extracted yet.")
+    var wait: Bool
+
+    @Guide(description: "create (new items or a playbook), operate (change existing tasks), lookup (a question about saved tasks: fill query, nothing else), clarify (one essential detail is missing), or unrelated.",
+           .anyOf(["create", "operate", "lookup", "clarify", "unrelated"]))
     var action: String
 
-    @Guide(description: "Task drafts to create")
-    var tasks: [TaskDraft]
+    @Guide(description: "The user-named list that groups the returned items. Omit for standalone tasks.")
+    var listName: String?
 
-    @Guide(description: "Routine drafts to create")
-    var routines: [RoutineDraft]
+    @Guide(description: "create: each thing the user asked for, once. Independent actions are separate items; the same request is never written twice.")
+    var items: [ItemDraft]
 
-    @Guide(description: "Playbook draft to create")
+    @Guide(description: "A playbook, only when the user described one. Otherwise omit.")
     var playbook: PlaybookDraft?
 
-    @Guide(description: "One short clarifying question, or empty")
+    @Guide(description: "operate only: the proposed changes to existing tasks, by the id of a task listed in RECENT TASKS. Empty for every other action: never invent an id.")
+    var operations: [TaskOperation]
+
+    @Guide(description: "A short reply only when action is unrelated. Must be empty for create, operate, lookup, and clarify.")
+    var answer: String
+
+    @Guide(description: "lookup only: what to look for. The tasks are never shown to you; the app searches. Otherwise omit.")
+    var query: TaskQueryDraft?
+
+    @Guide(description: "clarify: one short, specific question about the single missing detail. Otherwise empty.")
     var clarifyingQuestion: String
 
-    @Guide(description: "One short natural spoken response, or empty while waiting")
-    var spokenResponse: String
-
     var value: BulkDecisionValue {
-        BulkDecisionValue(action: action, tasks: tasks.map(\.value), routines: routines.map(\.value),
-                          playbook: playbook?.value, clarifyingQuestion: clarifyingQuestion, spokenResponse: spokenResponse)
+        var tasks: [TaskDraftValue] = [], routines: [RoutineDraftValue] = []
+        for i in items { i.read(into: &tasks, routines: &routines) }
+        return BulkDecisionValue(wait: wait, action: action, tasks: tasks, routines: routines,
+                                 playbook: playbook?.value, operations: operations.map(\.value), answer: answer, query: query?.value,
+                                 clarifyingQuestion: clarifyingQuestion, listName: listName ?? "")
     }
 }
 #endif
-
-// MARK: - Bulk detection (Swift, before the model)
-
-enum BulkDetector {
-    enum Kind: String, Equatable { case none, tasks, routines, playbook }
-
-    struct Analysis: Equatable {
-        var kind: Kind = .none
-        var segments: [String] = []
-        /// A long, rambling turn read clause by clause (nil for short turns): what is shared, and what was chatter.
-        var turn: LongTurn? = nil
-        var context: SharedContext { turn?.context ?? SharedContext() }
-        var skipped: [String] { turn?.skipped ?? [] }
-        var isBulk: Bool { kind != .none }
-    }
-
-    static let scheduleCues = ["every ", "each ", "daily", "weekly", "monthly", "weekdays", "weekends", "alternate day", "routine"]
-    static let listCues = ["add these", "add the following", "these tasks", "following tasks", "these chores", "these routines",
-                           "add a few tasks", "add some tasks"]
-    private static let numberWords: Set<String> = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-                                                   "2", "3", "4", "5", "6", "7", "8", "9", "10"]
-    private static let frames: [String] = ["add a task to ", "add a task for ", "add a task ", "add task to ", "add task ", "create a task to ",
-                                           "i need to ", "i have to ", "i want to ", "i should ", "remind me to ", "please ", "can you ",
-                                           "could you ", "also ", "and ", "then ", "to "]
-    private static let separators = [" and then ", " and also ", " then ", " also ", ";", ",", " and "]
-
-    static func hasSchedule(_ text: String) -> Bool {
-        let t = text.lowercased()
-        return scheduleCues.contains { t.contains($0) }
-    }
-
-    /// "wash", "milk and bread": splits a list into the pieces the user named.
-    static func splitList(_ text: String) -> [String] {
-        var s = text.lowercased().replacingOccurrences(of: "’", with: "'")
-        for sep in separators { s = s.replacingOccurrences(of: sep, with: "|") }
-        return s.split(separator: "|").map { stripFrames(Words.trim(String($0))) }.filter { !$0.isEmpty }
-    }
-
-    static func stripFrames(_ text: String) -> String {
-        var s = Words.trim(text).trimmingCharacters(in: CharacterSet(charactersIn: " ,.;:-"))
-        var changed = true
-        while changed {
-            changed = false
-            for f in frames where s.lowercased().hasPrefix(f) {
-                s = Words.trim(String(s.dropFirst(f.count)))
-                changed = true
-                break
-            }
-        }
-        return s
-    }
-
-    /// Words that are often nouns too ("buy bottled water", "book flights"): a new action only when a determiner follows.
-    private static let nounLikeVerbs: Set<String> = ["release", "share", "water", "iron", "book", "order", "plan", "set", "file", "label", "walk", "dust",
-                                                      "polish", "steam", "heat", "clear", "fill", "pack", "drink", "cook", "mop", "load"]
-
-    /// "clean bathroom buy milk water the plants" (no commas, no "and"): a new verb that follows a finished action
-    /// ("clean bathroom") starts the next one. A verb after "to", "the", "and"... is part of the current action, and a
-    /// word that is usually a noun only starts one when it is followed by "the", "my"...
-    static func splitRunOns(_ piece: String) -> [String] {
-        let words = piece.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        guard words.count >= 4, ActionLexicon.verbs.contains(SpeechLexicon.bare(words[0])) else { return [piece] }
-        var out: [[String]] = [[words[0]]]
-        for i in 1..<words.count {
-            let w = SpeechLexicon.bare(words[i])
-            let prev = SpeechLexicon.bare(words[i - 1])
-            let objectSoFar = out[out.count - 1].count >= 2          // "clean bathroom" already has its object
-            let hasObject = words.count - i >= 2                     // the new action has one too
-            var starts = ActionLexicon.verbs.contains(w) && objectSoFar && hasObject
-                && !SpeechLexicon.dangling.contains(prev) && !SpeechLexicon.determiners.contains(prev)
-            if starts, nounLikeVerbs.contains(w) {
-                starts = SpeechLexicon.determiners.contains(SpeechLexicon.bare(words[i + 1])) && !["to", "of", "in", "on", "at", "for", "with", "from"].contains(SpeechLexicon.bare(words[i + 1]))
-            }
-            if starts { out.append([words[i]]) } else { out[out.count - 1].append(words[i]) }
-        }
-        return out.map { $0.joined(separator: " ") }
-    }
-
-    /// Splits an utterance into verb-led actions. A piece without its own verb belongs to the piece before it
-    /// ("buy milk and bread" is one action), and a bare verb joins the piece after it ("wash and fold the laundry").
-    static func actionSegments(_ text: String) -> [String] {
-        let pieces = splitList(text).flatMap(splitRunOns)
-        var out: [String] = []
-        var carryVerb: String?
-        for piece in pieces {
-            let words = LocalSemanticPrechecker.tokens(piece)
-            guard let first = words.first else { continue }
-            var current = piece
-            if let v = carryVerb { current = v + " and " + piece; carryVerb = nil }
-            let verbLed = ActionLexicon.verbs.contains(first)
-            if words.count == 1, verbLed, carryVerb == nil, current == piece {
-                carryVerb = piece                      // "wash" ... "fold the laundry"
-                continue
-            }
-            if !verbLed, carryVerb == nil, current == piece, let last = out.indices.last {
-                out[last] += " and " + piece           // "milk and bread"
-                continue
-            }
-            out.append(current)
-        }
-        if let v = carryVerb { out.append(v) }
-        // "buy milk and buy bread": the same shopping verb twice is one shopping task.
-        let shopping: Set<String> = ["buy", "get", "order", "pick", "shop"]
-        let leads = out.compactMap { LocalSemanticPrechecker.tokens($0).first }
-        if out.count > 1, Set(leads).count == 1, let l = leads.first, shopping.contains(l),
-           !LocalSemanticPrechecker.tokens(text).contains("separate") {
-            return [out.joined(separator: " and ")]
-        }
-        return out
-    }
-
-    /// Verbs that change or look at what is already on the list: a long sentence with one of these is not a list of new tasks.
-    private static let managingVerbs: Set<String> = ["mark", "complete", "delete", "remove", "cancel", "change", "update", "rename", "show", "read", "move"]
-
-    // MARK: A schedule said first: "every morning water the plants, every evening lock the doors"
-
-    private static let scheduleUnit = "day|days|morning|afternoon|evening|night|week|weeks|month|weekday|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday"
-    private static let scheduleLead = try? NSRegularExpression(
-        pattern: #"(?:^|[,;.]\s*|\b(?:and|then|also|but)\s+)((?:(?:every|each)\s+(?:(?:other|alternate|second|third)\s+)?(?:\d+\s+)?(?:"# + scheduleUnit
-            + #")(?:\s+and\s+(?:"# + scheduleUnit + #"))*|daily|nightly|weekly|monthly|(?:on\s+)?weekdays|(?:on\s+)?weekends))\s+"#,
-        options: [.caseInsensitive])
-
-    /// A schedule that opens an action ("every Sunday clean the fridge", "daily take out the trash") moves to the end of it and
-    /// of the actions after it, up to the next schedule: "clean the fridge every sunday". Verb-led routines are what the rest of
-    /// the detector, the validator and the model already understand.
-    static func scheduleFirst(_ text: String) -> String {
-        guard let re = scheduleLead else { return text }
-        let ns = text as NSString
-        var leads: [(range: NSRange, phrase: String)] = []
-        for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            let next = ns.substring(from: m.range.location + m.range.length)
-            guard let first = LocalSemanticPrechecker.tokens(next).first, ActionLexicon.verbs.contains(first) else { continue }
-            leads.append((m.range, ns.substring(with: m.range(at: 1)).lowercased()))
-        }
-        guard !leads.isEmpty else { return text }
-        var parts: [String] = []
-        let prefix = ns.substring(to: leads[0].range.location).trimmingCharacters(in: CharacterSet(charactersIn: " ,;."))
-        if !prefix.isEmpty { parts.append(prefix) }
-        for (i, lead) in leads.enumerated() {
-            let start = lead.range.location + lead.range.length
-            let end = i + 1 < leads.count ? leads[i + 1].range.location : ns.length
-            let chunk = ns.substring(with: NSRange(location: start, length: max(0, end - start)))
-            for seg in actionSegments(chunk) { parts.append(seg + " " + lead.phrase) }
-        }
-        return parts.joined(separator: ", ")
-    }
-
-    static func analyze(_ raw: String, words: [SpokenWord] = [], now: Date = Date()) -> Analysis {
-        let lowered = raw.lowercased().replacingOccurrences(of: "’", with: "'")
-        let text = scheduleFirst(lowered)
-        let tokens = LocalSemanticPrechecker.tokens(text)
-        guard !tokens.isEmpty else { return Analysis() }
-
-        if tokens.contains("playbook") || tokens.contains("playbooks") { return Analysis(kind: .playbook, segments: []) }
-
-        // "add these tasks: dishes, laundry, trash"  /  "daily househelp tasks: make beds, wash dishes"
-        if let colon = text.firstIndex(of: ":") {
-            let head = String(text[..<colon])
-            let items = splitList(String(text[text.index(after: colon)...]))
-            if items.count >= 2 {
-                return Analysis(kind: hasSchedule(head) ? .routines : .tasks, segments: items)
-            }
-        }
-        // "add five tasks dishes laundry trash" without a colon
-        if let cue = listCues.first(where: { text.contains($0) }) ?? numberedCue(text) {
-            if let r = text.range(of: cue) {
-                var tail = String(text[r.upperBound...])
-                for w in ["tasks", "task", "chores", "routines", "to my list", "please"] where Words.trim(tail).hasPrefix(w) {
-                    tail = String(Words.trim(tail).dropFirst(w.count))
-                }
-                let items = splitList(tail)
-                if items.count >= 2 { return Analysis(kind: hasSchedule(text) ? .routines : .tasks, segments: items) }
-            }
-        }
-
-        // A long turn with an intro, asides and several asks: only the action clauses count, so chatter cannot defeat detection.
-        if LongTurnAnalyzer.isLong(text) {
-            let turn = LongTurnAnalyzer.analyze(text == lowered ? raw : text, words: words, now: now)
-            let leads = turn.actions.compactMap { LocalSemanticPrechecker.tokens($0.text).first }
-            let asksQuestion = turn.clauses.contains { c in
-                c.kind != .action && LocalSemanticPrechecker.tokens(c.text).first.map { LocalSemanticPrechecker.questionStarters.contains($0) } ?? false
-            }                                                                    // (an action clause such as "tell the maid to…" is not one)
-            if !turn.actions.isEmpty, !asksQuestion, !leads.contains(where: { managingVerbs.contains($0) }) {
-                let scheduled = turn.actions.contains { $0.scheduled }
-                if turn.actions.count >= 2 {
-                    return Analysis(kind: scheduled ? .routines : .tasks, segments: turn.actions.map(\.text), turn: turn)
-                }
-                return Analysis(kind: .none, segments: [], turn: turn)      // one ask in a long turn: the single path, with the clean digest
-            }
-        }
-
-        func verbLedOnly(_ s: [String]) -> Bool {
-            let led = s.filter { LocalSemanticPrechecker.tokens($0).first.map { ActionLexicon.verbs.contains($0) } ?? false }
-            return led.count >= 2 && led.count == s.count
-        }
-        var segments = actionSegments(text)
-        // "The maid should sweep every day and mop every Saturday": the person and the modal come off, the routines remain.
-        if !verbLedOnly(segments), hasSchedule(text),
-           let body = LongTurnAnalyzer.actionBody(text.split(whereSeparator: { $0.isWhitespace }).map(String.init)) {
-            let alt = actionSegments(body.joined(separator: " "))
-            if verbLedOnly(alt) { segments = alt }
-        }
-        guard verbLedOnly(segments) else { return Analysis() }
-        let scheduled = segments.contains { hasSchedule($0) }
-        return Analysis(kind: scheduled ? .routines : .tasks, segments: segments)
-    }
-
-    private static func numberedCue(_ text: String) -> String? {
-        let words = LocalSemanticPrechecker.tokens(text)
-        guard let i = words.firstIndex(where: { numberWords.contains($0) }), i > 0, i + 1 < words.count,
-              ["task", "tasks", "chores", "routines"].contains(words[i + 1]) else { return nil }
-        return words[i + 1]
-    }
-
-    /// The part of the utterance that is not one of the items: "tomorrow:" in "tomorrow: dishes, laundry".
-    static func head(of utterance: String, segments: [String]) -> String {
-        let lower = utterance.lowercased()
-        var cut = lower.endIndex
-        for s in segments { if let r = lower.range(of: s), r.lowerBound < cut { cut = r.lowerBound } }
-        return String(lower[..<cut])
-    }
-}
 
 // MARK: - Drafts that wait to be saved
 
 struct DraftItem: Identifiable, Equatable {
     enum Kind: String { case task, routine }
     var id = UUID()
+    var ref = ""                          // "d1", "d2" ...: how the model names this item in a follow-up. Stamped once, never reused.
     var kind: Kind = .task
     var title: String
     var categoryName: String? = nil
@@ -434,8 +360,39 @@ struct DraftItem: Identifiable, Equatable {
     var priority: String? = nil
     var assignee: String? = nil
     var notes: String? = nil
+    var reason: String? = nil
+    var utteranceID: UUID? = nil
     var recurrence: RecurrenceSpec? = nil
-    var slot: DaySlot? = nil              // a routine's time of day when only the words said it ("every evening")
+    var listName: String? = nil           // the list the user named (flat path); made on approval, never at draft time
+    var instructions: String? = nil       // quantity, dosage, method: what the user said about how
+    var schedule: String? = nil           // the repeat as said (kept even when Swift read it)
+    var softDue: String? = nil            // a timeframe that is not a day ("next week"), as said
+    var slot: DaySlot? = nil              // the time of day the model gave (nil: none given)
+    var heardAs: String? = nil            // the words the model says this task comes from: the MODEL's quote, never shown as the user's speech
+    /// The model gave a quote and it is not word for word in the transcript. A flag for review, not a verdict on the task: the item
+    /// stays in the draft and in the save proposal. A quote that does match is no proof that the task is right either.
+    var quoteUnverified = false
+    /// The user explicitly said to include this flagged item (voice yes, or Include in the edit sheet).
+    var reviewed = false
+    /// Where this item came from and what last changed it, newest last. The review prompt shows only the latest entry.
+    var history: [Provenance] = []
+    /// One thing that happened to an item: the numbered line of the conversation, what happened, and the words it came from.
+    struct Provenance: Equatable {
+        var line: Int
+        var kind: String            // created, renamed or edited
+        var words: String
+    }
+    /// A field the model gave that Swift could not read, kept as given so the user can correct it ("repeat": "when I remember").
+    /// The card flags it. If it is still there at Save, the item is saved as a one-time task with these words in its notes.
+    var unparsed: [String: String] = [:]
+    /// Gentle notes for the card ("Same title as another item"). Never block or remove anything.
+    var advisories: [String] = []
+    /// The user's words that justified each value (attribute to words), or "added by you" for a hand edit. A value with no entry here
+    /// was not stored: `EvidenceGate` clears it.
+    var evidence: [String: String] = [:]
+    /// The model said the speaker asked for this same item more than once (`distinctBecause`). Such an item is never folded into an
+    /// identical one already on the draft. Only the older answer format can say it; a flat answer never sets it.
+    var distinct = false
 
     init(_ v: ValidatedTask, kind: Kind) {
         self.kind = kind
@@ -446,22 +403,71 @@ struct DraftItem: Identifiable, Equatable {
         priority = v.priority
         assignee = v.assignee
         notes = v.notes
+        reason = v.reason
+        utteranceID = v.utteranceID
+        slot = v.slot
+        heardAs = v.heardAs
         recurrence = kind == .routine ? v.recurrence : nil
+        listName = v.listName
+        instructions = v.instructions
+        schedule = v.schedule
+        softDue = v.softDue
     }
 
     init(title: String, kind: Kind = .task) { self.title = title; self.kind = kind }
 
     var validated: ValidatedTask {
         ValidatedTask(title: title, categoryName: categoryName, due: due, timeMinutes: timeMinutes, priority: priority,
-                      assignee: assignee, notes: notes, recurrence: kind == .routine ? recurrence : nil)
+                      assignee: assignee, notes: notes, recurrence: kind == .routine ? recurrence : nil,
+                      reason: reason, utteranceID: utteranceID, slot: slot, heardAs: heardAs,
+                      listName: listName, instructions: instructions, schedule: schedule, softDue: softDue)
+    }
+
+    private static func readsAsDay(_ raw: String) -> Bool {
+        if case .day = DateResolver.read(raw) { return true }
+        return false
     }
 
     func planned() -> PlannedTask {
         var p = validated.planned()
-        if let s = slot, timeMinutes == nil { p.slot = s }
+        p.evidence = evidence
+        // A day that was written where a repeat goes ("2026-10-30") is not a repeat Swift failed to read: no system text in the notes.
+        if let raw = unparsed["repeat"], !raw.isEmpty, !Self.readsAsDay(raw) {
+            p.notes = [p.notes, "Repeat not understood: \(raw)"].compactMap { $0 }.joined(separator: " · ")
+        }
         return p
     }
-    var key: String { TaskValidator.key(title) }
+    var key: String { Words.key(title) }
+    /// What makes two items look the same: the title, and for a routine also its repeat. Only used for an advisory note.
+    var identity: String {
+        guard kind == .routine, let r = recurrence else { return key }
+        return key + "|" + r.scheduleText.lowercased()
+    }
+    var needsFix: Bool { !unparsed.isEmpty }
+}
+
+/// What a saved task or routine is known by when a new item is compared with it: the title and the fields that tell two things
+/// with the same title apart.
+struct SavedKey: Equatable {
+    var title: String                 // `Words.key` of the title
+    var due: Date? = nil
+    var assignee: String? = nil
+    var schedule: String? = nil       // the repeat, for a routine
+    var category: String? = nil
+}
+
+@MainActor
+extension TaskStore {
+    /// The open tasks and the routines, as keys for the saved-match check.
+    var savedKeys: [SavedKey] {
+        let one = tasks.filter { !$0.isDone && $0.routineID == nil }.map {
+            SavedKey(title: Words.key($0.title), due: $0.dueDate, assignee: $0.assignee, category: $0.categoryName)
+        }
+        let repeating = routines.map {
+            SavedKey(title: Words.key($0.title), assignee: $0.assignee, schedule: $0.scheduleText, category: $0.category?.label)
+        }
+        return one + repeating
+    }
 }
 
 struct PlaybookDraftState: Equatable {
@@ -472,32 +478,70 @@ struct PlaybookDraftState: Equatable {
     var stated = false
 }
 
-enum DraftEdit: Equatable {
-    case addItem(String)
-    case remove(String)
-    case replace(from: String, to: String)
-    case priority(target: String, level: String)
-    case changeFields(target: String, changes: ValidatedTask)
-    case addStep(String)
-    case replaceStep(index: Int, text: String)       // index is 0-based; -1 is the last step
-    case removeStep(index: Int)
+/// The person, day and time the user said once for the tasks of a dictation ("house help tasks for tomorrow"), as said. Swift checked
+/// each one before it was kept (`ScopeReader`), and it is cleared with the draft. It only fills a field a new task leaves empty.
+struct DraftScope: Equatable {
+    var assignee: String? = nil
+    var day: String? = nil
+    var time: String? = nil
+
+    var isEmpty: Bool { assignee == nil && day == nil && time == nil }
+
+    /// Each field the other one states replaces this one's; the rest stay.
+    func merged(with other: DraftScope) -> DraftScope {
+        DraftScope(assignee: other.assignee ?? assignee, day: other.day ?? day, time: other.time ?? time)
+    }
+
+    /// For the trace and for the prompt's STATE block.
+    var lines: [String] {
+        var out: [String] = []
+        if let assignee { out.append("person: \(assignee)") }
+        if let day { out.append("day: \(day)") }
+        if let time { out.append("time: \(time)") }
+        return out
+    }
 }
 
-enum EditOutcome: Equatable {
-    case applied(String)           // a short acknowledgement, "Changed it to Buy bread."
-    case question(String)
-    case emptied
+/// One piece of the dictation, as the draft recorded it: the new words and what became of them.
+struct HeardChunk: Equatable {
+    enum Status: String { case accepted, discarded, uncovered }
+    var words: String
+    var status: Status
+    /// Content words of the chunk that no task, person, day, list or scope covers.
+    var uncovered: [String] = []
+    /// Words the recogniser was not sure of.
+    var lowConfidence: [String] = []
 }
 
-/// Holds the pending tasks, routines and playbook steps while the user corrects them one item at a time.
+/// Holds the pending tasks, routines and playbook steps while the user corrects them. Every change bumps `version`: an approval
+/// is only valid for the version the user saw. The version moves only when the draft really changed, and once per change: a
+/// pass over many items works on a copy and is assigned back in one step.
 final class BulkDraftManager {
-    private(set) var items: [DraftItem] = []
-    private(set) var playbook: PlaybookDraftState?
+    private(set) var items: [DraftItem] = [] { didSet { if oldValue != items { version += 1 } } }
+    private(set) var playbook: PlaybookDraftState? { didSet { if oldValue != playbook { version += 1 } } }
+    /// Changes with every edit of the draft. A Save carries the version it was shown with.
+    private(set) var version = 0
+    /// The person, day and time said once for the draft's tasks. A change to it moves the version, like any change to the draft.
+    private(set) var scope: DraftScope? { didSet { if oldValue != scope { version += 1 } } }
+    /// What each piece of the dictation became, in order. Cleared with the draft; not part of what a Save approves.
+    private(set) var chunks: [HeardChunk] = []
+    func setScope(_ new: DraftScope?) { scope = (new?.isEmpty ?? true) ? nil : new }
+    func noteChunk(_ chunk: HeardChunk) { chunks.append(chunk) }
+    private var refCounter = 0
 
     var hasContent: Bool { !items.isEmpty || playbook != nil }
-    var labels: String {
+    var summaryLine: String {
         if let p = playbook { return "playbook \(p.name): " + p.steps.map(\.title).joined(separator: "; ") }
         return items.map(\.title).joined(separator: "; ")
+    }
+
+    /// The items in the order the card shows them (overdue first, then morning to night). The prompt lists them in this order too.
+    var ordered: [DraftItem] { TaskSorting.ordered(items) }
+
+    private func stamped(_ item: DraftItem) -> DraftItem {
+        var i = item
+        if i.ref.isEmpty { refCounter += 1; i.ref = "d\(refCounter)" }
+        return i
     }
 
     /// Long turns: what the tasks came from, and what was heard but left out (offered back as "Skipped (N)").
@@ -505,261 +549,451 @@ final class BulkDraftManager {
     private(set) var skipped: [String] = []
     func setContext(used: String?, skipped: [String]) { self.used = used; self.skipped = skipped }
 
-    func clear() { items = []; playbook = nil; used = nil; skipped = [] }
-    func setItems(_ new: [DraftItem]) { items = new; playbook = nil }
-    func setPlaybook(_ p: PlaybookDraftState?) { playbook = p; if p != nil { items = [] } }
+    /// The raw words of the turn that made this draft, kept as heard. They become one `Utterance` only when Save is confirmed.
+    /// Words that grow while the user keeps talking replace the earlier piece; a later piece (a correction) is added.
+    private(set) var spoken: [String] = []
+    var spokenText: String { spoken.joined(separator: " ") }
+
+    func noteSpoken(_ text: String) {
+        let t = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard !t.isEmpty else { return }
+        func norm(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber || $0 == " " } }
+        if let last = spoken.last {
+            if norm(t).hasPrefix(norm(last)) { spoken[spoken.count - 1] = t; return }
+            if norm(last).hasPrefix(norm(t)) { return }
+            // The recogniser settled the same request a little differently: a piece that mostly overlaps the last one replaces it
+            // (when it is as long), so the original request is kept once. A short correction shares too few words to count.
+            let a = norm(last).split(separator: " ").map(String.init), b = norm(t).split(separator: " ").map(String.init)
+            let (small, big) = a.count <= b.count ? (a, b) : (b, a)
+            if small.count >= 3 {
+                var pool = big, hit = 0
+                for w in small { if let i = pool.firstIndex(of: w) { pool.remove(at: i); hit += 1 } }
+                if Double(hit) >= 0.7 * Double(small.count) {
+                    if b.count >= a.count { spoken[spoken.count - 1] = t }
+                    return
+                }
+            }
+        }
+        spoken.append(t)
+    }
+
+    /// The first flagged item the user has not yet decided on (quote unverified, not explicitly included). Nil when there is none.
+    var unresolvedFlag: DraftItem? { ordered.first { $0.quoteUnverified && !$0.reviewed } }
+
+    /// The user said to include a flagged item. It stays in the draft; the version moves, so an earlier approval cannot save it.
+    @discardableResult
+    func markReviewed(id: UUID) -> Bool {
+        guard var i = item(id: id) else { return false }
+        i.reviewed = true
+        return update(i)
+    }
+
+    func clear() { items = []; playbook = nil; used = nil; skipped = []; spoken = []; scope = nil; chunks = [] }
+    func setItems(_ new: [DraftItem]) { items = new.map(stamped); playbook = nil }
+
+    /// The draft is wrong as a whole and the model gave the complete right list: it replaces everything on the draft, hand edits
+    /// included. The change says what was added and removed.
+    @discardableResult
+    func replaceAll(_ new: [DraftItem]) -> Change {
+        var change = Change()
+        let before = items
+        var fresh: [DraftItem] = []
+        for var n in new {
+            if let old = before.first(where: { $0.identity == n.identity }) {
+                n.ref = old.ref; n.id = old.id
+                if n != old { change.updated.append(n.title) }
+            } else if !before.contains(where: { $0.key == n.key }) {
+                change.added.append(n.title)
+            } else if let old = before.first(where: { $0.key == n.key }) {
+                n.ref = old.ref; n.id = old.id
+                change.updated.append(n.title)
+            }
+            fresh.append(stamped(n))
+        }
+        for old in before where !fresh.contains(where: { $0.ref == old.ref }) { change.removed.append(old.title) }
+        items = fresh
+        playbook = nil
+        return change
+    }
+    func setPlaybook(_ p: PlaybookDraftState?) { playbook = p; if p != nil { items = []; scope = nil } }
 
     /// Gives a due date to the drafts that still have none (matched by key). Returns how many were tagged.
     @discardableResult
     func applyDue(_ date: Date, toKeys keys: Set<String>) -> Int {
         var n = 0
-        for i in items.indices where keys.contains(items[i].key) && items[i].due == nil && items[i].kind == .task {
-            items[i].due = date
+        var working = items
+        for i in working.indices where keys.contains(working[i].key) && working[i].due == nil && working[i].kind == .task {
+            working[i].due = date
             n += 1
         }
+        if n > 0 { items = working }
         return n
     }
 
-    /// Adds items that are not already pending. Returns the ones that were added.
+    /// The note on an item that an exact copy of it was folded into.
+    static let alreadyNote = "Already on the list"
+
+    /// The item in `list` that is the same request as `item`, if there is one. Same request: the same kind, title, person, day, time and
+    /// timeframe (and, for a routine, repeat), and no field that both set and that differs: list, instructions, purpose, category,
+    /// priority, notes and time of day are compared only when both sides have one. What the model fills freely and differently from one
+    /// answer to the next (`schedule` on a task, `unparsed`) is not compared. An item the model marked as asked for more than once has no
+    /// match. A near match (the same title for someone else, or on another day) is not a match.
+    static func existing(matching item: DraftItem, in list: [DraftItem]) -> Int? {
+        guard !item.distinct else { return nil }
+        return list.firstIndex { sameRequest($0, item) }
+    }
+
+    private static func sameRequest(_ a: DraftItem, _ b: DraftItem) -> Bool {
+        func key(_ s: String?) -> String { s.map { Words.key($0) } ?? "" }
+        func agree(_ x: String?, _ y: String?) -> Bool { let p = key(x), q = key(y); return p.isEmpty || q.isEmpty || p == q }
+        guard a.kind == b.kind, a.key == b.key, key(a.assignee) == key(b.assignee), a.due == b.due,
+              a.timeMinutes == b.timeMinutes, key(a.softDue) == key(b.softDue) else { return false }
+        if a.kind == .routine, (a.recurrence?.scheduleText.lowercased() ?? "") != (b.recurrence?.scheduleText.lowercased() ?? "") { return false }
+        if let x = a.slot, let y = b.slot, x != y { return false }
+        return agree(a.listName, b.listName) && agree(a.instructions, b.instructions) && agree(a.reason, b.reason)
+            && agree(a.categoryName, b.categoryName) && agree(a.priority, b.priority) && agree(a.notes, b.notes)
+    }
+
+    /// An exact copy arrived: the item already there stays as it is (same ref, same id), takes what it had left empty from the copy, and
+    /// says so, once.
+    private static func fold(into item: inout DraftItem, from copy: DraftItem) {
+        func empty(_ s: String?) -> Bool { Words.trim(s ?? "").isEmpty }
+        if empty(item.listName) { item.listName = copy.listName }
+        if empty(item.instructions) { item.instructions = copy.instructions }
+        if empty(item.reason) { item.reason = copy.reason }
+        if empty(item.categoryName) { item.categoryName = copy.categoryName }
+        if empty(item.priority) { item.priority = copy.priority }
+        if empty(item.notes) { item.notes = copy.notes }
+        if item.slot == nil { item.slot = copy.slot }
+        if !item.advisories.contains(alreadyNote) { item.advisories.append(alreadyNote) }
+    }
+
+    /// What was said about the items that were folded into ones already on the draft ("Already had clean the baby mat.").
+    static func alreadyHad(_ titles: [String]) -> String? {
+        titles.isEmpty ? nil : "Already had \(Words.list(titles.map { $0.lowercased() }))."
+    }
+
+    /// New items that arrived while the draft waits join it. An exact copy of an item already there (not one the model marked as asked
+    /// for more than once) is not added: it is folded into that item, which carries a note, and that item is returned in `merged` so the
+    /// card can say so. A near copy (another person, day, time or list) is a row of its own, and the card says it looks like another.
+    func join(_ new: [DraftItem]) -> (added: [DraftItem], merged: [DraftItem]) {
+        var working = items
+        var added: [DraftItem] = [], merged: [DraftItem] = []
+        for n in new {
+            if let k = Self.existing(matching: n, in: working) {
+                Self.fold(into: &working[k], from: n)
+                merged.append(working[k])
+            } else {
+                let s = stamped(n)
+                working.append(s)
+                added.append(s)
+            }
+        }
+        items = working
+        return (added, merged)
+    }
+
+    /// The items that were added by `join`.
     @discardableResult
-    func merge(_ new: [DraftItem]) -> [DraftItem] {
-        var added: [DraftItem] = []
-        for n in new where !items.contains(where: { $0.key == n.key }) { items.append(n); added.append(n) }
-        return added
+    func append(contentsOf new: [DraftItem]) -> [DraftItem] { join(new).added }
+
+    // MARK: Changes from the screen and from the review
+
+    /// Whether these words are something Kitty heard and left out as chatter (offered back as "Skipped (N)").
+    func isSkipped(_ text: String) -> Bool { skipped.contains { Self.sameWords($0, text) } }
+
+    func item(id: UUID) -> DraftItem? { items.first { $0.id == id } }
+    func item(ref: String) -> DraftItem? {
+        let r = ref.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return items.first { $0.ref == r }
     }
 
-    enum Match: Equatable { case one(Int), none, ambiguous }
-
-    static let pronouns: Set<String> = ["", "it", "that", "this", "one", "that one", "this one", "the one"]
-
-    func find(_ phrase: String) -> Match {
-        let p = VoiceTurnManager.norm(phrase)
-        if Self.pronouns.contains(p) { return items.count == 1 ? .one(0) : .ambiguous }
-        let scores = items.map { Words.nounOverlap(p, $0.title) }
-        guard let best = scores.max(), best > 0 else { return .none }
-        let hits = scores.indices.filter { scores[$0] == best }
-        return hits.count == 1 ? .one(hits[0]) : .ambiguous
+    /// One item changed by hand. False if it is gone.
+    @discardableResult
+    func update(_ item: DraftItem) -> Bool {
+        guard let i = items.firstIndex(where: { $0.id == item.id }) else { return false }
+        items[i] = item
+        return true
     }
 
-    private static let ordinals: [String: Int] = ["first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3,
-                                                  "fifth": 4, "5th": 4, "sixth": 5, "6th": 5, "last": -1, "final": -1]
-    static func ordinalIndex(_ word: String) -> Int? {
-        if let n = ordinals[word.lowercased()] { return n }
-        if let n = Int(word), n >= 1 { return n - 1 }
-        return nil
+    /// One item deleted by hand. True if something is left.
+    @discardableResult
+    func remove(id: UUID) -> Bool {
+        items.removeAll { $0.id == id }
+        return !items.isEmpty
     }
 
-    private func label(_ item: DraftItem) -> String { item.title }
+    /// An item added by hand. An exact copy of one already there is folded into it, like new items from speech. Returns its title when that
+    /// happened (a different day, person, time or list makes it a row of its own).
+    @discardableResult
+    func append(_ item: DraftItem) -> String? { join([item]).merged.first?.title }
+
+    /// The fields an edit may empty, in the names the apply step reads. Anything else in `clear` is not a field.
+    static let clearable: Set<String> = ["day", "date", "due", "duedate", "time", "clock", "duetime", "timeofday", "slot", "daypart",
+                                         "priority", "person", "assignee", "for", "who", "purpose", "reason", "instructions", "category", "categories",
+                                         "tags", "tag", "repeat", "repeats", "recurrence", "schedule", "list", "listname", "timeframe", "softdue"]
+    static func clearName(_ s: String) -> String { s.lowercased().filter { $0.isLetter } }
+
+    /// An edit that sets a field and clears the same field says two things at once.
+    static func contradicts(_ op: DraftEditOpValue) -> Bool {
+        for field in op.clear {
+            switch clearName(field) {
+            case "day", "date", "due", "duedate": if !op.day.isEmpty || op.patch?.sets.contains("day") == true { return true }
+            case "time", "clock", "duetime": if !op.time.isEmpty || op.patch?.sets.contains("time") == true { return true }
+            case "timeofday", "slot", "daypart": if !op.timeOfDay.isEmpty { return true }
+            case "priority": if !op.priority.isEmpty { return true }
+            case "person", "assignee", "for", "who": if !op.person.isEmpty { return true }
+            case "purpose", "reason": if !op.purpose.isEmpty { return true }
+            case "instructions": if !op.instructions.isEmpty { return true }
+            case "repeat", "repeats", "recurrence", "schedule": if op.repeating != nil || op.patch?.sets.contains("repeat") == true { return true }
+            case "list", "listname": if !op.listName.isEmpty { return true }
+            default: break
+            }
+        }
+        return false
+    }
+
+    /// What a review changed, for the line on the card.
+    struct Change: Equatable {
+        var added: [String] = []
+        var removed: [String] = []
+        var updated: [String] = []
+        /// One sentence for a change that reached many items at once ("Cleared tags on 4 items.") instead of listing each one.
+        var notes: [String] = []
+        /// The refs of the items that were changed or removed, for the conversation log ("them" in the next turn).
+        var touched: [String] = []
+        var ignored = 0                 // edits that named an item that is not on the list
+        /// Edits Swift refused because they contradict themselves (a field set and cleared at once). The draft is left as it was.
+        var warnings: [String] = []
+        var isEmpty: Bool { added.isEmpty && removed.isEmpty && updated.isEmpty && notes.isEmpty && warnings.isEmpty }
+        /// What was applied to the draft, without the warnings: this is what the conversation log keeps.
+        var appliedText: String {
+            var parts: [String] = []
+            if !added.isEmpty { parts.append("Added \(Words.list(added.map { $0.lowercased() })).") }
+            if !removed.isEmpty { parts.append("Removed \(Words.list(removed.map { $0.lowercased() })).") }
+            if !updated.isEmpty { parts.append("Updated \(Words.list(updated.map { $0.lowercased() })).") }
+            parts.append(contentsOf: notes)
+            return parts.joined(separator: " ")
+        }
+        var text: String {
+            var parts: [String] = []
+            if !added.isEmpty { parts.append("Added \(Words.list(added.map { $0.lowercased() })).") }
+            if !removed.isEmpty { parts.append("Removed \(Words.list(removed.map { $0.lowercased() })).") }
+            if !updated.isEmpty { parts.append("Updated \(Words.list(updated.map { $0.lowercased() })).") }
+            parts.append(contentsOf: notes)
+            parts.append(contentsOf: warnings)
+            return parts.joined(separator: " ")
+        }
+    }
+
+    /// A person, day, time or list said once for the draft ("I said, Househelp tasks for tomorrow") with no new task. It fills what an item
+    /// leaves empty and replaces nothing an item already has; the scope keeps it for the next words. One change, one version step.
+    func applyHeader(_ r: DraftHeader.Reading, now: Date, calendar: Calendar, line: Int = 0, words: String = "") -> Change {
+        var change = Change()
+        var items = self.items
+        for n in items.indices {
+            var changed = false
+            if let a = r.assignee, Words.key(items[n].assignee ?? "").isEmpty { items[n].assignee = a; changed = true }
+            if let d = r.day, items[n].kind == .task, items[n].due == nil, items[n].softDue == nil {
+                switch DateResolver.read(d, now: now, calendar: calendar) {
+                case .day(let date): items[n].due = date; changed = true
+                case .soft(let said): items[n].softDue = said; changed = true
+                case .invalid: break
+                }
+            }
+            if let t = r.time, items[n].timeMinutes == nil, items[n].slot == nil {
+                switch TimeResolver.read(t) {
+                case .minutes(let m): items[n].timeMinutes = m; changed = true
+                case .slot(let slot): items[n].slot = slot; changed = true
+                case .invalid: break
+                }
+            }
+            if let l = r.list, items[n].kind == .task, Words.key(items[n].listName ?? "").isEmpty { items[n].listName = l; changed = true }
+            if changed {
+                items[n].history.append(DraftItem.Provenance(line: line, kind: "edited", words: words))
+                change.touched.append(items[n].ref)
+            }
+        }
+        self.items = items
+        setScope((scope ?? DraftScope()).merged(with: r.scope))
+        let many = change.touched.count
+        change.notes.append(many == 0 ? "The tasks are already for \(Words.list(r.parts))."
+                            : "Set \(Words.list(r.parts)) for \(many == items.count ? "the" : "\(many)") task\(many == 1 && items.count != 1 ? "" : "s").")
+        return change
+    }
+
+    /// The model returned only what changes: edits by item ref ("d2", as the prompt listed them) and new tasks. An edit names one
+    /// ref, several (`refs`) or the whole list (`all`): Swift applies it to each, so "remove all the tags" is one edit and cannot be
+    /// forgotten for the fifth item. Every item keeps its id and every field the edit does not mention (what was said or typed
+    /// earlier survives); `clear` empties a field and `remove` drops the item. A ref that is not on the draft is ignored. A repeat
+    /// that cannot be read is kept on the item as given and flagged. A change that reached many items is one sentence, not a list.
+    func apply(edits: [DraftEditOpValue], add: [DraftItem], context ctx: ValidationContext, line: Int = 0, words: String = "") -> Change {
+        var change = Change()
+        var gone = Set<UUID>()
+        var retitled: [(old: String, new: String)] = []
+        // Every change below is made on this copy and assigned to the draft once at the end, so the draft's version moves once
+        // (and not at all when nothing changed), however many fields and items the edits touched.
+        var items = self.items
+
+        func note(_ title: String, in list: inout [String]) {
+            if !list.contains(where: { Words.key($0) == Words.key(title) }) { list.append(title) }
+        }
+        func fieldName(_ s: String) -> String { s.lowercased().filter { $0.isLetter } }
+        func clearsTags(_ op: DraftEditOpValue) -> Bool {
+            let names = Set(op.clear.map(fieldName))
+            return names.contains("tags")
+        }
+        /// "tags", or the fields in the words of the card: "day and time".
+        func clearedText(_ op: DraftEditOpValue) -> String {
+            if clearsTags(op) {
+                let rest = op.clear.filter { !["tags", "category", "categories"].contains(fieldName($0)) }
+                return Words.list(["tags"] + rest.map { $0.lowercased() })
+            }
+            return Words.list(op.clear.map { $0.lowercased() })
+        }
+        func noteTouched(_ ref: String) { if !change.touched.contains(ref) { change.touched.append(ref) } }
+
+        func contradicts(_ op: DraftEditOpValue) -> Bool { Self.contradicts(op) }
+
+        for op in edits {
+            // A removal drops the item whole: whatever else the entry carries is moot, so it cannot contradict itself.
+            if !op.remove, contradicts(op) {
+                change.ignored += 1
+                change.warnings.append("I skipped one change that set and cleared the same thing.")
+                Trace.step("WARNING", "a draft edit both sets and clears a field (\(op.clear.joined(separator: ", "))): it was not applied and the draft is unchanged by it")
+                continue
+            }
+            var targets: [String] = []
+            if op.all {
+                targets = items.map(\.ref)
+            } else {
+                for raw in [op.ref] + op.refs {
+                    let r = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !r.isEmpty, !targets.contains(r) { targets.append(r) }
+                }
+            }
+            guard !targets.isEmpty else { change.ignored += 1; continue }
+            var changed: [String] = []          // titles of the items this edit changed
+            let onlyClears = !op.setsAnything && !op.remove && !op.clear.isEmpty
+
+            for ref in targets {
+                guard let i = items.firstIndex(where: { $0.ref == ref }) else { change.ignored += 1; continue }
+                guard !gone.contains(items[i].id) else { continue }
+                if op.remove {
+                    gone.insert(items[i].id)
+                    note(items[i].title, in: &change.removed)
+                    noteTouched(ref)
+                    continue
+                }
+                let before = items[i]
+                for field in op.clear {
+                    switch fieldName(field) {
+                    case "day", "date", "due", "duedate": items[i].due = nil
+                    case "time", "clock", "duetime": items[i].timeMinutes = nil
+                    case "timeofday", "slot", "daypart": items[i].slot = nil
+                    case "priority": items[i].priority = nil
+                    case "person", "assignee", "for", "who": items[i].assignee = nil
+                    case "purpose", "reason": items[i].reason = nil
+                    case "instructions": items[i].instructions = nil
+                    case "category", "categories": items[i].categoryName = nil
+                    case "tags", "tag": items[i].categoryName = nil
+                    case "repeat", "repeats", "recurrence", "schedule": items[i].kind = .task; items[i].recurrence = nil; items[i].schedule = nil; items[i].unparsed["repeat"] = nil
+                    case "list", "listname": items[i].listName = nil
+                    case "timeframe", "softdue": items[i].softDue = nil
+                    default: break
+                    }
+                }
+                let title = op.title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+                if !title.isEmpty { items[i].title = title }
+                if items[i].title != before.title { retitled.append((before.title, items[i].title)) }
+
+                if let r = op.repeating {
+                    switch BulkValidator.reading(r) {
+                    case .spec(let spec):
+                        items[i].kind = .routine
+                        items[i].recurrence = spec
+                        items[i].due = nil
+                        items[i].unparsed["repeat"] = nil
+                    case .once:
+                        items[i].kind = .task
+                        items[i].recurrence = nil
+                        items[i].unparsed["repeat"] = nil
+                    case .unreadable:
+                        // Kept as given, flagged on the card, and nothing is guessed from it.
+                        items[i].unparsed["repeat"] = Words.trim(r.words).isEmpty ? "repeat" : Words.trim(r.words)
+                    case .none:
+                        break
+                    }
+                }
+                if let patch = op.patch { Self.apply(patch, to: &items[i]) }
+                if let l = TaskDraftMapper.clean(op.listName) { items[i].listName = l }
+                if items[i].kind == .task, let d = BulkValidator.date(op.day, calendar: ctx.calendar) { items[i].due = d }
+                if let m = DaySlot.parseHHmm(op.time) { items[i].timeMinutes = m }
+                if let s = BulkValidator.slot(op.timeOfDay) { items[i].slot = s }
+                if let p = BulkValidator.priority(op.priority) { items[i].priority = p }
+                let who = Assignee.normalize(op.person)
+                if !who.isEmpty { items[i].assignee = who }
+                if let why = TaskDraftMapper.clean(op.purpose) { items[i].reason = why }
+                if let how = TaskDraftMapper.clean(op.instructions) { items[i].instructions = how }
+                if items[i] != before {
+                    items[i].history.append(DraftItem.Provenance(line: line, kind: items[i].title != before.title ? "renamed" : "edited", words: words))
+                    changed.append(items[i].title); noteTouched(ref)
+                }
+            }
+            // Many items changed in the same way: one sentence ("Cleared tags on 4 items."), not four titles.
+            if changed.count > 1 && (op.all || targets.count > 1) {
+                let n = changed.count
+                if onlyClears { change.notes.append("Cleared \(clearedText(op)) on \(n) items.") }
+                else { change.notes.append("Updated \(n) items.") }
+            } else {
+                for t in changed { note(t, in: &change.updated) }
+            }
+        }
+        items.removeAll { gone.contains($0.id) }
+
+        // One item retitled and others removed in the same answer is how the existing actions combine items. The card says so in one
+        // line. Swift only sees the shape of the edits, not what was meant: nothing else about the change differs.
+        if retitled.count == 1, !change.removed.isEmpty, change.updated.count <= 1 {
+            let names = ([retitled[0].old] + change.removed).map { $0.lowercased() }
+            change.notes.append("Combined \(Words.list(names)) into \(retitled[0].new.lowercased()).")
+            change.removed = []
+            change.updated = []
+        }
+
+        // An added item that is an exact copy of one on the list (as it is after the edits above) is folded into it, with a note.
+        var already: [String] = []
+        for n in add {
+            if let k = Self.existing(matching: n, in: items) {
+                Self.fold(into: &items[k], from: n)
+                already.append(n.title)
+                noteTouched(items[k].ref)
+                continue
+            }
+            var item = stamped(n)
+            item.history.append(DraftItem.Provenance(line: line, kind: "created", words: n.heardAs ?? words))
+            items.append(item)
+            change.added.append(n.title)
+            noteTouched(item.ref)
+        }
+        if let said = Self.alreadyHad(already) { change.notes.append(said) }
+        self.items = items
+        return change
+    }
 
     /// The same words, ignoring case, punctuation and "the/a/an".
     private static func sameWords(_ a: String, _ b: String) -> Bool {
-        func key(_ s: String) -> [String] { LocalSemanticPrechecker.tokens(s).filter { !["the", "a", "an"].contains($0) } }
+        func key(_ s: String) -> [String] { Words.tokens(s).filter { !["the", "a", "an"].contains($0) } }
         let x = key(a), y = key(b)
         return !x.isEmpty && x == y
     }
 
-    func apply(_ edit: DraftEdit, context ctx: ValidationContext) -> EditOutcome {
-        switch edit {
-        case .addItem(let text):
-            // Something Kitty skipped as chatter, now asked for by name: it becomes a task as said.
-            if let i = skipped.firstIndex(where: { Self.sameWords($0, text) }) {
-                let said = skipped.remove(at: i)
-                var title = said.trimmingCharacters(in: .whitespacesAndNewlines)
-                title = title.prefix(1).uppercased() + title.dropFirst()
-                let item = DraftItem(ValidatedTask(title: title), kind: .task)
-                return merge([item]).isEmpty ? .applied("That's already on the list.") : .applied("Added \(title.lowercased()).")
-            }
-            guard let item = Self.makeItem(from: text, context: ctx) else {
-                return .question("What should I do with \(Words.trim(text).lowercased())?")
-            }
-            return merge([item]).isEmpty ? .applied("That's already on the list.") : .applied("Added \(item.title.lowercased()).")
+    // MARK: Playbook steps by hand
 
-        case .remove(let phrase):
-            switch find(phrase) {
-            case .one(let i):
-                let gone = items.remove(at: i)
-                return items.isEmpty ? .emptied : .applied("Removed \(gone.title.lowercased()).")
-            case .none: return .question("I couldn't find that on the list. Which one should I remove?")
-            case .ambiguous: return .question("Which one should I remove?")
-            }
-
-        case .replace(let from, let to):
-            switch find(from) {
-            case .one(let i):
-                items[i].title = Self.replacing(from: from, to: to, in: items[i].title)
-                return .applied("Changed it to \(items[i].title).")
-            case .none: return .question("I couldn't find that on the list. Which one should I change?")
-            case .ambiguous: return .question("Which one should I change?")
-            }
-
-        case .priority(let target, let level):
-            let t = VoiceTurnManager.norm(target)
-            if ["all", "them", "everything", "all of them", "all tasks"].contains(t) {
-                for i in items.indices { items[i].priority = level }
-                return .applied("Made them all \(level) priority.")
-            }
-            switch find(target) {
-            case .one(let i):
-                items[i].priority = level
-                return .applied("Made \(items[i].title.lowercased()) \(level) priority.")
-            case .none: return .question("Which task should be \(level) priority?")
-            case .ambiguous: return .question("Which task should be \(level) priority?")
-            }
-
-        case .changeFields(let target, let c):
-            switch find(target) {
-            case .one(let i):
-                if let p = c.priority { items[i].priority = p }
-                if let a = c.assignee { items[i].assignee = a }
-                if let d = c.due, items[i].kind == .task { items[i].due = d }
-                if let m = c.timeMinutes { items[i].timeMinutes = m }
-                if let n = c.notes { items[i].notes = n }
-                if let cat = c.categoryName { items[i].categoryName = cat }
-                return .applied("Updated \(items[i].title.lowercased()).")
-            default: return .question("Which one should I change?")
-            }
-
-        case .addStep(let text):
-            guard var pb = playbook else { return .question("Which playbook?") }
-            let title = TaskPlanner.tidyTitle(text, removingDay: false)
-            guard !title.isEmpty else { return .question("What should the step be?") }
-            if !pb.steps.contains(where: { $0.key == TaskValidator.key(title) }) { pb.steps.append(DraftItem(title: title)) }
-            playbook = pb
-            return .applied("Added step \(pb.steps.count).")
-
-        case .replaceStep(let index, let text):
-            guard var pb = playbook, !pb.steps.isEmpty else { return .question("Which playbook?") }
-            let i = index == -1 ? pb.steps.count - 1 : index
-            guard pb.steps.indices.contains(i) else { return .question("I only have \(Words.number(pb.steps.count)) steps. Which one?") }
-            let title = TaskPlanner.tidyTitle(text, removingDay: false)
-            guard !title.isEmpty else { return .question("What should that step be?") }
-            pb.steps[i].title = title            // same position, same item: never a duplicate
-            playbook = pb
-            return .applied("Changed step \(i + 1) to \(title.lowercased()).")
-
-        case .removeStep(let index):
-            guard var pb = playbook, !pb.steps.isEmpty else { return .question("Which playbook?") }
-            let i = index == -1 ? pb.steps.count - 1 : index
-            guard pb.steps.indices.contains(i) else { return .question("I only have \(Words.number(pb.steps.count)) steps. Which one?") }
-            let gone = pb.steps.remove(at: i)
-            playbook = pb
-            return pb.steps.isEmpty ? .emptied : .applied("Removed \(gone.title.lowercased()).")
-        }
-    }
-
-    /// "change milk to bread" turns "Buy milk" into "Buy bread".
-    static func replacing(from: String, to: String, in title: String) -> String {
-        func clean(_ s: String) -> String {
-            var t = Words.trim(s).lowercased()
-            for d in ["the ", "a ", "an ", "my "] where t.hasPrefix(d) { t = String(t.dropFirst(d.count)) }
-            return t
-        }
-        let f = clean(from), t = clean(to)
-        guard !t.isEmpty else { return title }
-        if !f.isEmpty, let r = title.range(of: f, options: .caseInsensitive) {
-            return TaskPlanner.tidyTitle(title.replacingCharacters(in: r, with: t), removingDay: false)
-        }
-        let words = LocalSemanticPrechecker.tokens(t)
-        if let first = words.first, ActionLexicon.verbs.contains(first) { return TaskPlanner.tidyTitle(t, removingDay: false) }
-        let verb = LocalSemanticPrechecker.tokens(title).first ?? ""
-        return TaskPlanner.tidyTitle(verb + " " + t, removingDay: false)
-    }
-
-    /// "Sweep" on its own is a fine routine ("the maid should sweep every day"): the schedule says what it is.
-    static func isChoreVerb(_ title: String) -> Bool {
-        let w = LocalSemanticPrechecker.tokens(title)
-        return w.count == 1 && ActionLexicon.verbs.contains(w[0])
-    }
-
-    /// A draft from a few words the user added ("water plants", "water the plants every morning").
-    static func makeItem(from text: String, context ctx: ValidationContext) -> DraftItem? {
-        var working = BulkDetector.stripFrames(text)
-        var recurrence: RecurrenceSpec?
-        if let r = TaskPlanner.ruleRecurrence(in: working) { recurrence = r.spec; working = r.cleaned }
-        let title = TaskPlanner.tidyTitle(working, removingDay: false)
-        guard TaskValidator.isActionable(title) || (recurrence != nil && isChoreVerb(title)), title.count <= 80 else { return nil }
-        var v = ValidatedTask(title: title)
-        let nouns = Set(Words.nouns(title))
-        v.categoryName = ctx.knownCategories.first { c in !Set(Words.nouns(c)).isDisjoint(with: nouns) }
-        v.due = recurrence == nil ? TaskValidator.resolveDate("", utterance: text, ctx: ctx) : nil     // "every Sunday" is a schedule, not a day
-        v.recurrence = recurrence
-        var item = DraftItem(v, kind: recurrence == nil ? .task : .routine)
-        if recurrence != nil, DaySlot.guess(from: text) != .anytime { item.slot = DaySlot.guess(from: text) }   // "every evening"
-        return item
-    }
-}
-
-// MARK: - Understanding corrections to a pending draft
-
-enum DraftEditParser {
-    private static let lead = ["no", "nope", "actually", "okay", "ok", "wait", "hmm", "um", "uh", "so", "please", "oh", "but",
-                               "and also", "also", "and", "then", "yes"]
-    private static let ordinal = "first|second|third|fourth|fifth|sixth|last|final|1st|2nd|3rd|4th|5th|6th"
-
-    /// Recognises "also add water plants", "remove the trash task", "change milk to bread", "make the bathroom task high
-    /// priority", "change the first step to buy vegetables". Anything else returns nil and goes to the model.
-    static func parse(_ raw: String, hasPlaybook: Bool) -> DraftEdit? {
-        var t = VoiceTurnManager.norm(raw)
-        var hadAlso = false
-        var changed = true
-        while changed {
-            changed = false
-            for l in lead where t == l || t.hasPrefix(l + " ") {
-                if l == "also" || l == "and also" { hadAlso = true }
-                t = Words.trim(String(t.dropFirst(l.count)))
-                changed = true
-                break
-            }
-        }
-        guard !t.isEmpty else { return nil }
-
-        // Playbook steps
-        if let g = Rx.groups("^(?:change|replace|update|set|make|edit)\\s+(?:the\\s+)?(\(ordinal))\\s+step\\s+(?:to|with|into|as)?\\s*(.+)$", in: t),
-           let i = BulkDraftManager.ordinalIndex(g[1]) { return .replaceStep(index: i, text: g[2]) }
-        if let g = Rx.groups("^(?:change|replace|update|edit)\\s+step\\s+(\\d+)\\s+(?:to|with|into|as)\\s+(.+)$", in: t),
-           let n = Int(g[1]), n >= 1 { return .replaceStep(index: n - 1, text: g[2]) }
-        if let g = Rx.groups("^(?:remove|delete|drop|cut)\\s+(?:the\\s+)?(\(ordinal))\\s+step$", in: t),
-           let i = BulkDraftManager.ordinalIndex(g[1]) { return .removeStep(index: i) }
-        if let g = Rx.groups("^(?:remove|delete|drop)\\s+step\\s+(\\d+)$", in: t), let n = Int(g[1]), n >= 1 { return .removeStep(index: n - 1) }
-        if let g = Rx.groups("^(?:add|include|insert)\\s+(?:a\\s+|another\\s+|one more\\s+)?(?:playbook\\s+)?step\\s+(?:to\\s+)?(.+)$", in: t) {
-            return .addStep(g[1])
-        }
-
-        // Priority: "make the bathroom task high priority", "make it urgent"
-        if let level = ["high", "medium", "low"].first(where: { TaskValidator.resolvePriority($0, utterance: t) != nil }),
-           let first = t.split(separator: " ").first, ["make", "set", "mark", "change", "put", "give", "turn"].contains(String(first)) {
-            let cues = ["high priority", "medium priority", "low priority", "top priority", "highest priority", "lowest priority",
-                        "normal priority", "moderate priority", "not urgent", "no rush", "urgent", "important", "critical", "asap", "priority"]
-            var rest = " " + t.dropFirst(first.count) + " "
-            for c in cues { rest = rest.replacingOccurrences(of: " \(c) ", with: " ") }
-            let words = rest.split(separator: " ").map(String.init).filter { !["to", "as", "the", "a", "an", "task", "tasks", "item", "is", "be"].contains($0) }
-            return .priority(target: words.joined(separator: " "), level: level)
-        }
-
-        // Remove
-        if let g = Rx.groups("^(?:remove|delete|drop|skip|scrap|cancel|take off|get rid of|cross off|forget)\\s+(?:the\\s+|that\\s+|a\\s+)?(.+)$", in: t),
-           !["it", "that", "this", "everything", "all", "them", "all of them"].contains(g[1]) {
-            return .remove(g[1])
-        }
-
-        // Replace: "change milk to bread", "replace milk with bread", "bread instead of milk"
-        if let g = Rx.groups("^(?:use\\s+|make it\\s+)?(.+?)\\s+instead of\\s+(.+)$", in: t) { return .replace(from: g[2], to: g[1]) }
-        if let g = Rx.groups("^(?:change|replace|swap|switch|make|update)\\s+(?:the\\s+)?(.+?)\\s+(?:to|with|into|for)\\s+(.+)$", in: t),
-           !g[2].contains("priority"), !TaskValidator.mentionsDate(g[2]), !g[1].hasPrefix("it ") {
-            return .replace(from: g[1], to: g[2])
-        }
-
-        // Add
-        if let g = Rx.groups("^(?:add|include|put|plus)\\s+(?:a\\s+|an\\s+|another\\s+)?(?:task\\s+)?(?:to\\s+)?(.+?)(?:\\s+too|\\s+as well)?$", in: t) {
-            return hasPlaybook ? .addStep(g[1]) : .addItem(g[1])
-        }
-        if hadAlso || t.hasSuffix(" too") || t.hasSuffix(" as well"),
-           let first = LocalSemanticPrechecker.tokens(t).first, ActionLexicon.verbs.contains(first) {
-            var item = t
-            for s in [" too", " as well"] where item.hasSuffix(s) { item = String(item.dropLast(s.count)) }
-            return hasPlaybook ? .addStep(item) : .addItem(item)
-        }
-        return nil
+    /// A step added, renamed or removed from the screen. The playbook is otherwise changed by a fresh model answer.
+    func setSteps(_ steps: [DraftItem]) {
+        guard var pb = playbook else { return }
+        pb.steps = steps
+        playbook = pb
     }
 }
 
@@ -788,6 +1022,8 @@ final class ClarificationStateManager {
     private(set) var answers: [(question: String, answer: String)] = []
     private(set) var rounds = 0
     private(set) var lastQuestion: String?
+    /// The whole story of this loop, sent to the model on every call while it lasts (see `ClarificationDossier`).
+    private(set) var dossier = ClarificationDossier()
 
     enum Verdict: Equatable {
         case ask(String)            // ask this one question
@@ -800,11 +1036,18 @@ final class ClarificationStateManager {
         answers = []
         rounds = 0
         lastQuestion = nil
+        reshown = []
+        dossier = ClarificationDossier()
     }
 
+    /// The request as it is now, until the first question is asked. After that the first words are kept as they were.
+    func noteTurn(_ utterance: String) { dossier.noteOriginal(utterance) }
+
+    /// The answer to the open question. Said again or extended (the user kept talking), it replaces the earlier wording.
     func recordAnswer(_ answer: String) {
         guard let q = lastQuestion else { return }
-        answers.append((q, answer))
+        if let i = answers.indices.last, answers[i].question == q { answers[i].answer = answer } else { answers.append((q, answer)) }
+        dossier.answer(answer)
     }
 
     /// Registers a question. A repeat of an earlier question is replaced by the fallback for that slot, and if that was
@@ -820,7 +1063,38 @@ final class ClarificationStateManager {
         rounds += 1
         missing = field
         lastQuestion = q
+        dossier.ask(question: q, field: field)
         return .ask(q)
+    }
+
+    enum ModelQuestionVerdict: Equatable {
+        case ask(String)            // a new question: show it
+        case again(String)          // asked before and not answered: show the same question once more
+        case exhausted              // shown twice already, or three rounds used: stop asking
+    }
+
+    /// Questions already shown a second time, so the same one is never shown a third.
+    private var reshown: Set<String> = []
+
+    /// Registers a question the model wrote because the words had no task in them. Unlike `register`, a repeat is never replaced by a
+    /// Swift sentence: the same question may be shown once more, and after that the caller stops asking.
+    func registerModelQuestion(_ question: String, field: MissingField = .action) -> ModelQuestionVerdict {
+        let key = VoiceTurnManager.norm(question)
+        guard !key.isEmpty else { return .exhausted }
+        if previousQuestions.contains(key) {
+            guard !reshown.contains(key) else { return .exhausted }
+            reshown.insert(key)
+            lastQuestion = question
+            missing = field
+            return .again(question)
+        }
+        guard rounds < Self.maxRounds else { return .exhausted }
+        previousQuestions.append(key)
+        rounds += 1
+        missing = field
+        lastQuestion = question
+        dossier.ask(question: question, field: field)
+        return .ask(question)
     }
 
     static func fallbackQuestion(for field: MissingField) -> String {
@@ -850,25 +1124,20 @@ final class ClarificationStateManager {
         return .object
     }
 
-    /// Questions about due dates, priority, assignees, categories or notes are never needed to save a task.
-    static func asksForOptionalMetadata(_ question: String) -> Bool {
-        let t = question.lowercased()
-        if ["how often", "every", "repeat", "routine", "one-time", "one time"].contains(where: { t.contains($0) }) { return false }
-        return ["due", "when should", "when do you", "what day", "what time", "what date", "priority", "who should", "who is it for",
-                "who will", "assign", "which category", "what category", "notes", "deadline", "by when", "how urgent", "any other detail"]
-            .contains { t.contains($0) }
-    }
-
-    /// "What kind of strategy document?", "What is the context?": a question about the details of something already said
-    /// well enough to save. Never needed, and often about what the person has just told us.
-    static func asksForDetail(_ question: String) -> Bool {
-        let t = question.lowercased()
-        if ["how often", "every", "repeat", "routine", "one-time", "one time", "which task", "which one", "which routine"].contains(where: { t.contains($0) }) { return false }
-        return ["what kind of", "what type of", "what sort of", "which kind of", "which type of", "what is the context", "what's the context",
-                "what context", "more detail", "more context", "tell me more", "can you elaborate", "what is it about", "what's it about",
-                "what is the purpose", "what's the purpose", "what is it for", "what's it for", "what exactly", "any specific", "anything specific",
-                "what specifically", "which project", "what project", "what is the project", "what's the project"]
-            .contains { t.contains($0) }
+    /// Whether this is exactly one question: one sentence that ends in a question mark. Anything else (a recap of what the user wants, a
+    /// statement, two sentences) is never stored as the question the user is expected to answer.
+    static func isOneQuestion(_ raw: String) -> Bool {
+        let q = Words.trim(raw)
+        guard q.count > 1, q.hasSuffix("?") else { return false }
+        let body = q.dropLast()
+        if body.contains("?") || body.contains("!") { return false }
+        // A full stop followed by more words ends a sentence before the question does.
+        var previous: Character = " "
+        for (i, c) in body.enumerated() {
+            if previous == ".", c == " ", i + 1 < body.count { return false }
+            previous = c
+        }
+        return true
     }
 
     /// One short question: the first sentence ending in a question mark.
@@ -889,8 +1158,10 @@ final class ConfirmationManager {
 
     func arm(_ id: UUID) { armed = id }
     func disarm() { armed = nil }
+    /// After a Save that stored nothing: the same approval may be given once more.
+    func rearm(_ id: UUID) { executed.remove(id); armed = id }
 
-    /// True exactly once for an armed proposal. A second "yes", a tap after a "yes", or the countdown after a "yes" get false.
+    /// True exactly once for an armed proposal. A second "yes", or a tap after a "yes", gets false.
     func consume(_ id: UUID) -> Bool {
         guard armed == id, !executed.contains(id) else { return false }
         executed.insert(id)
@@ -935,18 +1206,38 @@ protocol SaveSink {
     /// A playbook the user already taught, if this title refers to one.
     func playbook(matching title: String) -> Playbook?
     func addPlaybookTasks(_ playbook: Playbook, due: Date?) -> [UUID]
+    /// Keeps the raw words of the turn that is being saved (once, shared by every task made from it). Nil when nothing is kept.
+    func recordUtterance(_ rawText: String) -> UUID?
+    /// The name of the saved list a list name the user said would join, or nil when it would be a new list. Only for the review card.
+    func existingListName(for raw: String) -> String?
+    /// Points tasks that were made some other way (playbook steps) at that utterance.
+    func link(_ taskIDs: [UUID], to utteranceID: UUID)
     /// After saving: make today's routine copies, classify times of day. Returns extra task ids to show.
     func finishSaving(routineIDs: Set<UUID>) async -> [UUID]
 }
 
+extension SaveSink {
+    func existingListName(for raw: String) -> String? { nil }
+    /// The names of the saved lists (empty for a sink that has none).
+    var existingListNames: [String] { [] }
+}
+
 @MainActor
 struct StoreSaveSink: SaveSink {
-    func saveTasks(_ planned: [PlannedTask]) -> [UUID] { TaskStore.shared.addMany(planned).map(\.id) }
+    var existingListNames: [String] { TaskStore.shared.profiles.map(\.name) }
+    func existingListName(for raw: String) -> String? { TaskStore.shared.profile(named: raw)?.name }
+
+    func saveTasks(_ planned: [PlannedTask]) -> [UUID] {
+        Trace.step("SAVED", "\(planned.count) task(s): " + planned.map { Trace.describe(planned: $0) }.joined(separator: "; "))
+        return TaskStore.shared.addMany(planned).map(\.id)
+    }
 
     func saveRoutine(_ p: PlannedTask) -> UUID? {
         guard let rec = p.recurrence else { return nil }
+        Trace.step("SAVED", "routine: " + Trace.describe(planned: p))
         return TaskStore.shared.addRoutine(title: p.title, category: p.category, recurrence: rec, assignee: p.assignee,
-                                           slot: p.slot, timeMinutes: p.timeMinutes)?.id
+                                           slot: p.slot, timeMinutes: p.timeMinutes, reason: p.reason, utteranceID: p.utteranceID,
+                                           instructions: p.instructions, schedule: p.schedule, allowDuplicate: true)?.id        // approved on the card, which already said "You already have this saved"
     }
 
     func savePlaybook(name: String, category: TaskCategory?, steps: [PlaybookStep], due: Date?) -> (replaced: Bool, created: [UUID]) {
@@ -956,6 +1247,9 @@ struct StoreSaveSink: SaveSink {
         if let due, let pb = store.playbook(matching: name, minWords: 1) { created = store.addPlaybookTasks(pb, due: due).map(\.id) }
         return (replaced, created)
     }
+
+    func recordUtterance(_ rawText: String) -> UUID? { UtteranceStore.shared.record(rawText) }
+    func link(_ taskIDs: [UUID], to utteranceID: UUID) { TaskStore.shared.link(taskIDs, to: utteranceID) }
 
     func playbook(matching title: String) -> Playbook? { TaskStore.shared.playbook(matching: title) }
     func addPlaybookTasks(_ pb: Playbook, due: Date?) -> [UUID] { TaskStore.shared.addPlaybookTasks(pb, due: due).map(\.id) }
@@ -968,7 +1262,6 @@ struct StoreSaveSink: SaveSink {
             guard let rid = t.routineID, routineIDs.contains(rid) else { return false }
             return Calendar.current.isDateInToday(t.effectiveDue)
         }.map(\.id)
-        await TaskAgent.classifyUntimed()
         return shown
     }
 }
@@ -979,6 +1272,18 @@ final class InMemorySaveSink: SaveSink {
     private(set) var tasks: [PlannedTask] = []
     private(set) var routines: [PlannedTask] = []
     private(set) var playbooks: [(name: String, steps: [PlaybookStep], due: Date?)] = []
+    /// What was kept as "the words of the turn", one entry per Save. Always on here: the evals read it.
+    private(set) var utterances: [Utterance] = []
+    private(set) var links: [(tasks: [UUID], utterance: UUID)] = []
+
+    func recordUtterance(_ rawText: String) -> UUID? {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let u = Utterance(rawText: text)
+        utterances.append(u)
+        return u.id
+    }
+    func link(_ taskIDs: [UUID], to utteranceID: UUID) { links.append((taskIDs, utteranceID)) }
 
     func saveTasks(_ planned: [PlannedTask]) -> [UUID] {
         tasks.append(contentsOf: planned)
@@ -986,8 +1291,7 @@ final class InMemorySaveSink: SaveSink {
     }
 
     func saveRoutine(_ p: PlannedTask) -> UUID? {
-        let schedule = p.recurrence?.scheduleText ?? ""
-        if routines.contains(where: { $0.title.lowercased() == p.title.lowercased() && ($0.recurrence?.scheduleText ?? "") == schedule }) { return nil }
+        // An approved routine is saved even when a saved one has the same title and repeat: the card flagged it before approval.
         routines.append(p)
         return UUID()
     }
@@ -1008,6 +1312,8 @@ final class InMemorySaveSink: SaveSink {
 final class Once {
     private var fired = false
     func fire() -> Bool { if fired { return false }; fired = true; return true }
+    /// Only for a Save that stored nothing: the same approval may run again, and still stores at most once.
+    func reset() { fired = false }
 }
 
 // MARK: - What Kitty says: summaries and grouped confirmations
@@ -1026,6 +1332,15 @@ enum DraftSummary {
 
     /// 2-5 items: name them. More than 5: group by category.
     static func question(for items: [DraftItem]) -> String {
+        let named = items.compactMap(\.listName)
+        if !named.isEmpty {
+            var seen: [String] = []
+            for n in named where !seen.contains(where: { TaskLabels.stemKey($0) == TaskLabels.stemKey(n) }) { seen.append(n) }
+            if seen.count == 1, named.count == items.count {
+                return "I have the list “\(seen[0])” with \(Words.plural(items.count, "task")). Should I save it?"
+            }
+            return "I have \(Words.plural(items.count, "task")) in \(Words.plural(seen.count, "list")). Should I save them?"
+        }
         if items.count <= 5 {
             return "I have \(kindText(items)): \(Words.list(items.map { $0.title.lowercased() })). Should I save these?"
         }
@@ -1072,58 +1387,165 @@ enum DraftSummary {
     }
 }
 
+// MARK: - What actually happened when Save ran
+
+/// What the sink really did, so the reply never says more than happened. The version is the draft version the Save was shown with.
+struct SaveReport: Equatable {
+    var version: Int? = nil
+    var savedTaskIDs: [UUID] = []
+    var savedRoutineIDs: [UUID] = []
+    var alreadyHad = 0
+    var notSaved: [String] = []
+    /// Nothing was stored although items were approved. The draft is kept and the same approval can be given again.
+    var persistenceFailed = false
+    var message = ""
+    var savedCount: Int { savedTaskIDs.count + savedRoutineIDs.count }
+}
+
 // MARK: - Previews and one-time saves for drafts
 
 @MainActor
 enum DraftProposals {
     static func tags(_ i: DraftItem) -> [PreviewTag] {
         var tags: [PreviewTag] = []
+        if let raw = i.unparsed["repeat"] { tags.append(PreviewTag(text: "Repeat needs a fix: “\(raw)”", icon: "exclamationmark.triangle.fill", color: .orange)) }
+        if let raw = i.unparsed["date"] { tags.append(PreviewTag(text: "Day needs a fix: “\(raw)”", icon: "exclamationmark.triangle.fill", color: .orange)) }
+        if let raw = i.unparsed["time"] { tags.append(PreviewTag(text: "Time needs a fix: “\(raw)”", icon: "exclamationmark.triangle.fill", color: .orange)) }
         if let r = i.recurrence, i.kind == .routine { tags.append(PreviewTag(text: r.scheduleText, icon: "repeat", color: .purple)) }
         if let d = i.due { tags.append(PreviewTag(text: d.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()), icon: "calendar")) }
+        if let soft = i.softDue, i.due == nil { tags.append(PreviewTag(text: soft, icon: "calendar.badge.clock")) }
         if let m = i.timeMinutes { tags.append(PreviewTag(text: DaySlot.clockLabel(m), icon: "clock", color: .indigo))
         } else if let s = i.slot { tags.append(PreviewTag(text: s.label, icon: s.symbol, color: .indigo)) }
         if let a = i.assignee { tags.append(PreviewTag(text: a, icon: "person.fill", color: .person(a))) }
-        if let c = i.categoryName { tags.append(PreviewTag(text: c, icon: "tag.fill")) }
+        if let c = i.categoryName { tags.append(PreviewTag(text: c, icon: "tag.fill", isLabel: true)) }
         if let p = i.priority { tags.append(PreviewTag(text: p.capitalized + " priority", icon: "flag.fill", color: p == "high" ? .red : .orange)) }
+        if let r = i.reason { tags.append(PreviewTag(text: r, icon: "target")) }
+        if let h = i.instructions { tags.append(PreviewTag(text: h, icon: "text.alignleft")) }
+        // The model's quote. A quote that is not word for word in the transcript is never shown as the user's speech: the row says it
+        // is unverified (the quote and the original words are in the edit sheet). A quote that matches proves nothing about the task.
+        if i.quoteUnverified {
+            tags.append(PreviewTag(text: i.reviewed ? "Quote unverified, included" : "Quote unverified", icon: "questionmark.circle", color: .orange))
+        } else if let h = i.heardAs { tags.append(PreviewTag(text: "“\(h)”", icon: "quote.bubble")) }
+        for a in i.advisories { tags.append(PreviewTag(text: a, icon: "info.circle", color: .orange)) }
         return tags
     }
 
-    /// Several tasks and routines: always an explicit "yes", never a countdown.
-    static func bulk(_ items: [DraftItem], question: String? = nil, ack: String? = nil, used: String? = nil,
-                     skipped: [String] = [], sink: SaveSink) -> Proposal {
-        let rows = items.map { PreviewRow(icon: $0.kind == .routine ? "repeat" : "circle", title: $0.title, tags: tags($0)) }
+    /// The rows grouped by the list each task names, in the order the lists were first said; tasks that name none go together, last.
+    /// Empty when no task names a list (the card is then flat, as it always was). Lists are only named here: made when approved.
+    static func sections(_ items: [DraftItem], rows: [PreviewRow], sink: SaveSink) -> [PreviewSection] {
+        guard items.contains(where: { $0.listName != nil }) else { return [] }
+        var order: [String] = []
+        var names: [String: String] = [:]
+        var grouped: [String: [PreviewRow]] = [:]
+        var loose: [PreviewRow] = []
+        for (item, row) in zip(items, rows) {
+            guard let name = item.listName else { loose.append(row); continue }
+            let key = TaskLabels.stemKey(name)
+            if names[key] == nil { names[key] = name; order.append(key) }
+            grouped[key, default: []].append(row)
+        }
+        var out: [PreviewSection] = order.map { key in
+            let name = names[key] ?? ""
+            let list = grouped[key] ?? []
+            let count = Words.plural(list.count, "task")
+            let existing = sink.existingListName(for: name)
+            return PreviewSection(listName: name, icon: TaskProfile.symbol(for: name),
+                                  subtitle: existing.map { "Adding to your \($0) list · \(count)" } ?? "New list · \(count)",
+                                  isNew: existing == nil, rows: list)
+        }
+        if !loose.isEmpty {
+            out.append(PreviewSection(listName: nil, icon: "circle", subtitle: "\(Words.plural(loose.count, "task")), no list", isNew: false, rows: loose))
+        }
+        return out
+    }
+
+    /// "Save list" for one list, "Save 13 tasks in 2 lists" for several; nil when no task names a list.
+    static func sectionsTitle(_ items: [DraftItem], sections: [PreviewSection]) -> String? {
+        let lists = sections.filter { $0.listName != nil }
+        guard !lists.isEmpty else { return nil }
+        if lists.count == 1, sections.count == 1 { return "Save list" }
+        return "Save \(Words.plural(items.count, "task")) in \(Words.plural(lists.count, "list"))"
+    }
+
+    /// Tasks and routines: always an explicit Save or "yes", never a countdown.
+    static func bulk(_ drafts: [DraftItem], question: String? = nil, ack: String? = nil, used: String? = nil,
+                     skipped: [String] = [], spoken: String? = nil, version: Int? = nil, sink: SaveSink) -> Proposal {
+        var items = TaskSorting.ordered(drafts)         // overdue first, then morning to night, then by time
+        // An exact copy never reaches here (it was folded into the item it copies). Items that only look alike (the same title for
+        // someone else, or on another day) are both kept; the card says so, and the user decides.
+        for n in items.indices where items.enumerated().contains(where: { $0.offset != n && $0.element.identity == items[n].identity }) {
+            let note = "Looks like another item"
+            if !items[n].advisories.contains(note) { items[n].advisories.append(note) }
+        }
+        // Every row shows only what was said: a person, day or category the user did not say is not filled in and not shown.
+        let rows = items.map { item in
+            PreviewRow(icon: item.kind == .routine ? "repeat" : "circle", title: item.title,
+                       // The card shows what was given, flagged repeats and advice too.
+                       tags: tags(item), draftID: item.id,
+                       // The orange tag already says a repeat that could not be read, and the tags say the day, timeframe and person.
+                       details: TaskDetailLines.lines(for: item, shownAsTag: [.forWhom, .around]).filter { line in
+                           !line.isFlag && !(line.kind == .repeats && Words.key(line.value) == Words.key(item.recurrence?.scheduleText ?? "")) })
+        }
         let prompt = question ?? DraftSummary.question(for: items)
+        let sections = sections(items, rows: rows, sink: sink)
         let once = Once()
-        let tasks = items.filter { $0.kind == .task }.map { $0.planned() }
-        let routines = items.filter { $0.kind == .routine }.map { $0.planned() }
+        let taskDrafts = items.filter { $0.kind == .task }
+        let routineDrafts = items.filter { $0.kind == .routine }
         var p = Proposal(
-            title: items.count == 1 ? "Save “\(items[0].title)”" : "Save \(DraftSummary.kindText(items))",
+            title: sectionsTitle(items, sections: sections) ?? (items.count == 1 ? "Save “\(items[0].title)”" : "Save \(DraftSummary.kindText(items))"),
             rows: rows,
+            sections: sections,
+            notes: [],
             confirmLabel: "Save",
-            autoConfirm: false,
             pendingTitle: items.first?.title,
             apply: {
                 guard once.fire() else { return AgentReply(message: "Already saved.", didAdd: false) }
-                var created = sink.saveTasks(tasks)
+                // One Utterance for the whole turn, written now and never for an abandoned draft; every task and routine points to it.
+                let utteranceID = spoken.flatMap { sink.recordUtterance($0) }
+                func stamped(_ d: DraftItem) -> PlannedTask { var p = d.planned(); p.utteranceID = utteranceID; return p }
+                let tasks = taskDrafts.map(stamped)
+                let routines = routineDrafts.map(stamped)
+                var report = SaveReport(version: version)
+                report.savedTaskIDs = sink.saveTasks(tasks)
                 var routineIDs = Set<UUID>()
                 var savedRoutines: [PlannedTask] = []
-                var already = 0
                 for r in routines {
-                    if let id = sink.saveRoutine(r) { routineIDs.insert(id); savedRoutines.append(r) } else { already += 1 }
+                    if let id = sink.saveRoutine(r) { routineIDs.insert(id); savedRoutines.append(r); report.savedRoutineIDs.append(id) } else { report.alreadyHad += 1 }
                 }
-                created += await sink.finishSaving(routineIDs: routineIDs)
-                let message = (tasks.isEmpty && savedRoutines.isEmpty)
-                    ? "You already have \(already == 1 ? "that" : "those")."
-                    : DraftSummary.saved(tasks: tasks, routines: savedRoutines, alreadyHad: already)
-                return AgentReply(message: message, didAdd: true, didChange: true, created: created)
+                if report.savedTaskIDs.count < tasks.count {
+                    report.notSaved = Array(taskDrafts.dropFirst(report.savedTaskIDs.count)).map(\.title)
+                }
+                // Success is reported only after storing succeeded. Nothing stored for approved items: say so, keep the draft, and let
+                // the same approval run again (it still stores at most once).
+                if !(tasks.isEmpty && routines.isEmpty), report.savedCount == 0, report.alreadyHad == 0 {
+                    once.reset()
+                    report.persistenceFailed = true
+                    report.message = "I couldn't save that, so nothing was saved. The list is still here: say yes or tap Save to try again."
+                    return AgentReply(message: report.message, didAdd: false, didChange: false, report: report)
+                }
+                let shown = await sink.finishSaving(routineIDs: routineIDs)
+                let savedTasks = Array(tasks.prefix(report.savedTaskIDs.count))
+                report.message = (savedTasks.isEmpty && savedRoutines.isEmpty)
+                    ? (report.alreadyHad > 0 ? "You already have \(report.alreadyHad == 1 ? "that" : "those")." : "I couldn't save that.")
+                    : DraftSummary.saved(tasks: savedTasks, routines: savedRoutines, alreadyHad: report.alreadyHad)
+                if !report.notSaved.isEmpty { report.message += " I couldn't save: \(Words.list(report.notSaved.map { $0.lowercased() }))." }
+                return AgentReply(message: report.message, didAdd: !savedTasks.isEmpty || !savedRoutines.isEmpty, didChange: true,
+                                  created: report.savedTaskIDs + shown, report: report)
             })
+        p.draftVersion = version
         p.prompt = (ack.map { $0 + " " } ?? "") + (ack == nil ? prompt : "Should I save these?")
+        // A flagged item nobody has decided on: one targeted question about the first of them, in place of the save prompt. The card
+        // still lists every item and Save still saves everything shown, flagged items included.
+        if question == nil, let flagged = items.first(where: { $0.quoteUnverified && !$0.reviewed }) {
+            p.flagQuestionItemID = flagged.id
+            p.prompt = (ack.map { $0 + " " } ?? "") + "Should I include ‘\(flagged.title)’?"
+        }
         p.used = used
         p.skipped = skipped
         return p
     }
 
-    static func playbook(_ pb: PlaybookDraftState, ack: String? = nil, sink: SaveSink) -> Proposal {
+    static func playbook(_ pb: PlaybookDraftState, ack: String? = nil, spoken: String? = nil, sink: SaveSink) -> Proposal {
         let rows = pb.steps.enumerated().map { i, s in PreviewRow(icon: "\(min(i + 1, 50)).circle", title: s.title, tags: s.assignee.map { [PreviewTag(text: $0, icon: "person.fill", color: .person($0))] } ?? []) }
         var notes: [String] = []
         if !pb.stated { notes.append("These steps are my suggestion. Say “yes” to keep them, or tell me what to change.") }
@@ -1135,11 +1557,11 @@ enum DraftProposals {
             rows: rows,
             notes: notes,
             confirmLabel: "Save",
-            autoConfirm: false,
             pendingPlaybook: pb.name,
             apply: {
                 guard once.fire() else { return AgentReply(message: "Already saved.", didAdd: false) }
-                let result = sink.savePlaybook(name: name, category: TaskCategory.guess(from: name), steps: steps, due: due)
+                let result = sink.savePlaybook(name: name, category: nil, steps: steps, due: due)
+                if let id = spoken.flatMap({ sink.recordUtterance($0) }), !result.created.isEmpty { sink.link(result.created, to: id) }
                 let when = due.map { " for " + $0.formatted(.dateTime.weekday(.wide)) } ?? ""
                 return AgentReply(message: "\(result.replaced ? "Updated" : "Saved") the \(name) playbook with \(Words.number(steps.count)) \(steps.count == 1 ? "step" : "steps")\(when).",
                                   didAdd: !result.created.isEmpty, didChange: true, created: result.created)
@@ -1151,769 +1573,295 @@ enum DraftProposals {
     }
 }
 
-// MARK: - Validating the model's drafts
+// MARK: - Decoding the model's answer
+
+/// An existing task to change, named by the id a tool returned.
+struct ValidatedOperation: Equatable {
+    var kind: BulkValidator.OperationKind
+    var taskID: String
+    var changes: ValidatedTask?       // update only: the fields to change; an empty title means no rename
+    /// The change came from the flat edit call: it may also carry purpose, instructions, part of the day, timeframe, list and cleared
+    /// fields, which are applied and checked too.
+    var extended = false
+}
 
 enum BulkValidated: Equatable {
     case wait
     case clarify(String)
     case unrelated(String)
-    case duplicate(String)
     case items([DraftItem])
     case playbook(PlaybookDraftState)
+    case operations([ValidatedOperation])
+    case lookup(TaskQueryValue)       // a read-only question: Swift searches with these parameters
+    case clarifyWithItems(String, [DraftItem])   // flat path: the tasks that were understood, shown with the one question that is still open
+    case noContent                    // every task named said nothing about a task: no card, the model is asked for one question
 }
 
+/// The model's answer, decoded and nothing more. The model's list is accepted as it is: Swift turns an ISO date into a date,
+/// HH:mm into minutes, the time-of-day word into a slot, an empty string into nil. Whether the list is right is for the preview, the
+/// edit sheet and "nothing saves until Save" to settle.
 enum BulkValidator {
-    private static func cleanNotes(_ s: String) -> String? {
-        let t = Words.trim(s)
-        return t.isEmpty ? nil : String(t.prefix(200))
+    private static let isoDay: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static func text(_ s: String) -> String? {
+        let t = s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 
-    /// The words the user said about this item: its own piece of the utterance.
-    private static func segment(for title: String, segments: [String], whole: String) -> String {
-        guard !segments.isEmpty else { return whole }
-        let scored = segments.map { ($0, Words.nounOverlap($0, title)) }
-        if let best = scored.max(by: { $0.1 < $1.1 }), best.1 > 0 { return best.0 }
-        return whole
+    /// "2026-10-26" as that day in the user's calendar. Anything else is nil.
+    static func date(_ value: String, calendar: Calendar) -> Date? {
+        guard let v = text(value) else { return nil }
+        isoDay.calendar = calendar
+        isoDay.timeZone = calendar.timeZone
+        guard let d = isoDay.date(from: String(v.prefix(10))) else { return nil }
+        return calendar.startOfDay(for: d)
     }
 
-    private static func dateText(segment seg: String, head: String) -> String {
-        TaskValidator.mentionsDate(seg) || !TaskValidator.mentionsDate(head) ? seg : head + " " + seg
+    static func priority(_ value: String) -> String? {
+        let v = value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return ["low", "medium", "high"].contains(v) ? v : nil
     }
 
-    /// The action clause a model title is about: the one it shares the most words with. Nil when it is about none of them.
-    private static func matchingAction(for title: String, in turn: LongTurn) -> ActionClause? {
-        let scored = turn.actions.map { ($0, Words.nounOverlap($0.text, title)) }
-        guard let best = scored.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
-        return best.0
+    static func slot(_ value: String) -> DaySlot? {
+        DaySlot(rawValue: value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    private static func make(title raw: String, category: String, dueDate: String, dueTime: String, priority: String, assignee: String,
-                             notes: String, segments: [String], utterance: String, ctx: ValidationContext,
-                             matched: ActionClause? = nil, contextNotes: String? = nil, scheduled: Bool = false) -> ValidatedTask? {
-        let title = TaskPlanner.tidyTitle(raw, removingDay: false)
-        guard TaskValidator.isActionable(title) || (scheduled && BulkDraftManager.isChoreVerb(title)), title.count <= 80 else { return nil }
-        if let a = matched {
-            // A long turn: the day and the person come from this action's own clause, never from the intro or another task.
-            return ValidatedTask(
-                title: title,
-                categoryName: TaskValidator.resolveCategory(category, known: ctx.knownCategories),
-                due: a.due,
-                timeMinutes: TaskValidator.resolveTime(dueTime, utterance: a.text),
-                priority: TaskValidator.resolvePriority(priority, utterance: a.text),
-                assignee: TaskValidator.resolveAssignee(assignee, utterance: a.source, known: ctx.knownAssignees) ?? a.assignee,
-                notes: cleanNotes(notes) ?? contextNotes)
-        }
-        let seg = segment(for: title, segments: segments, whole: utterance)
-        let dates = dateText(segment: seg, head: BulkDetector.head(of: utterance, segments: segments))
+    /// The category in the household's own spelling when it already has it, else as given.
+    private static func category(_ value: String, known: [String]) -> String? {
+        guard let v = text(value) else { return nil }
+        return known.first { Words.key($0) == Words.key(v) } ?? v
+    }
+
+    private static func task(_ d: TaskDraftValue, ctx: ValidationContext) -> ValidatedTask? {
+        guard let title = text(d.title) else { return nil }
+        let cat = category(d.category, known: ctx.knownCategories)
         return ValidatedTask(
             title: title,
-            categoryName: TaskValidator.resolveCategory(category, known: ctx.knownCategories),
-            due: TaskValidator.resolveDate(dueDate, utterance: dates, ctx: ctx),
-            timeMinutes: TaskValidator.resolveTime(dueTime, utterance: dates),
-            priority: TaskValidator.resolvePriority(priority, utterance: seg),
-            assignee: TaskValidator.resolveAssignee(assignee, utterance: utterance, known: ctx.knownAssignees),
-            notes: cleanNotes(notes))
+            categoryName: cat,
+            due: date(d.dueDate, calendar: ctx.calendar),
+            timeMinutes: DaySlot.parseHHmm(d.dueTime),
+            priority: priority(d.priority),
+            assignee: text(d.assignee).map(Assignee.normalize).flatMap { $0.isEmpty ? nil : $0 },
+            notes: text(d.notes),
+            reason: text(d.reason),
+            slot: slot(d.timeOfDay),
+            heardAs: text(d.heardAs))
     }
 
-    /// Where in the day a routine happens, when its words say so ("every evening"). Nil when they do not.
-    private static func slot(in text: String) -> DaySlot? {
-        let s = DaySlot.guess(from: text)
-        return s == .anytime ? nil : s
+    /// How a repeat reads: a real recurrence, "not repeating", nothing given, or numbers that do not make sense (kept as given).
+    enum RepeatReading: Equatable { case spec(RecurrenceSpec), once, none, unreadable }
+
+    /// Reads the structured repeat. Only ranges are checked; the words are never parsed.
+    static func reading(frequency: String, weekdays: [Int], everyNWeeks: Int, intervalDays: Int, dayOfMonth: Int) -> RepeatReading {
+        let freq = frequency.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let days = Array(Set(weekdays)).sorted()
+        if days.contains(where: { !(1...7).contains($0) }) || everyNWeeks < 0 || everyNWeeks > 52
+            || intervalDays < 0 || intervalDays > 365 || dayOfMonth < 0 || dayOfMonth > 31 { return .unreadable }
+        if freq == "once" || freq == "one-time" || freq == "none" { return .once }
+        // A repeat is ONE pattern: a day of the month, a gap of days, or weekdays. Two at once contradict each other, so nothing
+        // is guessed from them: the repeat is kept as given and flagged for a fix.
+        if [dayOfMonth > 0, intervalDays > 1, !days.isEmpty].filter({ $0 }).count > 1 { return .unreadable }
+        if dayOfMonth > 0 { return .spec(RecurrenceSpec(dayOfMonth: dayOfMonth)) }
+        if intervalDays > 1 { return .spec(RecurrenceSpec(intervalDays: intervalDays)) }
+        if !days.isEmpty { return .spec(RecurrenceSpec(weekdays: days, everyNWeeks: max(1, everyNWeeks))) }
+        if freq == "daily" || freq == "every day" || intervalDays == 1 { return .spec(RecurrenceSpec()) }
+        if freq.isEmpty && everyNWeeks == 0 && intervalDays == 0 { return .none }
+        return .unreadable
     }
 
-    /// "weekly" or "monthly" without the day it needs: the question to ask, or nil when the words are enough.
-    private static func scheduleQuestion(_ title: String, in text: String) -> String? {
-        let t = text.lowercased()
-        let name = title.lowercased()
-        if t.range(of: "\\bweekly\\b|\\bevery week\\b|\\bonce a week\\b", options: .regularExpression) != nil,
-           TaskPlanner.weekdaysMentioned(t).isEmpty {
-            return "Which day should I \(name) each week?"
+    static func reading(_ r: RepeatValue) -> RepeatReading {
+        reading(frequency: r.frequency, weekdays: r.weekdays, everyNWeeks: r.everyNWeeks, intervalDays: r.intervalDays, dayOfMonth: r.dayOfMonth)
+    }
+
+    /// A routine when the repeat reads; otherwise a one-time task that keeps the repeat as given and is flagged for a fix.
+    private static func routine(_ d: RoutineDraftValue, ctx: ValidationContext) -> DraftItem? {
+        guard let v = task(TaskDraftValue(title: d.title, reason: d.reason, category: d.category, dueTime: d.dueTime,
+                                          timeOfDay: d.timeOfDay, assignee: d.assignee, notes: d.notes,
+                                          heardAs: d.heardAs), ctx: ctx) else { return nil }
+        let r = reading(frequency: d.frequency, weekdays: d.weekdays, everyNWeeks: d.everyNWeeks, intervalDays: d.intervalDays, dayOfMonth: d.dayOfMonth)
+        switch r {
+        case .spec(let spec):
+            var routine = v
+            routine.recurrence = spec
+            return DraftItem(routine, kind: .routine)
+        case .once:
+            return DraftItem(v, kind: .task)
+        case .none, .unreadable:
+            var item = DraftItem(v, kind: .task)
+            item.unparsed["repeat"] = text(d.schedule) ?? text(d.frequency) ?? "repeat"
+            return item
         }
-        if ["monthly", "every month", "once a month", "each month"].contains(where: { t.contains($0) }),
-           t.range(of: "\\d{1,2}(st|nd|rd|th)", options: .regularExpression) == nil {
-            return "Which day of the month should I \(name)?"
+    }
+
+    /// An action the app can do to an existing task, by id.
+    enum OperationKind: String, Equatable { case complete, reopen, delete, update }
+
+    private static func operationKind(_ raw: String) -> OperationKind? {
+        switch raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "complete", "complete_task", "done", "finish": return .complete
+        case "reopen", "reopen_task": return .reopen
+        case "delete", "delete_task", "remove": return .delete
+        case "update", "update_task", "assign", "reschedule", "rename": return .update
+        default: return nil
         }
-        return nil
     }
 
-    private static func clarifyAbout(_ title: String) -> String {
-        let t = Words.trim(title)
-        return t.isEmpty ? "What would you like me to add?" : "What would you like me to do with \(t.lowercased())?"
+    private static func operation(_ o: OperationValue, ctx: ValidationContext) -> ValidatedOperation? {
+        guard let kind = operationKind(o.op), let id = text(o.taskID) else { return nil }
+        guard kind == .update else { return ValidatedOperation(kind: kind, taskID: id, changes: nil) }
+        guard let c = o.changes, let v = task(TaskDraftValue(title: c.title.isEmpty ? "change" : c.title, reason: c.reason, category: c.category,
+                                                              dueDate: c.dueDate, dueTime: c.dueTime, timeOfDay: c.timeOfDay,
+                                                              priority: c.priority, assignee: c.assignee, notes: c.notes), ctx: ctx) else { return nil }
+        var changes = v
+        if text(c.title) == nil { changes.title = "" }
+        let any = !changes.title.isEmpty || changes.priority != nil || changes.assignee != nil || changes.due != nil || changes.timeMinutes != nil
+            || changes.notes != nil || changes.categoryName != nil || (changes.slot ?? .anytime) != .anytime
+        return any ? ValidatedOperation(kind: kind, taskID: id, changes: changes) : nil
     }
 
-    static func validate(_ d: BulkDecisionValue, utterance: String, segments: [String], context ctx: ValidationContext,
-                         turn: LongTurn? = nil) -> BulkValidated {
-        let action = d.action.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        switch action {
-        case "wait":
-            return .wait
-        case "clarify":
+    /// Letters and digits only, lower case, single spaces: the form in which a quote is compared with the transcript.
+    static func quoteForm(_ s: String) -> String {
+        s.lowercased().filter { $0.isLetter || $0.isNumber || $0 == " " || $0.isWhitespace }
+            .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    /// Whether the quote an item carries is word for word in the transcript. A structural check: no stemming, no overlap, no meaning.
+    static func quoteIsInTranscript(_ quote: String?, transcript: String) -> Bool {
+        guard let quote, !quoteForm(quote).isEmpty else { return false }
+        return quoteForm(transcript).contains(quoteForm(quote))
+    }
+
+    /// Flags (never removes) items whose quote (`heardAs`) is not word for word in what the speaker said. Every item is returned, in
+    /// order, whether one, several or all of the quotes fail: "quote unverified" is a request to review, not a verdict that the task
+    /// is wrong. An item with no quote makes no claim and is not flagged. A quote that does match proves nothing about whether the
+    /// task is right, so a match changes nothing on the item. Nothing here retries the model.
+    static func flagQuotes(_ items: [DraftItem], transcript: String) -> [DraftItem] {
+        items.map { item in
+            var i = item
+            guard !quoteForm(item.heardAs ?? "").isEmpty, !quoteIsInTranscript(item.heardAs, transcript: transcript) else { return i }
+            i.quoteUnverified = true
+            Trace.step("WARNING", "\(i.title): its quote \"\(item.heardAs ?? "")\" is not in the transcript word for word: quote unverified, the task stays in the draft for review")
+            return i
+        }
+    }
+
+    /// The parts of an item that make it the same request as another: everything except where the model says it came from.
+    private static func payload(_ i: DraftItem) -> String {
+        [i.kind.rawValue, i.key, i.categoryName.map(Words.key) ?? "", i.due.map { String($0.timeIntervalSince1970) } ?? "",
+         i.timeMinutes.map(String.init) ?? "", i.priority ?? "", i.assignee.map(Words.key) ?? "", Words.key(i.notes ?? ""),
+         i.recurrence?.scheduleText.lowercased() ?? "",
+         i.slot?.rawValue ?? "", i.unparsed["repeat"] ?? ""].joined(separator: "|")
+    }
+
+    /// An item the saved list already has: the same title and the same day, person, repeat and category. Title alone is not enough.
+    static func matches(_ i: DraftItem, _ s: SavedKey, calendar: Calendar) -> Bool {
+        guard s.title == i.key else { return false }
+        func day(_ d: Date?) -> Date? { d.map { calendar.startOfDay(for: $0) } }
+        func same(_ a: String?, _ b: String?) -> Bool { (a.map(Words.key) ?? "") == (b.map(Words.key) ?? "") }
+        return day(i.due) == day(s.due) && same(i.assignee, s.assignee) && same(i.categoryName, s.category)
+            && (i.recurrence?.scheduleText.lowercased() ?? "") == (s.schedule?.lowercased() ?? "")
+    }
+
+    /// The model's action word, in the app's own few words. The old names still read.
+    static func normalizedAction(_ raw: String) -> String {
+        let a = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        switch a {
+        case "create", "create_tasks", "create_task", "create_routines", "create_routine", "create_playbook", "playbook", "teach_playbook": return "create"
+        case "operate", "update_task", "complete_task", "delete_task", "update", "complete", "delete": return "operate"
+        case "lookup", "answer", "view_tasks", "view", "search", "find": return "lookup"
+        case "clarify", "wait", "unrelated", "": return a
+        default: return "other"
+        }
+    }
+
+    /// Reads the model's answer into drafts the app can show. Checks only: a supported action, the fields it needs, values that parse
+    /// (an ISO date, HH:mm, a repeat in range), and references that exist. Nothing is dropped because it looks like something else (an exact copy of an item already on a waiting draft is folded into it, `join`), and
+    /// a field that cannot be read is kept as given and flagged, never invented or silently discarded.
+    static func decode(_ d: BulkDecisionValue, context ctx: ValidationContext) -> BulkValidated {
+        if let e = d.extraction { return decodeFlat(e, context: ctx) }
+        let action = normalizedAction(d.action)
+
+        if action == "clarify" {
             let q = ClarificationStateManager.oneQuestion(d.clarifyingQuestion)
             return .clarify(q.isEmpty ? "What would you like me to add?" : q)
-        case "unrelated":
-            return .unrelated(Words.trim(d.spokenResponse))
-        case "update":
-            return .clarify("Which task would you like to update?")
+        }
+        if action == "unrelated" { return .unrelated(Words.trim(d.answer)) }
 
-        case "create_playbook":
-            guard let p = d.playbook else { return .clarify("What should the playbook be for?") }
-            let name = TaskPlanner.tidyTitle(p.name, removingDay: false)
-            guard !name.isEmpty else { return .clarify("What should I call the playbook?") }
-            let titles = p.steps.map { TaskPlanner.tidyTitle($0.title, removingDay: false) }.filter { !$0.isEmpty }
+        // Proposed changes to existing tasks, by id. Only when the model said operate: operations written beside a create are ignored.
+        if action == "operate" {
+            let ops = d.operations.compactMap { operation($0, ctx: ctx) }
+            if ops.isEmpty { return .clarify(d.operations.isEmpty ? "Which task do you mean?" : "What would you like to change?") }
+            return .operations(ops)
+        }
+        if action == "lookup" {
+            guard let q = d.query, !q.isEmpty else { return .clarify("What would you like to see?") }
+            return .lookup(q)
+        }
+        if !d.operations.isEmpty { Trace.step("SWIFT", "the model also wrote \(d.operations.count) change(s) to saved tasks beside \"\(d.action)\": ignored") }
+
+        // Anything that creates: tasks, routines or a playbook.
+        if let p = d.playbook, text(p.name) != nil || !p.steps.isEmpty, d.tasks.isEmpty, d.routines.isEmpty {
             var seen = Set<String>()
-            let steps = titles.filter { seen.insert(TaskValidator.key($0)).inserted }
+            let steps = p.steps.compactMap { task($0, ctx: ctx) }.filter { seen.insert(Words.key($0.title)).inserted }
+            guard let name = text(p.name) else { return .clarify("What should I call the playbook?") }
             guard !steps.isEmpty else { return .clarify("What steps should it include?") }
             return .playbook(PlaybookDraftState(
-                name: name,
-                due: TaskValidator.resolveDate(p.dueDate, utterance: utterance, ctx: ctx),
-                assignee: TaskValidator.resolveAssignee(p.assignee, utterance: utterance, known: ctx.knownAssignees),
-                steps: steps.prefix(12).map { DraftItem(title: $0) },
-                stated: TaskValidator.stepsStated(utterance)))
+                name: name, due: date(p.dueDate, calendar: ctx.calendar), assignee: text(p.assignee).map(Assignee.normalize),
+                steps: steps.prefix(12).map { DraftItem($0, kind: .task) }, stated: true))
+        }
 
-        case "create_tasks", "create_routines", "create_task", "create_routine":
-            var items: [DraftItem] = []
-            let utterNouns = Words.nouns(utterance)
-            // "Every day: sweep the floors, wash the dishes": the schedule is said once, before the list, and holds for every item.
-            let head = segments.isEmpty ? "" : BulkDetector.head(of: utterance, segments: segments)
-            let headSchedule = head.count < utterance.count && BulkDetector.hasSchedule(head)
-                && TaskPlanner.ruleRecurrence(in: head) != nil ? head : ""
+        if let p = d.playbook, text(p.name) != nil || !p.steps.isEmpty {
+            Trace.step("WARNING", "the model also gave a playbook (\"\(p.name)\") beside tasks: the playbook is ignored, the raw answer is in the trace")
+        }
 
-            for t in d.tasks {
-                // Never invent a task: it has to name something the user said.
-                if !t.title.isEmpty, Words.nounOverlap(t.title, utterance) == 0, !Words.nouns(t.title).isEmpty, !utterNouns.isEmpty { continue }
-                // In a long turn it has to name one of the action clauses, not the chatter around them.
-                var matched: ActionClause?
-                if let turn, !t.title.isEmpty {
-                    guard let a = matchingAction(for: t.title, in: turn) else { continue }
-                    matched = a
-                }
-                let own = matched?.text ?? segment(for: t.title, segments: segments, whole: utterance)
-                let said = !segments.isEmpty && own != utterance
-                let scheduleWords = said ? (BulkDetector.hasSchedule(own) ? own : headSchedule) : ""
-                guard let v = make(title: t.title, category: t.category, dueDate: t.dueDate, dueTime: t.dueTime, priority: t.priority,
-                                   assignee: t.assignee, notes: t.notes, segments: segments, utterance: utterance, ctx: ctx,
-                                   matched: matched, contextNotes: turn?.context.notes, scheduled: !scheduleWords.isEmpty) else {
-                    return .clarify(clarifyAbout(t.title))
-                }
-                // The user said it repeats ("water the plants every morning"): a routine, whatever kind the model chose.
-                if !scheduleWords.isEmpty, let spec = TaskPlanner.ruleRecurrence(in: scheduleWords)?.spec {
-                    if let q = scheduleQuestion(v.title, in: scheduleWords) { return .clarify(q) }
-                    var routine = v
-                    routine.recurrence = spec
-                    routine.due = nil
-                    var item = DraftItem(routine, kind: .routine)
-                    item.slot = slot(in: scheduleWords)
-                    items.append(item)
-                    continue
-                }
-                items.append(DraftItem(v, kind: .task))
+        // One request is one item. Items whose payload is identical are combined into the first (the raw answer stays in the trace
+        // and the card says so); an item the model marked as a distinct occurrence is kept. Items that differ in any field are
+        // never combined, and titles are never compared for meaning.
+        var items: [DraftItem] = []
+        var firstIndex: [String: Int] = [:]
+        var copies: [String: Int] = [:]
+        func take(_ item: DraftItem, distinct: Bool) {
+            var item = item
+            item.distinct = distinct
+            let key = payload(item)
+            if !distinct, firstIndex[key] != nil {
+                copies[key, default: 1] += 1
+                return
             }
+            if firstIndex[key] == nil { firstIndex[key] = items.count }
+            items.append(item)
+        }
+        // One list applies to the items of one response. It is a grouping name only: made on approval, never from a category.
+        let list = text(d.listName)
+        if !Words.trim(d.answer).isEmpty, action == "create" {
+            Trace.step("WARNING", "the model wrote an answer (\"\(Words.trim(d.answer))\") beside a create: ignored, the app controls what is said")
+        }
+        for t in d.tasks { if let v = task(t, ctx: ctx) { var i = DraftItem(v, kind: .task); if i.listName == nil { i.listName = list }; take(i, distinct: text(t.distinctBecause) != nil) } }
+        for r in d.routines { if var i = routine(r, ctx: ctx) { if i.listName == nil { i.listName = list }; take(i, distinct: text(r.distinctBecause) != nil) } }
+        Trace.step("SWIFT", "read the model's answer: \(items.count) item(s)")
+        for (key, count) in copies {
+            guard let n = firstIndex[key] else { continue }
+            items[n].advisories.append("Combined \(count) identical items")
+            Trace.step("WARNING", "\(count) generated items were identical (\"\(items[n].title)\"): combined into one; the raw answer in the trace keeps all of them")
+        }
 
-            for r in d.routines {
-                if !r.title.isEmpty, Words.nounOverlap(r.title, utterance) == 0, !Words.nouns(r.title).isEmpty, !utterNouns.isEmpty { continue }
-                var matched: ActionClause?
-                if let turn, !r.title.isEmpty {
-                    guard let a = matchingAction(for: r.title, in: turn) else { continue }
-                    matched = a
-                }
-                guard var v = make(title: r.title, category: r.category, dueDate: "", dueTime: "", priority: "", assignee: r.assignee,
-                                   notes: r.notes, segments: segments, utterance: utterance, ctx: ctx,
-                                   matched: matched, contextNotes: turn?.context.notes, scheduled: true) else {
-                    return .clarify(clarifyAbout(r.title))
-                }
-                let freq = r.frequency.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-                guard TaskValidator.frequencies.contains(freq) else {
-                    return .clarify("How often should I repeat \(v.title.lowercased())?")
-                }
-                let seg = matched?.text ?? segment(for: v.title, segments: segments, whole: utterance)
-                let scheduleText = (r.schedule + " " + seg).lowercased()
-                var spec = TaskPlanner.ruleRecurrence(in: r.schedule)?.spec
-                    ?? TaskPlanner.ruleRecurrence(in: seg)?.spec
-                    ?? TaskPlanner.ruleRecurrence(in: utterance)?.spec
-                let days = TaskPlanner.weekdaysMentioned(scheduleText)
-                switch freq {
-                case "daily": if spec == nil { spec = RecurrenceSpec() }
-                case "weekly":
-                    if days.isEmpty { return .clarify("Which day should I \(v.title.lowercased()) each week?") }
-                    // "weekly" on its own reads as today's weekday: the day the user named wins.
-                    // The model's own schedule ("every Saturday") is the most specific; the whole sentence may say "every day" elsewhere.
-                    let own = TaskPlanner.weekdaysMentioned(r.schedule).isEmpty ? nil : TaskPlanner.ruleRecurrence(in: r.schedule)?.spec
-                    spec = own ?? TaskPlanner.ruleRecurrence(in: scheduleText)?.spec ?? spec ?? RecurrenceSpec(weekdays: days)
-                case "monthly":
-                    // "monthly" on its own reads as today's date, which nobody said.
-                    if scheduleText.range(of: "\\d{1,2}(st|nd|rd|th)", options: .regularExpression) == nil {
-                        return .clarify("Which day of the month should I \(v.title.lowercased())?")
-                    }
-                    spec = TaskPlanner.ruleRecurrence(in: scheduleText)?.spec ?? spec
-                default: break
-                }
-                guard let schedule = spec else { return .clarify("How often should I repeat \(v.title.lowercased())?") }
-                v.recurrence = schedule
-                v.due = nil                                     // a routine repeats: "every Sunday" is not a due day
-                var item = DraftItem(v, kind: .routine)
-                item.slot = slot(in: scheduleText)
-                items.append(item)
-            }
-
-            // The detector found pieces the model left out: keep them as the user said them.
-            // A piece that only sets the scene ("I want to create a list of tasks") is never added as a task. A piece counts as
-            // covered when its words are in a title or in the notes, so a task the model split into title and notes is not lost.
-            let made = items.map { (title: $0.title, notes: $0.notes) }
-            // A long turn: an action is covered when a task the model made was matched to it, whatever words were added around it.
-            let matchedActions: Set<String> = turn.map { t in Set(items.compactMap { matchingAction(for: $0.title, in: t)?.text }) } ?? []
-            for s in segments where !ListOutline.isContext(s) && !matchedActions.contains(s) && !ListOutline.covered(s, by: made) {
-                if var local = BulkDraftManager.makeItem(from: s, context: ctx) {
-                    if let turn, let a = turn.actions.first(where: { $0.text == s }) {           // its own day and person, and the occasion
-                        local.due = a.due ?? local.due
-                        local.assignee = a.assignee ?? local.assignee
-                        if local.notes == nil { local.notes = turn.context.notes }
-                    } else if local.assignee == nil, let who = Assignee.detect(in: utterance), who != Assignee.me {
-                        local.assignee = who                                                       // "the maid should sweep ... and mop ..."
-                    }
-                    if local.kind == .task, !headSchedule.isEmpty, let spec = TaskPlanner.ruleRecurrence(in: headSchedule)?.spec {
-                        local.kind = .routine                                                      // the list's own schedule
-                        local.recurrence = spec
-                    }
-                    if local.kind == .routine {
-                        let words = BulkDetector.hasSchedule(s) ? s : headSchedule
-                        if let q = scheduleQuestion(local.title, in: words) { return .clarify(q) } // "weekly" alone is not a day
-                        local.due = nil
-                        local.slot = slot(in: words)
-                    }
-                    items.append(local)
-                }
-            }
-
-            var seen = Set<String>()
-            items = items.filter { seen.insert($0.key).inserted }           // no duplicates inside one draft
-            guard !items.isEmpty else { return .clarify("What would you like me to add?") }
-
-            let recent = Set(ctx.recentTitles.map(TaskValidator.key))
-            let fresh = items.filter { !recent.contains($0.key) }
-            return fresh.isEmpty ? .duplicate(items[0].title) : .items(fresh)
-
-        default:
+        guard !items.isEmpty else {
+            if d.wait || action == "wait" { return .wait }
+            if action == "create" { return .clarify("What would you like me to add?") }
+            if action == "other" { return .clarify("I can't do that yet. What would you like me to add or change?") }
             return .clarify("Sorry, I didn't catch that. What would you like me to do?")
         }
-    }
-}
 
-
-// MARK: A list spoken over several sentences
-
-/// "I want to create a list of tasks for the Kitty project. Number one, create a strategy document. Number two…"
-///
-/// Reads the list in Swift, so nothing depends on how the model happens to cut the speech:
-///  - every sentence is classed by what it says: setup or context (never a task), a task, or a sign-off;
-///  - list markers (number one, task two, first, 1.) make the text between them one task each;
-///  - without markers, each verb-led sentence is a task;
-///  - anything unclear becomes one specific question, never a guess.
-enum ListOutline {
-    struct Item: Equatable {
-        var title: String
-        var notes: String? = nil
-        var number: Int? = nil              // the number the speaker gave it, if any
-    }
-
-    enum Question: Equatable {
-        case name(isProject: Bool)
-        case kind(String)                               // the project's name is also a known person
-        case gap(missing: Int, heard: [Int])            // "one, two, four": is there a three?
-        case empty(label: String, index: Int)           // a marker with nothing after it
-        case split(index: Int)                          // one long item with a second action in it
-        case separate(text: String, after: Int)         // a new action inside a numbered item
-        case sentence(text: String, at: Int)            // a sentence that could be a task or context
-
-        var text: String {
-            switch self {
-            case .name(let project): return project ? "What's the project called?" : "What should I call the list?"
-            case .kind(let n): return "Is \(n.prefix(1).uppercased() + n.dropFirst()) the project, or a person?"
-            case .gap(let missing, let heard):
-                let names = heard.map { ListOutline.numberWord($0) }
-                let said = names.count > 1 ? names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1] : names.joined()
-                return "I heard numbers \(said). Is there a number \(ListOutline.numberWord(missing))?"
-            case .empty(let label, _): return "What is \(label)?"
-            case .split: return "Should that be one task or two?"
-            case .separate(let t, _): return "Is “\(t)” a separate task, or part of the one before?"
-            case .sentence(let t, _): return "Is “\(t)” a task, or just context?"
-            }
+        // Already saved (same title, day, person, repeat and category): still shown, with a note to review. Never removed.
+        for n in items.indices where ctx.saved.contains(where: { matches(items[n], $0, calendar: ctx.calendar) }) {
+            items[n].advisories.append("You already have this saved")
+            Trace.step("SWIFT", "\(items[n].title): matches a saved task on title, day, person, repeat and category (kept, with a note to review)")
         }
-    }
-
-    struct Outline: Equatable {
-        var name: String?
-        var projectMentioned = false
-        var assignee: String?
-        var items: [Item] = []
-        var context: [String] = []
-        var questions: [Question] = []
-        var contextText: String { context.joined(separator: " ") }
-    }
-
-    enum Role: Equatable { case context, task, outro, unsure }
-
-    // MARK: Words
-
-    private static let numberWords = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
-    private static let ordinalWords = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
-
-    static func numberWord(_ n: Int) -> String { (1...10).contains(n) ? numberWords[n - 1] : String(n) }
-
-    private static func value(of word: String) -> Int? {
-        let w = word.lowercased()
-        if let n = Int(w) { return n }
-        if let i = numberWords.firstIndex(of: w) { return i + 1 }
-        if let i = ordinalWords.firstIndex(of: w) { return i + 1 }
-        return nil
-    }
-
-    private static func regex(_ pattern: String) -> NSRegularExpression? {
-        try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
-    }
-
-    // MARK: List markers
-
-    private struct Marker { var range: Range<String.Index>; var number: Int? }
-
-    private static let nums = numberWords.joined(separator: "|")
-    private static let ords = ordinalWords.joined(separator: "|")
-    private static let nouns = #"task|one|thing|item|step|point|to-?do"#
-    private static let markerPatterns: [String] = [
-        // "number two", "no. 2", "task three", "item 4", "step one", "point 2"
-        #"\b(?:number|no\.?|task|item|step|point)\s+(\d{1,2}|"# + nums + #")\b[\s:,)-]*(?:(?:is|would be|will be)\b)?"#,
-        // "the first task is", "second one", "first is"; "next" and "last" need the noun or "is" ("last week" is not a marker)
-        #"\b(?:the |my |our )?("# + ords + #"|next|last|final)\s+(?:(?:"# + nouns + #")\b(?:\s+(?:is|would be|will be)\b)?|(?:is|would be|will be)\b)"#,
-        // "First, buy soil. Second, plant tomatoes."
-        #"\b("# + ords + #")\b\s*[,:]"#,
-        // "1." "2)" the way dictation writes a numbered list
-        #"(?:^|(?<=\s))(\d{1,2})[.)](?=\s)"#,
-    ]
-
-    private static func markers(in text: String) -> [Marker] {
-        var found: [Marker] = []
-        for pattern in markerPatterns {
-            guard let re = regex(pattern) else { continue }
-            for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-                guard let r = Range(m.range, in: text) else { continue }
-                let n = m.numberOfRanges > 1 ? Range(m.range(at: 1), in: text).flatMap { value(of: String(text[$0])) } : nil
-                found.append(Marker(range: r, number: n))
-            }
-        }
-        found.sort { $0.range.lowerBound < $1.range.lowerBound }
-        var kept: [Marker] = []
-        for m in found where kept.last.map({ m.range.lowerBound >= $0.range.upperBound }) ?? true { kept.append(m) }
-        return kept
-    }
-
-    static func hasMarker(_ text: String) -> Bool { !markers(in: text).isEmpty }
-
-    // MARK: Sentences and what each one is
-
-    static func sentences(_ text: String) -> [String] {
-        var out: [String] = []
-        var current = ""
-        let chars = Array(text)
-        for (i, c) in chars.enumerated() {
-            if ".!?;\n".contains(c), i + 1 >= chars.count || chars[i + 1].isWhitespace {
-                if !current.trimmingCharacters(in: .whitespaces).isEmpty { out.append(current.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                current = ""
-            } else {
-                current.append(c)
-            }
-        }
-        if !current.trimmingCharacters(in: .whitespaces).isEmpty { out.append(current.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        return out
-    }
-
-    private static let connectors: Set<String> = ["okay", "ok", "alright", "right", "so", "now", "and", "then", "also", "next", "um", "uh", "well", "yeah"]
-    private static let frames: [[String]] = [["i", "want", "to"], ["i", "need", "to"], ["i", "have", "to"], ["i'd", "like", "to"], ["i", "would", "like", "to"],
-                                             ["we", "need", "to"], ["we", "have", "to"], ["we", "should"], ["i", "should"], ["please"], ["can", "you"],
-                                             ["could", "you"], ["to"]]
-    private static let selfWords: Set<String> = ["i", "im", "i'm", "i'd", "id", "i've", "ive", "i'll", "ill", "we", "we're", "were", "let", "let's", "lets",
-                                                 "this", "these", "here", "there", "it", "its", "it's"]
-    private static let finalizers: [[String]] = [["that's", "all"], ["thats", "all"], ["that", "is", "all"], ["that's", "it"], ["thats", "it"],
-                                                 ["that", "is", "it"], ["done"], ["thank", "you"], ["thanks"]]
-
-    private static func leadWords(_ t: [String]) -> [String] {
-        var w = t
-        var changed = true
-        while changed, !w.isEmpty {
-            changed = false
-            if connectors.contains(w[0]) { w.removeFirst(); changed = true; continue }
-            for f in frames where w.count > f.count && Array(w.prefix(f.count)) == f { w.removeFirst(f.count); changed = true; break }
-        }
-        return w
-    }
-
-    private static func hasSetupPhrase(_ t: [String]) -> Bool {
-        for phrase in LocalSemanticPrechecker.announcements where phrase.count <= t.count {
-            for start in 0...(t.count - phrase.count) where Array(t[start..<(start + phrase.count)]) == phrase { return true }
-        }
-        return false
-    }
-
-    /// What a sentence is, by what it says and not by where it sits.
-    static func role(of sentence: String) -> Role {
-        let t = LocalSemanticPrechecker.tokens(sentence)
-        guard !t.isEmpty else { return .context }
-        if t.count <= 3, finalizers.contains(where: { t.starts(with: $0) }) { return .outro }
-        let w = leadWords(t)
-        guard let first = w.first else { return .context }
-        let setup = hasSetupPhrase(t)
-        if ActionLexicon.verbs.contains(first), !setup { return .task }
-        if setup { return .context }
-        if selfWords.contains(t[0]) || t.contains("project") { return .context }        // "I'm working on Kitty project", "this is for…"
-        if w.count > 4 { return .context }
-        return w.count >= 2 ? .unsure : .context
-    }
-
-    /// A sentence about the situation, not an action: used to keep it from being added as a task.
-    static func isContext(_ sentence: String) -> Bool {
-        let r = role(of: sentence)
-        return r == .context || r == .outro
-    }
-
-    // MARK: Cleaning one item
-
-    private static let leadIns = ["i would say ", "i'd say ", "i would say, ", "let's say ", "let us say ", "which is ", "is to ", "it should be ", "it is ",
-                                  "it's ", "so ", "um ", "uh ", "okay ", "to "]
-
-    private static func clean(_ raw: String) -> String {
-        var s = raw.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-!?\n"))
-        var changed = true
-        while changed {
-            changed = false
-            for l in leadIns where s.lowercased().hasPrefix(l) {
-                s = String(s.dropFirst(l.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-"))
-                changed = true
-            }
-        }
-        for tail in [" and", " then", " also", " so"] where s.lowercased().hasSuffix(tail) { s = String(s.dropLast(tail.count)) }
-        return s.trimmingCharacters(in: CharacterSet(charactersIn: " ,:;.-!?"))
-    }
-
-    private static func sentenceCase(_ s: String) -> String {
-        guard let f = s.first else { return s }
-        return f.uppercased() + s.dropFirst()
-    }
-
-    /// "Create a strategy document, full strategy document" -> title "Create a strategy document", notes "Full strategy document".
-    /// A clause that starts with "and"/"then" continues the title instead ("…robust, and bring a closure").
-    static func titleAndNotes(_ raw: String, number: Int? = nil) -> Item {
-        let cleaned = clean(raw)
-        var parts = cleaned.components(separatedBy: ",").map { clean($0) }.filter { !$0.isEmpty }
-        guard !parts.isEmpty else { return Item(title: "", notes: nil, number: number) }
-        var title = parts.removeFirst()
-        var notes: [String] = []
-        for p in parts {
-            let first = p.split(separator: " ").first.map { $0.lowercased() } ?? ""
-            if ["and", "then", "also", "but", "plus"].contains(first) { title += " " + p } else { notes.append(p) }
-        }
-        let tidy = TaskPlanner.tidyTitle(title, removingDay: false)
-        return Item(title: tidy.isEmpty ? sentenceCase(title) : tidy,
-                    notes: notes.isEmpty ? nil : sentenceCase(notes.joined(separator: ". ")), number: number)
-    }
-
-    private static func contentWords(_ s: String) -> Set<String> { Set(Words.nouns(s)) }
-
-    // MARK: Parsing
-
-    static func hasProjectCue(_ lower: String) -> Bool {
-        lower.contains("project") || lower.contains("list of task") || lower.contains("task list") || lower.contains("list of to")
-            || lower.contains("to do list") || lower.contains("todo list")
-    }
-
-    /// Reads a spoken list. Nil when it is not one (a normal request is left to the rest of the agent).
-    static func parse(_ raw: String, knownPeople: [String] = []) -> Outline? {
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = text.lowercased()
-        let cue = hasProjectCue(lower)
-        if BulkDetector.hasSchedule(text) { return nil }                // routines and schedules are the model's job
-        let marks = markers(in: text)
-        var outline = Outline()
-        outline.projectMentioned = lower.contains("project")
-        outline.name = projectName(in: text)
-
-        if marks.count >= 2 || (marks.count == 1 && cue) {
-            parseNumbered(text, marks: marks, into: &outline)
-        } else if cue {
-            parseSentences(text, into: &outline)
-        } else {
-            return nil
-        }
-        guard !outline.items.isEmpty else { return nil }
-
-        // The questions, one at a time and in this order.
-        var qs: [Question] = []
-        let heard = marks.compactMap(\.number)
-        if heard.count >= 2 {
-            let set = Set(heard)
-            if let missing = (1...(heard.max() ?? 1)).first(where: { !set.contains($0) }), heard.max()! - heard.min()! < 12 {
-                qs.append(.gap(missing: missing, heard: heard.sorted()))
-            }
-        }
-        for (i, item) in outline.items.enumerated() where item.title.isEmpty {
-            let label = item.number.map { "number \(numberWord($0))" } ?? "the \(i < ordinalWords.count ? ordinalWords[i] : "next") one"
-            qs.append(.empty(label: label, index: i))
-        }
-        qs += outline.questions                                          // separate / sentence questions found while parsing
-        for (i, item) in outline.items.enumerated() where item.title.split(separator: " ").count > 12 && hasSecondAction(item.title) {
-            qs.append(.split(index: i))
-        }
-        if let n = outline.name, knownPeople.contains(where: { $0.lowercased() == n.lowercased() }) { qs.append(.kind(n)) }
-        if outline.projectMentioned, outline.name == nil { qs.append(.name(isProject: true)) }
-        outline.questions = qs
-        return outline
-    }
-
-    private static func hasSecondAction(_ title: String) -> Bool {
-        let t = LocalSemanticPrechecker.tokens(title)
-        for (i, w) in t.enumerated() where w == "and" && i + 1 < t.count {
-            if t[i + 1] == "then" { return true }                       // "…and then dig the bed"
-            if ActionLexicon.verbs.contains(t[i + 1]) { return true }
-        }
-        return false
-    }
-
-    private static func parseNumbered(_ text: String, marks: [Marker], into o: inout Outline) {
-        // Before the first marker: setup, context, or tasks said without a number.
-        let prefix = String(text[..<marks[0].range.lowerBound])
-        for s in sentences(prefix) {
-            switch role(of: s) {
-            case .task: o.items.append(titleAndNotes(s))
-            case .context, .unsure: o.context.append(s)
-            case .outro: break
-            }
-        }
-        for (i, m) in marks.enumerated() {
-            let end = i + 1 < marks.count ? marks[i + 1].range.lowerBound : text.endIndex
-            let span = String(text[m.range.upperBound..<end])
-            let sents = sentences(span)
-            guard var item = sents.first.map({ titleAndNotes($0, number: m.number) }) else {
-                o.items.append(Item(title: "", notes: nil, number: m.number))
-                continue
-            }
-            let index = o.items.count
-            var pendingQuestions: [Question] = []
-            for s in sents.dropFirst() {
-                let first = LocalSemanticPrechecker.tokens(s).first ?? ""
-                if ["and", "also", "then", "plus", "but"].contains(first) {
-                    item.title += " " + clean(s)                          // the same thought, carried on
-                    continue
-                }
-                switch role(of: s) {
-                case .task:
-                    pendingQuestions.append(.separate(text: clean(s), after: index))
-                case .outro: break
-                case .context, .unsure:
-                    if !contentWords(s).isDisjoint(with: contentWords(item.title)) {      // "…strategy document. Full strategy document."
-                        item.notes = [item.notes, sentenceCase(clean(s))].compactMap { $0 }.joined(separator: ". ")
-                    } else {
-                        o.context.append(s)
-                    }
-                }
-            }
-            o.items.append(item)
-            // A separate action is only added once the speaker says so; until then it waits as a question.
-            o.questions += pendingQuestions
-        }
-        // The last span can end with "that's all".
-        if let last = o.items.indices.last { o.items[last] = stripSignOff(o.items[last]) }
-    }
-
-    private static func stripSignOff(_ item: Item) -> Item {
-        var out = item
-        var t = out.title
-        for f in ["that's all", "thats all", "that is all", "that's it", "thats it", "thank you", "thanks"] where t.lowercased().hasSuffix(f) {
-            t = String(t.dropLast(f.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ,.-"))
-        }
-        if !t.isEmpty { out.title = t }
-        return out
-    }
-
-    private static func parseSentences(_ text: String, into o: inout Outline) {
-        var tasks = 0
-        for s in sentences(text) {
-            switch role(of: s) {
-            case .task:
-                o.items.append(titleAndNotes(s))
-                tasks += 1
-            case .context: o.context.append(s)
-            case .outro: break
-            case .unsure:
-                o.questions.append(.sentence(text: clean(s), at: o.items.count))
-            }
-        }
-        if tasks < 2 { o.items = []; o.questions = [] }              // one sentence is not a list: leave it to the model
-    }
-
-    // MARK: The project's name
-
-    private static let nameStops: Set<String> = ["for", "the", "my", "our", "a", "an", "on", "in", "to", "of", "and", "is", "that", "this", "it", "i", "i'm",
-                                                 "working", "new", "next", "big", "another", "some", "your", "same", "would", "like", "create", "list",
-                                                 "tasks", "task", "with", "at", "about", "from", "by", "make", "add", "start", "have", "has", "had",
-                                                 "got", "under", "one", "first", "second", "third", "number", "no", "also", "then", "so"]
-
-    /// "a project called Goa trip", "working on the website redesign project", "tasks for kitty project".
-    static func projectName(in text: String) -> String? {
-        if let re = regex(#"(?:project|list)\s+(?:called|named)\s+(.+?)(?=[.,;!?]|\s+and\s|\s+so\s|\s+(?:number|the|my)\b|$)"#),
-           let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)), m.numberOfRanges > 1,
-           let r = Range(m.range(at: 1), in: text) {
-            let words = text[r].split(whereSeparator: { $0.isWhitespace }).map(String.init)
-            if !words.isEmpty, words.count <= 5, !words.contains(where: { nameStops.contains($0.lowercased()) }) { return words.joined(separator: " ") }
-        }
-        let words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        func bare(_ w: String) -> String { w.trimmingCharacters(in: .punctuationCharacters) }
-        for (i, w) in words.enumerated() where bare(w).lowercased() == "project" {
-            var collected: [String] = []
-            var j = i - 1
-            while j >= 0, collected.count < 3 {
-                let b = bare(words[j])
-                if b.isEmpty || nameStops.contains(b.lowercased()) { break }
-                collected.insert(b, at: 0)
-                if let l = words[j].last, ".!?,;".contains(l) { collected.removeFirst(); break }      // that was the end of an earlier sentence
-                j -= 1
-            }
-            if !collected.isEmpty { return collected.joined(separator: " ") }
-        }
-        return nil
-    }
-
-    /// What the user said when asked what the project is called: "Website relaunch", "it's called the Goa trip".
-    static func name(fromAnswer raw: String) -> String? {
-        var s = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
-        let leads = ["it's called ", "its called ", "it is called ", "call it ", "the project is called ", "the project is ", "project is ",
-                     "it's ", "its ", "it is ", "the name is ", "name is ", "um ", "uh "]
-        var changed = true
-        while changed {
-            changed = false
-            for l in leads where s.lowercased().hasPrefix(l) { s = String(s.dropFirst(l.count)); changed = true }
-            for l in ["the ", "my ", "our ", "a "] where s.lowercased().hasPrefix(l) { s = String(s.dropFirst(l.count)); changed = true }
-        }
-        if s.lowercased().hasSuffix(" project") { s = String(s.dropLast(" project".count)) }
-        s = s.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
-        let words = s.split(whereSeparator: { $0.isWhitespace })
-        guard !words.isEmpty, words.count <= 6 else { return nil }
-        return s
-    }
-
-    // MARK: Answers to the questions
-
-    private static func first(_ s: String) -> String {
-        s.lowercased().trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
-            .split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
-    }
-
-    private static func isNo(_ s: String) -> Bool {
-        let l = s.lowercased()
-        return ["no", "nope", "nah", "nothing", "none"].contains(first(s)) || l.contains("that's all") || l.contains("thats all")
-            || l.contains("that is all") || l.contains("there isn't") || l.contains("there is no") || l.contains("no there")
-    }
-
-    private static func stripAnswerLead(_ raw: String) -> String {
-        var s = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
-        let leads = ["yes ", "yeah ", "yep ", "yup ", "sure ", "there is ", "there's ", "it's ", "it is ", "it was ", "i missed ", "um ", "uh "]
-        var changed = true
-        while changed {
-            changed = false
-            for l in leads where s.lowercased().hasPrefix(l) { s = String(s.dropFirst(l.count)); changed = true }
-        }
-        return s
-    }
-
-    /// Applies the spoken answer to the first open question and drops that question.
-    static func apply(answer raw: String, to o: inout Outline) {
-        guard !o.questions.isEmpty else { return }
-        let q = o.questions.removeFirst()
-        let l = raw.lowercased()
-        switch q {
-        case .name:
-            if let n = name(fromAnswer: raw), !isNo(raw) { o.name = n }
-
-        case .kind(let n):
-            if ["person", "someone", "somebody", "assign", "for him", "for her", "he ", "she "].contains(where: { l.contains($0) }) {
-                o.assignee = n
-                o.name = nil
-            }
-
-        case .gap(let missing, _):
-            if isNo(raw) { break }
-            let body = stripAnswerLead(raw)
-            var content = body
-            if let found = markers(in: body).first { content = String(body[found.range.upperBound...]) }
-            let item = titleAndNotes(content, number: missing)
-            if !item.title.isEmpty, !["yes", "yeah", "yep", "yup", "sure"].contains(item.title.lowercased()) { insert(item, into: &o) }
-
-        case .empty(_, let index):
-            guard o.items.indices.contains(index) else { break }
-            let item = titleAndNotes(stripAnswerLead(raw), number: o.items[index].number)
-            if item.title.isEmpty || isNo(raw) { o.items.remove(at: index) } else { o.items[index] = item }
-
-        case .split(let index):
-            guard o.items.indices.contains(index) else { break }
-            if ["two", "separate", "split", "both", "2"].contains(where: { l.contains($0) }) && !l.contains("one task") {
-                let t = o.items[index].title
-                let words = t.split(separator: " ").map(String.init)
-                if let at = words.firstIndex(where: { $0.lowercased() == "and" }), at > 0, at + 1 < words.count {
-                    let a = words[..<at].joined(separator: " "), b = words[(at + 1)...].joined(separator: " ")
-                    o.items[index].title = a
-                    o.items.insert(Item(title: sentenceCase(b), notes: nil, number: nil), at: index + 1)
-                }
-            }
-
-        case .separate(let text, let after):
-            if ["part", "same", "together", "one task", "with"].contains(where: { l.contains($0) }), !l.contains("separate") {
-                if o.items.indices.contains(after) { o.items[after].title += " and " + text.lowercased() }
-                else if let last = o.items.indices.last { o.items[last].title += " and " + text.lowercased() }
-            } else {
-                insertAfter(titleAndNotes(text), index: after, in: &o)
-            }
-
-        case .sentence(let text, let at):
-            if ["task", "yes", "yeah", "yep", "add"].contains(where: { first(raw) == $0 }) || l.contains("a task") {
-                o.items.insert(titleAndNotes(text), at: min(at, o.items.count))
-            } else {
-                o.context.append(text)
-            }
-        }
-    }
-
-    private static func insert(_ item: Item, into o: inout Outline) {
-        let n = item.number ?? Int.max
-        let at = o.items.firstIndex(where: { ($0.number ?? Int.max) > n }) ?? o.items.count
-        o.items.insert(item, at: at)
-    }
-
-    private static func insertAfter(_ item: Item, index: Int, in o: inout Outline) {
-        let at = min(max(index + 1, 0), o.items.count)
-        o.items.insert(item, at: at)
-    }
-
-    /// Questions that could not be asked (three rounds used): take the most careful reading and go on.
-    static func finalize(_ o: inout Outline) {
-        while !o.questions.isEmpty {
-            let q = o.questions[0]
-            switch q {
-            case .separate(let text, let after):
-                o.questions.removeFirst()
-                insertAfter(titleAndNotes(text), index: after, in: &o)
-            case .empty(_, let index):
-                o.questions.removeFirst()
-                if o.items.indices.contains(index) { o.items.remove(at: index) }
-            default:
-                o.questions.removeFirst()
-            }
-        }
-        o.items.removeAll { $0.title.isEmpty }
-    }
-
-    /// Is `segment` (a piece the detector cut out) already in what was made? Every content word of a task counts, in the
-    /// title or in the notes.
-    static func covered(_ segment: String, by items: [(title: String, notes: String?)]) -> Bool {
-        let need = contentWords(segment)
-        guard !need.isEmpty else { return true }
-        var have = Set<String>()
-        for i in items { have.formUnion(contentWords(i.title)); if let n = i.notes { have.formUnion(contentWords(n)) } }
-        return Double(need.intersection(have).count) / Double(need.count) >= 0.5
+        return .items(items)
     }
 }

@@ -1,0 +1,401 @@
+{
+  "title": "[AI-DRAFT] Kitty scoreboard v1: voice-note utterances with expected tasks",
+  "status": "Draft for review. Expected values are the author's judgement, not measured model output. Review and correct before using as a pass/fail gate.",
+  "reference_now": "2026-10-28T12:00:00+05:30 (Wednesday, Asia/Kolkata)",
+  "date_key": {
+    "today": "2026-10-28",
+    "tomorrow": "2026-10-29",
+    "Friday": "2026-10-30",
+    "Saturday": "2026-10-31",
+    "Sunday": "2026-11-01",
+    "Monday": "2026-11-02",
+    "the twelfth": "2026-11-12"
+  },
+  "household": {
+    "people": ["Meera (mom)", "Rohan (dad)", "Aarav (son, 9)", "Anaya (daughter, 5)", "Papa (grandfather)", "Rani / didi (house help)", "Suresh (driver)", "Bruno (dog)"],
+    "note": "Hinglish words (kal, didi, subah) are written in Latin script, as the en-IN recogniser would. Speech is deliberately messy: fillers, repeats, restatements, garbled brands, background chatter."
+  },
+  "scoring": {
+    "per_case": "A case passes when the outcome is right, every required task is matched (all title_has words present, case-insensitive), there are no extra tasks beyond required and optional_tasks, every expected field matches, and no must_not item is violated.",
+    "fields_scored_now": ["title_has", "assignee", "due (resolved date)", "time", "schedule", "purpose", "instructions", "list"],
+    "fields_ignored_until_schema_has_them": "Anything under 'future' (quantity, place). Until then that text may sit in instructions or the title and is not penalised.",
+    "first_try_rate": "Share of cases that pass with no edit. This is the headline number.",
+    "visible_outcome_rate": "Share of turns that end in a card, a question, an answer, or an intentional wait (H04, H05). A silent or looping turn is a failure.",
+    "latency": "Seconds from last word to preview. Report median and worst.",
+    "run_it": "Several runs per case on the real model. Report a pass rate per case, not one run."
+  },
+  "cases": [
+    {
+      "id": "A01", "group": "Simple task", "persona": "working mom",
+      "voice_input": "umm remind me to buy milk",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["buy", "milk"], "example": "Buy milk" } ], "must_not": ["'remind me' in the title"] },
+      "tests": "A filler word and a 'remind me' frame must not enter the title."
+    },
+    {
+      "id": "A02", "group": "Simple task", "persona": "working dad",
+      "voice_input": "call the plumber about the leaking tap in the kitchen",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["call", "plumber"], "example": "Call plumber about leaking kitchen tap" } ], "must_not": ["a due date", "an assignee"] },
+      "tests": "Invent nothing: no date, no person."
+    },
+    {
+      "id": "A03", "group": "Simple task", "persona": "working dad",
+      "voice_input": "pay the electricity bill",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["pay", "electricity"], "example": "Pay electricity bill" } ], "must_not": ["a due date"] },
+      "tests": "The reference date is not a default due date."
+    },
+    {
+      "id": "A04", "group": "Simple task", "persona": "working mom",
+      "voice_input": "renew the car insurance it is expiring this month",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["renew", "insurance"], "example": "Renew car insurance", "due_soft": "this month" } ], "must_not": ["a specific date"] },
+      "tests": "A soft timeframe stays soft."
+    },
+    {
+      "id": "A05", "group": "Simple task", "persona": "working dad",
+      "voice_input": "send the invoice to the client before I forget",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["send", "invoice"], "example": "Send invoice to client" } ], "must_not": ["'before I forget' in the title", "a purpose"] },
+      "tests": "Filler phrase is not a purpose."
+    },
+
+    {
+      "id": "B01", "group": "Dates and times", "persona": "working mom",
+      "voice_input": "call the school tomorrow morning about the fee receipt",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["call", "school"], "example": "Call school about fee receipt", "due": "2026-10-29", "time": "morning" } ] },
+      "tests": "Day and day-part are resolved by Swift, not written into the title."
+    },
+    {
+      "id": "B02", "group": "Dates and times", "persona": "working mom (Hinglish)",
+      "voice_input": "kal subah paani ka tanker book karna hai",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["tanker"], "example": "Book water tanker", "due": "2026-10-29", "time": "morning" } ] },
+      "tests": "Hinglish 'kal' means tomorrow; 'subah' is morning."
+    },
+    {
+      "id": "B03", "group": "Dates and times", "persona": "working mom",
+      "voice_input": "pick up Aarav from tuition at six thirty today evening",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["pick", "aarav", "tuition"], "example": "Pick up Aarav from tuition", "due": "2026-10-28", "time": "18:30" } ] },
+      "tests": "Spoken clock time; 'evening' is not a second time."
+    },
+    {
+      "id": "B04", "group": "Dates and times", "persona": "working dad",
+      "voice_input": "parent teacher meeting is on Saturday at ten uh remind me",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["parent", "teacher"], "example": "Attend parent-teacher meeting", "due": "2026-10-31", "time": "10:00" } ] },
+      "tests": "Trailing 'remind me' is filler. 'Ten' alone is ambiguous: accept 10:00."
+    },
+    {
+      "id": "B05", "group": "Dates and times", "persona": "working mom",
+      "voice_input": "get the AC serviced sometime next week",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["ac", "service"], "example": "Get AC serviced", "due_soft": "next week" } ], "must_not": ["a specific date", "a time"] },
+      "tests": "'Sometime next week' is a timeframe, not a day."
+    },
+    {
+      "id": "B06", "group": "Dates and times", "persona": "working dad",
+      "voice_input": "I have to submit the form before Diwali",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["submit", "form"], "example": "Submit form", "due_soft": "before Diwali" } ], "must_not": ["an invented festival date"] },
+      "tests": "Soft deadline stays as said."
+    },
+
+    {
+      "id": "C01", "group": "People", "persona": "working mom (Hinglish)",
+      "voice_input": "ask didi to clean the fridge tomorrow",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["clean", "fridge"], "example": "Clean fridge", "assignee": "didi (house help)", "due": "2026-10-29" } ], "must_not": ["'ask' in the title"] },
+      "tests": "'Didi' is the house help; 'ask ... to' is a frame."
+    },
+    {
+      "id": "C02", "group": "People", "persona": "working mom",
+      "voice_input": "Rani should iron the school uniforms on Sunday",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["iron", "uniform"], "example": "Iron school uniforms", "assignee": "Rani", "due": "2026-11-01" } ] },
+      "tests": "Named person and weekday."
+    },
+    {
+      "id": "C03", "group": "People", "persona": "working dad",
+      "voice_input": "tell Suresh to get the car washed and filled with petrol",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["wash", "car"], "example": "Get car washed", "assignee": "Suresh" }, { "title_has": ["petrol"], "example": "Fill car with petrol", "assignee": "Suresh" } ] },
+      "tests": "'A and B' makes two tasks; the person applies to both."
+    },
+    {
+      "id": "C04", "group": "People", "persona": "working mom",
+      "voice_input": "Rohan has to drop the kids to school tomorrow",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["drop", "school"], "example": "Drop kids to school", "assignee": "Rohan", "due": "2026-10-29" } ] },
+      "tests": "Spouse as assignee."
+    },
+
+    {
+      "id": "D01", "group": "Quantity, place, purpose", "persona": "working mom",
+      "voice_input": "get two kg onions and one kg tomatoes from the sabzi wala",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["onion"], "example": "Buy onions", "instructions": "2 kg", "future": { "quantity": "2 kg", "place": "sabzi wala" } }, { "title_has": ["tomato"], "example": "Buy tomatoes", "instructions": "1 kg", "future": { "quantity": "1 kg", "place": "sabzi wala" } } ] },
+      "tests": "Two items, each with its own quantity; shop applies to both."
+    },
+    {
+      "id": "D02", "group": "Quantity, place, purpose", "persona": "working mom",
+      "voice_input": "buy Cipcal tab 3 strips tomorrow from local pharmacy store",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["cipcal"], "example": "Buy Cipcal tablets", "due": "2026-10-29", "future": { "quantity": "3 strips", "place": "local pharmacy store" } } ], "must_not": ["a schedule or repeat", "purpose 'from local pharmacy store'", "'tomorrow' in the title"] },
+      "tests": "From a real trace: model put 'tomorrow' in schedule and the shop in purpose."
+    },
+    {
+      "id": "D03", "group": "Quantity, place, purpose", "persona": "working mom",
+      "voice_input": "give papa his BP tablet every night after dinner half a tablet",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["papa", "bp"], "example": "Give Papa BP tablet", "schedule": "every night", "instructions": "half a tablet after dinner" } ], "must_not": ["a one-time task"] },
+      "tests": "Repeat plus dosage in the right fields."
+    },
+    {
+      "id": "D04", "group": "Quantity, place, purpose", "persona": "working mom",
+      "voice_input": "buy a birthday gift for Anaya's friend's party on Sunday something under five hundred rupees",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["birthday", "gift"], "example": "Buy birthday gift", "due": "2026-11-01", "purpose": "Anaya's friend's party", "instructions": "under 500 rupees" } ] },
+      "tests": "Purpose (why) versus instructions (budget)."
+    },
+    {
+      "id": "D05", "group": "Quantity, place, purpose", "persona": "working dad",
+      "voice_input": "book a cab to the airport at four am on Friday for the Delhi trip",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["cab", "airport"], "example": "Book cab to airport", "due": "2026-10-30", "time": "04:00", "purpose": "Delhi trip" } ] },
+      "tests": "Early-morning time plus a stated reason."
+    },
+    {
+      "id": "D06", "group": "Quantity, place, purpose", "persona": "working mom",
+      "voice_input": "order a chocolate cake one kg for Anaya's birthday from Cake Walk",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["cake"], "example": "Order cake", "purpose": "Anaya's birthday", "instructions": "chocolate, 1 kg", "future": { "quantity": "1 kg", "place": "Cake Walk" } } ] },
+      "tests": "Variant, quantity, shop and reason all in different places."
+    },
+
+    {
+      "id": "E01", "group": "Lists", "persona": "working mom",
+      "voice_input": "add milk and bread to the Blinkit order",
+      "expected": { "outcome": "create", "list": "Blinkit order", "tasks": [ { "title_has": ["milk"], "example": "Buy milk" }, { "title_has": ["bread"], "example": "Buy bread" } ], "must_not": ["a task for 'Blinkit order'"] },
+      "tests": "Two items, one named list, no task for the list name."
+    },
+    {
+      "id": "E02", "group": "Lists", "persona": "working mom",
+      "voice_input": "pharmacy list Cipcal Tedibar and Cetaphil body lotion",
+      "expected": { "outcome": "create", "list": "Pharmacy list", "tasks": [ { "title_has": ["cipcal"] }, { "title_has": ["tedibar"] }, { "title_has": ["cetaphil"] } ] },
+      "tests": "Header plus three items; brand names kept."
+    },
+    {
+      "id": "E03", "group": "Lists", "persona": "working mom",
+      "voice_input": "for the grocery list atta five kg toor dal one kg and sunflower oil one litre",
+      "expected": { "outcome": "create", "list": "Grocery list", "tasks": [ { "title_has": ["atta"], "instructions": "5 kg" }, { "title_has": ["dal"], "instructions": "1 kg" }, { "title_has": ["oil"], "instructions": "1 litre" } ] },
+      "tests": "Three items with quantities on a list."
+    },
+    {
+      "id": "E04", "group": "Lists", "persona": "working mom",
+      "voice_input": "Diwali shopping list diyas rangoli colours sweets box and new curtains",
+      "expected": { "outcome": "create", "list": "Diwali shopping list", "tasks": [ { "title_has": ["diya"] }, { "title_has": ["rangoli"] }, { "title_has": ["sweet"] }, { "title_has": ["curtain"] } ] },
+      "tests": "Four items; 'rangoli colours' stays one item."
+    },
+    {
+      "id": "E05", "group": "Lists", "persona": "working dad",
+      "voice_input": "packing list for the Goa trip sunscreen swimwear chargers and snacks for the kids",
+      "expected": { "outcome": "create", "list": "Goa trip packing list", "tasks": [ { "title_has": ["sunscreen"] }, { "title_has": ["swimwear"] }, { "title_has": ["charger"] }, { "title_has": ["snack"] } ] },
+      "tests": "Packing list is a list, not a playbook."
+    },
+
+    {
+      "id": "F01", "group": "Repeats", "persona": "working mom",
+      "voice_input": "water the plants every morning",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["water", "plant"], "schedule": "every morning" } ], "must_not": ["a one-time task", "a due date"] },
+      "tests": "Simple daily repeat."
+    },
+    {
+      "id": "F02", "group": "Repeats", "persona": "working mom (Hinglish)",
+      "voice_input": "ask didi to mop the house every Monday and Thursday",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["mop"], "assignee": "didi (house help)", "schedule": "every Monday and Thursday" } ], "must_not": ["two separate tasks"] },
+      "tests": "One routine on two weekdays."
+    },
+    {
+      "id": "F03", "group": "Repeats", "persona": "working mom",
+      "voice_input": "give Bruno his medicine on alternate days",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["bruno", "medicine"], "schedule": "alternate days" } ] },
+      "tests": "Alternate-day interval for a pet."
+    },
+    {
+      "id": "F04", "group": "Repeats", "persona": "working dad",
+      "voice_input": "pay the society maintenance on the fifth of every month",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["society", "maintenance"], "schedule": "fifth of every month" } ] },
+      "tests": "Monthly on a date."
+    },
+    {
+      "id": "F05", "group": "Repeats", "persona": "working mom",
+      "voice_input": "RO service every three months",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["ro", "service"], "schedule": "every three months" } ], "must_not": ["the repeat silently dropped"] },
+      "tests": "If Swift cannot parse the repeat, it must keep the words and flag them on the card."
+    },
+    {
+      "id": "F06", "group": "Repeats", "persona": "working mom",
+      "voice_input": "water the plants every Monday and Thursday except when we are travelling",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["water", "plant"], "schedule": "every Monday and Thursday except when we are travelling" } ], "must_not": ["two one-time tasks", "the exception dropped"] },
+      "tests": "The stated exception must survive."
+    },
+
+    {
+      "id": "G01", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "uh so basically I need to like call the pediatrician tomorrow you know for Aarav's vaccination",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["call", "pediatrician"], "due": "2026-10-29", "purpose": "Aarav's vaccination" } ], "must_not": ["'uh', 'basically' or 'like' in the title"] },
+      "tests": "Heavy filler words."
+    },
+    {
+      "id": "G02", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "add a task add a task buy vegetables from the market buy vegetables from the market",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["buy", "vegetable"], "example": "Buy vegetables", "future": { "place": "market" } } ], "must_not": ["more than one task", "'add a task' in the title"] },
+      "tests": "Everything said twice."
+    },
+    {
+      "id": "G03", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "Add House Add hostel task for tomorrow I said add Househelp tasks for tomorrow One clean baby mat So Wash clothes",
+      "expected": { "outcome": "create", "scope": { "assignee": "Househelp (house help)", "due": "2026-10-29" }, "tasks": [ { "title_has": ["clean", "baby", "mat"], "assignee": "Househelp", "due": "2026-10-29" }, { "title_has": ["wash", "clothes"], "assignee": "Househelp", "due": "2026-10-29" } ], "must_not": ["a task or list named 'House Add hostel'", "a list at all", "'One' in a title", "a repeat or schedule"] },
+      "tests": "From a real trace: garbled first attempt, then a restatement ('I said'). The garbage must not become a task or a list."
+    },
+    {
+      "id": "G04", "group": "Voice mess", "persona": "working dad",
+      "voice_input": "remind me to call the electrician on Friday no wait Saturday",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["call", "electrician"], "due": "2026-10-31" } ], "must_not": ["Friday", "two tasks"] },
+      "tests": "Self-correction of the day."
+    },
+    {
+      "id": "G05", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "buy apples no not apples buy oranges",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["orange"], "example": "Buy oranges" } ], "must_not": ["apples as a task", "two tasks"] },
+      "tests": "Self-correction of the item."
+    },
+    {
+      "id": "G06", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "refill Detal and hand wash",
+      "asr_note": "Detal is a misheard Dettol (from a real trace).",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["dettol"], "partial_ok": ["detal"], "example": "Refill Dettol" }, { "title_has": ["hand", "wash"], "example": "Refill hand wash" } ] },
+      "tests": "Brand spelling. Scoring: full credit for 'Dettol', partial for 'Detal'; either way it should be flagged on the card."
+    },
+    {
+      "id": "G07", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "Aarav beta eat your food I said eat sorry yeah so remind me to submit the science project on Monday",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["submit", "science", "project"], "due": "2026-11-02" } ], "must_not": ["a task from 'eat your food'"] },
+      "tests": "Background chatter to a child."
+    },
+    {
+      "id": "G08", "group": "Voice mess", "persona": "working mom (Hinglish)",
+      "voice_input": "kal mujhe office ke liye cab book karni hai at nine",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["cab"], "example": "Book cab to office", "due": "2026-10-29", "time": "09:00" } ] },
+      "tests": "Mixed Hindi and English."
+    },
+    {
+      "id": "G09", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "okay so tomorrow is very hectic I have a meeting at eleven and then I have to pick up Aarav at one and before that I should go to the bank and deposit the cheque",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["pick", "aarav"], "due": "2026-10-29", "time": "13:00" }, { "title_has": ["deposit", "cheque"], "due": "2026-10-29" } ], "optional_tasks": [ { "title_has": ["meeting"], "time": "11:00" } ], "must_not": ["'hectic' anywhere", "an invented 'plan the day' task"] },
+      "tests": "Rambling note. A meeting is an event, so that task is optional."
+    },
+    {
+      "id": "G10", "group": "Voice mess", "persona": "working dad",
+      "voice_input": "pay the credit card bill by the twelfth it is about eighteen thousand rupees",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["pay", "credit", "card"], "due": "2026-11-12", "instructions": "about 18,000 rupees" } ], "must_not": ["a repeat"] },
+      "tests": "Ordinal date and an amount. Ambiguous: if Swift cannot read 'the twelfth' it must keep the words and flag them."
+    },
+    {
+      "id": "G11", "group": "Voice mess", "persona": "working mom",
+      "voice_input": "buy milk oh and we need milk also remember milk",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["buy", "milk"], "example": "Buy milk" } ], "must_not": ["more than one milk task"] },
+      "tests": "The same item mentioned three times."
+    },
+    {
+      "id": "G12", "group": "Voice mess", "persona": "working dad",
+      "voice_input": "can you create a task to buy bread",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["buy", "bread"], "example": "Buy bread" } ], "must_not": ["a title starting with 'create' or 'add'", "'can you' in the title"] },
+      "tests": "The spoken command must not become the title."
+    },
+
+    {
+      "id": "H01", "group": "Empty or unfinished", "persona": "any",
+      "voice_input": "add a task",
+      "expected": { "outcome": "clarify", "tasks": [], "must_not": ["any task", "a title like 'add' or 'create'", "a silent turn"] },
+      "tests": "Asks what to add (question written by the model). No card."
+    },
+    {
+      "id": "H02", "group": "Empty or unfinished", "persona": "any",
+      "voice_input": "can you create a new task? task?",
+      "expected": { "outcome": "clarify", "tasks": [], "must_not": ["any task", "a repeated identical turn", "a silent turn"] },
+      "tests": "From a real trace; a stray repeated word."
+    },
+    {
+      "id": "H03", "group": "Empty or unfinished", "persona": "working mom",
+      "voice_input": "create a shopping list",
+      "expected": { "outcome": "clarify", "list": "Shopping list", "tasks": [], "must_not": ["a task titled 'Create a shopping list'", "a repeating or looping turn", "a silent turn"] },
+      "tests": "From a real trace that looped. A list with no items should lead to a question about what goes on it."
+    },
+    {
+      "id": "H04", "group": "Empty or unfinished", "persona": "working dad",
+      "voice_input": "I need to uh the... and then",
+      "expected": { "outcome": "wait", "tasks": [], "must_not": ["any task", "a card"] },
+      "tests": "Unfinished speech: keep listening, no model-made card."
+    },
+    {
+      "id": "H05", "group": "Empty or unfinished", "persona": "any",
+      "voice_input": "hmm okay okay thanks that is all",
+      "expected": { "outcome": "none", "tasks": [], "must_not": ["any task", "a card", "a loop"] },
+      "tests": "Chatter with no task."
+    },
+
+    {
+      "id": "I01", "group": "Brain dump", "persona": "working mom",
+      "voice_input": "okay so for this weekend Saturday I need to call the caterer for the birthday then buy return gifts twenty of them and also pick up the cake from Cake Walk at five and ask Rani to clean the baby mat and wash clothes",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["call", "caterer"], "due": "2026-10-31", "purpose": "birthday" }, { "title_has": ["return", "gift"], "due": "2026-10-31", "instructions": "20", "future": { "quantity": "20" } }, { "title_has": ["pick", "cake"], "due": "2026-10-31", "time": "17:00", "future": { "place": "Cake Walk" } }, { "title_has": ["clean", "baby", "mat"], "assignee": "Rani", "due": "2026-10-31" }, { "title_has": ["wash", "clothes"], "assignee": "Rani", "due": "2026-10-31" } ], "must_not": ["Rani on the first three tasks", "fewer than 5 tasks"] },
+      "tests": "Day said once for all tasks; person applies only to the last two. 'At five' is ambiguous: accept 17:00."
+    },
+    {
+      "id": "I02", "group": "Brain dump", "persona": "working dad",
+      "voice_input": "month end things pay society maintenance LIC premium credit card bill and the school bus fees",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["society", "maintenance"], "due_soft": "month end" }, { "title_has": ["lic"], "due_soft": "month end" }, { "title_has": ["credit", "card"], "due_soft": "month end" }, { "title_has": ["school", "bus"], "due_soft": "month end" } ], "must_not": ["a task named 'month end things'", "an invented date"] },
+      "tests": "A header that is a timeframe, not a task or a list."
+    },
+    {
+      "id": "I03", "group": "Brain dump", "persona": "working mom",
+      "voice_input": "house help tasks for tomorrow clean baby mat refill Dettol hand wash soak wash clothes",
+      "expected": { "outcome": "create", "scope": { "assignee": "Househelp (house help)", "due": "2026-10-29" }, "tasks": [ { "title_has": ["clean", "baby", "mat"] }, { "title_has": ["dettol"] }, { "title_has": ["hand", "wash"] }, { "title_has": ["soak", "wash", "clothes"] } ], "must_not": ["a list named after the header", "the header as a task"] },
+      "tests": "Clean version of the house-help trace: header gives person and day to all four tasks."
+    },
+    {
+      "id": "I04", "group": "Brain dump", "persona": "working mom",
+      "voice_input": "Aarav needs a new uniform and black shoes and Anaya needs chart paper and glue for her project all before Monday",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["uniform"], "future": { "for": "Aarav" } }, { "title_has": ["black", "shoes"], "future": { "for": "Aarav" } }, { "title_has": ["chart", "paper"], "purpose": "Anaya's project" }, { "title_has": ["glue"], "purpose": "Anaya's project" } ], "due_soft": "before Monday", "must_not": ["a specific date"] },
+      "tests": "Two children, two groups of items; deadline said once. The child is the beneficiary, so assignee is not required."
+    },
+    {
+      "id": "I05", "group": "Brain dump", "persona": "working dad",
+      "voice_input": "this week sort out the car insurance renewal get the PUC done call the AC guy and book the gas cylinder",
+      "expected": { "outcome": "create", "tasks": [ { "title_has": ["insurance"], "due_soft": "this week" }, { "title_has": ["puc"], "due_soft": "this week" }, { "title_has": ["ac"], "due_soft": "this week" }, { "title_has": ["gas", "cylinder"], "due_soft": "this week" } ], "must_not": ["a task named 'this week'"] },
+      "tests": "Four chores, one soft timeframe."
+    },
+
+    {
+      "id": "J01", "group": "Conversation (multi-turn)", "persona": "working mom",
+      "turns": ["add milk and bread to the Blinkit order", "add eggs"],
+      "expected": { "after_turn_2": { "draft_list": "Blinkit order", "tasks": ["milk", "bread", "eggs"], "must_not": ["a second list", "eggs outside the list", "duplicates", "anything saved"] } },
+      "tests": "A new item added while the preview is up joins the same list."
+    },
+    {
+      "id": "J02", "group": "Conversation (multi-turn)", "persona": "working dad",
+      "turns": ["call the plumber tomorrow and buy bulbs", "make the plumber Friday"],
+      "expected": { "after_turn_2": { "tasks": [ { "title_has": ["plumber"], "due": "2026-10-30" }, { "title_has": ["bulb"], "unchanged": true } ], "must_not": ["a third task", "bulbs changed"] } },
+      "tests": "Update one field of one item only."
+    },
+    {
+      "id": "J03", "group": "Conversation (multi-turn)", "persona": "working mom",
+      "turns": ["water the plants and clean the fridge", "remove the fridge one"],
+      "expected": { "after_turn_2": { "tasks": [ { "title_has": ["water", "plant"] } ], "must_not": ["fridge task still present", "the plants task removed"] } },
+      "tests": "Remove one item by description."
+    },
+    {
+      "id": "J04", "group": "Conversation (multi-turn)", "persona": "working mom",
+      "turns": ["house help tasks for tomorrow clean baby mat", "also wash clothes", "also buy milk that is for me"],
+      "expected": { "after_turn_2": { "tasks": [ { "title_has": ["clean", "baby", "mat"], "assignee": "Househelp", "due": "2026-10-29" }, { "title_has": ["wash", "clothes"], "assignee": "Househelp", "due": "2026-10-29" } ] }, "after_turn_3": { "tasks_added": [ { "title_has": ["milk"], "assignee": null, "due": null } ], "must_not": ["milk assigned to Househelp", "milk due tomorrow"] } },
+      "tests": "Shared person and day carry to the next item, then are NOT applied when the topic changes."
+    },
+    {
+      "id": "J05", "group": "Conversation (multi-turn)", "persona": "working mom",
+      "setup": "Saved: list 'Blinkit order' with Buy milk and Buy bread.",
+      "turns": ["add eggs to the previous Blinkit list"],
+      "expected": { "after_turn_1": { "preview": "Adding to the existing Blinkit order: Buy eggs", "must_not": ["a new list", "anything applied before a yes"] }, "after_yes": { "list_tasks": ["milk", "bread", "eggs"] } },
+      "tests": "Change to saved data is previewed and needs approval."
+    },
+    {
+      "id": "J06", "group": "Conversation (multi-turn)", "persona": "working mom",
+      "setup": "Saved: Buy milk (Blinkit order, today); Call school (tomorrow); Pay electricity bill (today).",
+      "turns": ["what do I need to buy today"],
+      "expected": { "after_turn_1": { "outcome": "answer", "mentions": ["milk"], "must_not": ["a new task", "a card", "'call school' listed as something to buy"] } },
+      "tests": "A question about saved tasks is answered from the store. Nothing is created."
+    }
+  ]
+}

@@ -1,3 +1,402 @@
+# Kitty: an attribute is kept only when the user's words say it
+
+What changed (`build` and `build-for-testing` succeed; the `TaskExtractionTests` run has 8 failures, see "Not verified"; nothing was measured on the real model):
+- **Rule:** a person, day, time, part of the day, timeframe, repeat, category, purpose or list is stored only when the user's own words for THAT
+  task state it. No evidence, no value. Full table: `ATTRIBUTES.md`.
+- **New `EvidenceGate.swift`**, one call in `TaskDraftMapper.item` after `WhenReader`. Words of a task = the whole answer for one task, otherwise
+  the clause holding most of its title words; with several tasks and no clear clause only what the task's own fields carried counts. A value
+  with no phrase there is cleared (trace: `SWIFT <attribute> "<value>" dropped: no evidence in the words`), and the phrase that backed each kept
+  value is saved in `evidence`. A plausible person that was dropped leaves a card note ("I heard "School" as a person but it isn't someone I know").
+- **Silent defaults removed:** no category guess (category filter shows untagged tasks under "Other"); no stored "due today" (undated tasks
+  show "No date", are not in Today and not overdue); no assignee from the category (unassigned is blank, and "Mine" includes unassigned); the
+  "(assumed)" preview tags and note are gone; routines, playbooks and list items are no longer given a guessed category or assignee.
+- **WhenReader no longer guesses am/pm:** "at ten" with no period and no day-part reads no time, keeps the words and flags "Time needs a fix".
+  "kal" is still tomorrow (past-marker rule, with a note).
+- **Shown:** a "Your words" line on draft previews and a caption in the edit sheets; hand edits are marked "added by you"; tasks saved before
+  this change show nothing (their `evidence` is empty).
+
+Limits: the gate checks that a phrase is in the words, not that it is the right phrase; a recogniser error counts as evidence; the "No date"
+marker is the pill on each card, there is no separate "No date" section header; the stage-5 defaults are a product change that can be reviewed separately.
+
+Not verified: `TaskExtractionTests` has 8 failures. One (`testAListIsMadeOnce...`) asserted the removed default and has been updated, not re-run.
+The others (`testCreateWithNoUsableTask...`, the 12-task and window tests whose titles are "Task N", `testAnEditWithAPartOfTheDay...`,
+`testAnUnrelatedEdit...`) were not traced to a cause, so it is not known whether this change or earlier ones produced them. No new scripted
+tests for the gate were written, and the scoreboard invented-attribute check and 60x3 run were not done (they need the on-device model).
+
+# Kitty: days and times are read in Swift from the user's words
+
+What changed (build-verified only: `build` and `build-for-testing` succeed; no test was written or run and nothing was measured on the real model):
+- **New `WhenReader.swift`**, one call in `TaskDraftMapper.item`. It finds a day, a time, a part of the day or a timeframe that the model left
+  in the title, the purpose or the repeat field, or gave as words Swift could not read ("six thirty", "kal", "four am on Friday",
+  "before Diwali", "this month"). It fills only what the task has not got, cuts the phrase out of where it was, and never overwrites a value.
+- **Reads:** today, tomorrow, weekdays, aaj, kal, parso; morning to night and subah, dopahar, shaam, raat (only with a cue); digit and spoken
+  clock times (six thirty, half past six, quarter to five, at ten); timeframes kept as said (next week, month end, before Friday, before
+  Diwali, before eleven).
+- **Guesses, flagged on the card:** with no am/pm and no day-part, 7 to 11 is the morning and 1 to 6 the afternoon or evening ("at ten"
+  10:00, "at five" 17:00); "kal" is tomorrow unless the words are in the past. Both add a note you can tap to fix.
+- **Careful:** numbers with a unit or a count ("five apples", "two kg") are not times; a text that says how often (every, daily, alternate,
+  weekdays) is never touched; with several tasks in one sentence a phrase is not copied from the sentence onto a task that did not carry it.
+- **Not changed:** assignees such as "Kal", purposes that are really instructions, leftover frames in titles, task splitting, ordinal dates.
+
+# Kitty: stop refusing valid tasks, and stop dropping tasks on "wait"
+
+What changed (build-verified only: `build` and `build-for-testing` succeed; no test was written or run and nothing was measured on the real model):
+- **The shell rule.** A title is refused as a spoken command only when it starts with a frame ("can you", "I want to"...), or starts with a
+  command verb (add, create, make, remove, delete, start, set, remind) and names an app object or ends in "list". Length alone no longer counts,
+  so a whole sentence as the title is accepted. Filler sounds (uh, um, hmm...) say nothing, so "uh the..." is still no task, and "remind me" is
+  refused while "Remind me about parent teacher meeting" is kept. Only an edit's retitle that copies the whole spoken sentence is refused.
+- **Wait with tasks.** On a final turn, if the model said wait (or clarify with no question) but its answer holds valid tasks, they are used
+  (the trace says so). While the user may still be talking, wait still waits.
+- Not changed: card content (purposes in the wrong place, unread times, invented people, leftover words such as "remind me of ...").
+
+# Kitty: every detail on the row and the card, and one form to edit a task
+
+What changed (build-verified only: `build` and `build-for-testing` succeed; no test was written or run, and the new rows, cards and sheets were
+not looked at on screen, see the last bullet):
+- **One helper for the lines under a title** (`TaskDetailLines.swift`, no SwiftUI): Why (purpose), How (instructions), Repeats (the repeat as
+  said, else the parsed text), Around (a timeframe such as "next week", only when there is no day) and For (a person, only when no tag says
+  it). Empty values and a value equal to the title are left out. A new field (a quantity, a place) is one more case and one more line there.
+- **Preview rows** (`PreviewRow.details`, filled in `Proposal.bulk`, drawn by `proposalRow`) and **saved cards** (`TaskRowBody`) show those
+  lines in small grey text, two lines each. The preview leaves out the timeframe and person (their tags show them) and the unreadable-repeat
+  line (the orange tag shows it). The saved card never shows `notes` as the user's words; a "Repeat not understood: X" in the notes shows as an
+  orange "Couldn't read the repeat" line.
+- **One form** (`TaskFieldsForm.swift`): the draft sheet and the saved-task sheet use the same fields and the same `TaskFormState.commit()`:
+  title, list, why, how, day, time, part of the day, timeframe (always shown, off when a day is set), repeat, priority and person. A day or
+  time is rewritten only when you change it. The draft sheet keeps its Evidence section and buttons; the saved sheet keeps Done, Category
+  and Delete, and shows notes read-only.
+- **Editing a saved task:** tap the card (the checkbox keeps its own tap; swipe to delete and the long-press menu are unchanged), change
+  fields, Save. If the change cannot be stored, the task is put back as it was, the sheet stays open and says "Couldn't save the change."
+  (`TaskStore.update` now rolls back). A new list name is made when you Save, and taken back if the save fails.
+- **The repeat on a saved task is kept as your words.** Editing it does not turn the task into a routine (the sheet says so). On a draft,
+  a changed repeat is still read again by Swift, as before. A routine's copy for today cannot change its repeat.
+- **Limits.** `quantity` and `place` do not exist yet. Saving a saved task that has both a day and a timeframe drops the timeframe, as the old
+  sheet did. Not checked on screen: the simulator was booted with seeded tasks and the app launched, but no screen past the home screen was
+  looked at (no tool here could tap), so the row and card layout, Dynamic Type, dark mode, a small iPhone, and tap against swipe and long-press
+  are unverified.
+
+# Kitty: garbled dictation, list names, restatement and duplicates in the draft
+
+Trace: two turns of "Add House Add hostel task for tomorrow I said, add Househelp tasks for tomorrow ..." gave a list called "House Add hostel",
+then a second turn re-sent two tasks with the day in the schedule field, flagged "Repeat not understood", and added them again.
+
+What changed (build-verified only; no test was written or run, nothing was measured on the real model; no instruction text was changed):
+- **List names.** A list the model names is used only if it exists, or the words say list, order or cart, or an existing list is found in the
+  words. A name with a command word is refused. When one is refused the first item says so; the tasks keep their person and day.
+- **Restatement.** Words before "I said," / "I meant," (with a comma or colon) are shown under Skipped and the extraction reads what follows.
+- **Header only.** "I said, Househelp tasks" (or only a day, time or existing list) while a draft waits sets the person, day, time or list on the
+  items that have none, with no new task and no model call. The card says what was set, or that the tasks already have it.
+- **Day in the schedule field.** Read as the day, not a repeat; no "Repeat not understood". The model now sees draft days in words.
+- **Duplicates.** The merge compares title, person, day, time (and the repeat of a routine); list, instructions, reason, category, priority and
+  notes may differ only where one side is empty. The copy fills the empty fields and the item gets "Already on the list".
+- **Every draft item** is sent to the model; the trace says how many, or that none fit. A title mostly of low-confidence words gets "I wasn't sure
+  I heard this one right. Tap it to fix it." (only when the recogniser reports confidence).
+- **Limits.** A garbled but plausible title cannot be recognised from the words. The merge cannot tell an accidental repeat from a meant one
+  (only `distinct`, which the flat path cannot set); the card note is how you notice. The "I said," cut is a shape rule and may cut a real "I said,".
+  A real list said without a cue ("list", "order", "cart") is now dropped, with a note on the card. Why the first item (d1) was missing in the
+  second turn is not proven: the state sent held every item, and no merge was in place at that time. Hearing the speech merge repeat is only noted.
+  Nothing was measured on the real model.
+
+# Kitty: the same task is not added twice to a preview
+
+Trace: dictating over several attempts and repeating yourself ("I said, add a task...") left two copies of the same items on the
+draft ("Admin house" and "clean the baby mat", each twice). Drafts only compared items inside one answer, never across turns.
+
+What changed (build-verified only; no test was written or run, nothing was measured on the real model):
+- **Exact copy: merged, visibly.** A new item that is the same request as one already on the draft is not added as a row. The item
+  already there keeps its place, ref and id and gets the note "Already on the list"; the card and the log say "Already had clean the
+  baby mat." Same request means the same title, person, day, time, list and repeat, and the same category, priority and notes
+  (`BulkDraftManager.existing(matching:in:)`). It applies to what you say (`join`), to what the model adds in an edit, and to an item
+  you add by hand in the edit sheet.
+- **Still two rows:** the same title for someone else or on another day, time or list ("Looks like another item" as before), and an
+  item the model marked `distinctBecause` in the older answer format (`DraftItem.distinct`).
+- **Limits.** Only exact copies. The flat answer cannot mark a deliberate repeat, so "two of those" said in a later turn, or the same
+  task added by hand with nothing different, merges; change any field to get a second row. The note on the card is how you notice.
+  The garbled name on the last item and the lost-request routing bug are separate and untouched. Saving was not run: one merged
+  item is one row, so one task is what the card would save.
+
+# Kitty: transcript text appeared twice (hybrid speech merge)
+
+Symptom: after a pause the transcript sometimes said the same words twice ("add a task to buy milk to buy milk", or "... milk milk"). Whisper's text for a
+phrase was in, and Apple's late words for the same phrase were still beside it.
+
+Cause (from the code and hand-traced cases, not seen on a device): `HybridTranscript.merge` gave an Apple word to a settled phrase only by its time
+(within 0.15 s of the phrase) or, untimed, by the word count Apple had when the pause was seen. Apple is behind the audio, so words said inside the phrase
+can arrive after it, a little past its end or past that count, and then belonged to nobody and stayed beside Whisper's full text.
+
+What changed (build-verified only: the new tests compile, none was run, per your choice; nothing was measured on a device):
+- **Merge** (`HybridTranscript.swift`): untimed words inside a timed list are placed between their timed neighbours; a settled phrase also takes the Apple
+  words right after its own that continue its text word by word (timed ones only within 0.5 s of its end and before the next phrase), so a word of the next
+  phrase is never taken ("buy milk" then "milk chocolate" keeps both); a safety net removes a leftover run of two or more words that repeats the end of the
+  settled text, unless the settled text itself repeats there. Details in `ALGORITHMS.md` 4.6.
+- **What you see is what is sent.** The screen and the model read the same merged text, so there is one clean transcript and no separate show/send logic.
+- **Replacement is not a restart.** Whisper's text can share no word with the garbled live words it replaces; `TurnAccumulator.absorb` now takes a hint
+  (`HybridRecognizer.lastChangeWasSettle`) so that is not mistaken for the recogniser starting over (which would have put the same speech in `carry` twice).
+  A repeated `phraseEnded` id is ignored.
+- **Trace** (console trace or "save task details" only): whether Apple's partial words carry timestamps, and the phrases, words, origin and rule used whenever
+  a late word was claimed, the safety net acted, or the result still repeats a run.
+- **Tests** (`Tests/HybridTranscriptTests.swift`): the cases above, genuine repeats ("No no I said no.", "very very"), and recogniser-level cases.
+
+Not known: whether Apple's partial words carry timestamps on a device (the trace will say), how long after a pause its last words arrive (0.5 s is a choice
+from the 0.65 s minimum gap, not a measurement), and whether the words dropped by the safety net were ever really said twice.
+
+# Kitty: state-based extraction for multi-sentence dictation (flat path)
+
+Trace: "Add house help tasks for tomorrow. Clean baby mat. Refill, Detal, Hand wash. Soak, Washclots." lost "Washclots" and gave "Soak" no
+person and no day. While a draft waits, the extraction only saw the new words (`Request: Soak, Washclots.`), a trace line said the draft
+was sent when it was not, nothing checked that every word became something, and a misheard word went straight into a title.
+
+What changed (build-verified only; no test was written or run, nothing was measured on the real model):
+- **State, not history.** While a draft waits (flat path, no playbook), the prompt is `STATE` (the scope, then the draft by ref) plus
+  `Request:` with only the new words (`FlatPrompt.state`). The earlier transcript is never sent. To fit the measured window the draft
+  gives way in order: full item detail, title and category, titles, no draft items. The scope and the new words are never cut. The false
+  trace line is gone; `flatAnswer` now traces exactly what was sent.
+- **Scope.** The answer can carry a person, day and time said once for several tasks (`assignee`, `dueDate`, `dueTime`) and `leavesScope`.
+  `ScopeReader` checks each one (a person is a known name, a role, or in the words; a day and a time must read through `DateResolver` and
+  `TimeResolver`), drops what fails with a WARNING, merges it with the draft's `DraftScope`, and fills only the fields a new task left
+  empty; a task's own value wins. The scope is kept on the draft (`BulkDraftManager.scope`, in the version, cleared with the draft) only
+  when the tasks are committed. `leavesScope` is one addition to the brief: with a scope in force, "not given" cannot tell "not said" from
+  "not for this scope", so the model says it. Behind `FlatExperiments.scopeLine`.
+- **Coverage.** `Coverage.uncovered` lists the content words of the new words that no task, person, day, list or scope accounts for. When
+  there are any and an accepted sentence came before, one more call asks with that sentence added (`FlatExperiments.coverageRetryCall`);
+  the second answer is used only if it leaves fewer words uncovered, and tasks already on the draft are not added twice. What is still
+  uncovered is recorded as a `HeardChunk`, shown on the card with "Try again" (`Proposal.recovery`) and kept as a skipped chip ("also add ...").
+- **Spelling.** `SpellingHints` (in `VocabularyProvider.swift`): a word the system spell checker does not know, that sounds like a word this
+  household uses (consonant skeleton plus edit distance) is offered as "Did you mean ...?" on the task's row; a word the recogniser scored
+  under 0.5 gets "I wasn't sure I heard ...". Nothing is rewritten.
+- **Latency.** Each model call writes `TIME: extraction call n of m: x s`. `VoiceTurnManager.speculativeExtraction` (off) starts the extraction
+  beside the intent call. The hold is unchanged. See `REAL_MODEL_STATE_EXTRACTION.md`.
+
+Phone script: (1) the four sentences above with 4 s pauses: the trace shows `sent beside the new words: scope person: Househelp; day: tomorrow;
+draft d1 ...`, and "Soak" and "Washclots" come out with the person and day. (2) A garbled first chunk, then a good one: the `HeardChunk` and the
+note appear. (3) After the list, "also buy milk for me": it is not given the house help scope. (4) "for Zorblax", "day blorp": a WARNING says the scope was
+not accepted, and it is not stored. Nothing was committed or pushed.
+
+# Kitty: no loops, one clean lifecycle per turn (flat path)
+
+Trace A: "Create a task. Create a shopping list." The model proposed "Create a shopping list", the echo rule refused it (it ends in
+"list"), the question call wrote a question that `registerModelQuestion` suppressed as a repeat, and `askForContent` returned `.wait`.
+`.wait` meant both "still speaking" and "nothing to show", so the words stayed in the turn and the long-silence nudge ran them again
+about every 3 s (two model calls each) until the screen closed. This is the cause found from the code and the trace; it was not reproduced
+in a test (none was written or run this round).
+
+What changed:
+- **`TurnResult.handled`**: the words are consumed and there is nothing to show. `.wait` now only means "still speaking, keep the words".
+  Returned by the three `askForContent` failure paths, an exhausted question and a repeated `notApplied`.
+- **Consume on terminal**: `VoiceConversation.consumeTurnWords()` clears the turn text (carry, session, turn, committed, processed, last
+  acted, nudged, final-tried) and restarts recognition, because the recogniser reports cumulative text and would bring the words back.
+  Done for `.handled` and for `.question` (after the question is shown; the stage stays `.question`). A preview's words are not cleared.
+- **`judge` order**: empty, finalizer, already-final (`finalTried`), nudge, already-looked, pause. The nudge's final pass still runs once
+  per distinct words, then silence alone never sends them again.
+- **Question verdicts**: `registerModelQuestion` returns `.ask`, `.again` (the same question once more) or `.exhausted` (a third
+  showing, or three rounds). Exhausted resets the clarify state and returns `.handled`: idle, mic ready, typing visible. No question is
+  written by Swift.
+- **Safety nets**: a circuit breaker (`VoiceTurnManager.breakerWindow` 10 s): the same words, in the same state and final flag, a
+  second time inside the window make no call and answer with a short typed-input message. A watchdog in `VoiceConversation`:
+  thinking over `thinkingTimeout` 60 s is cancelled and the turn resets with a notice; already-looked words with no new sound for
+  `staleWordsTimeout` 25 s are dropped and listening restarts. All three values are unmeasured guesses.
+- **Feel**: while the words hold no task yet, the status line reads "Listening for the task…" (a label, not a question). Holds are
+  unchanged (`noContentExtraHold` 0; the usual 4 s pause).
+- **Trace**: the last line of every turn is `turn N ended: <wait|handled|question|proposal|reply>; the same words have come K time(s) in
+  a row`. The watchdog writes `turn ended: idle`.
+
+Not run: no tests were written or run, and nothing was measured on the real model. Phone script: (1) say "Create a task. Create a
+shopping list." and stay silent 30 s: one question (or one re-show), then idle, no repeating `HEARD ... (final)`. (2) "add a task",
+pause, "create a task", pause: no stacked words after a question. (3) After a question say "buy milk": one task. (4) Say "create a task"
+and stay silent: a question, then nothing repeats. (5) Check each turn ends with `turn N ended: ...` and the counter stays at 1.
+Nothing was committed or pushed.
+
+# Kitty: a task must have content, and the model words the question (flat path)
+
+"Can you create a new task? task?" produced a card "Save 'create'?". Nothing checked that a task is meaningful. Now one pure Swift
+shape check, `TaskMeaning.hasContent` (`FlatEdit.swift`), removes app-talk (can, could, you, please, i, want, need, would, like, just,
+said, a, an, the, new, another, one, to, for, me, task, tasks, reminder, reminders, todo, item, list, something), bare command verbs
+(add, create, make, remove, delete, start, set) and repeated words, and asks whether anything is left. It does not interpret meaning.
+It runs on the words before any model call (when no draft or card waits and the words do not answer an open question), and on every
+title through `TaskDraftMapper.item` (model extraction, tasks added by an edit, a retitle) and in the hand-edit sheet (Add stays off,
+with a hint). A title that is the spoken command itself ("Add a task to buy bread", "Add milk to the blanket list") is also refused
+(`TaskMeaning.isCommandEcho`; this replaces `CommandTitle`, and is the one rule `hasContent` alone cannot cover).
+
+When it fails there is no card and nothing is saved. The usual pause (about 4 s) is the hold: more words join the same turn first
+(`VoiceTurnManager.noContentExtraHold`, 0 now, adds quiet for no-content words if the phone test says it asks too early). Then one small
+model call (`DecisionProviding.contentQuestion`, own session, 15 s timeout) writes ONE question. Swift only checks it is one question and was
+not asked already; it never writes the wording. No question (no model, timeout, not one question, a repeat) leaves the user listening
+with no card and no fixed sentence. The next words are read through the existing clarify path, so "buy milk" becomes one task.
+
+Not run: no test was run this round (build-for-testing only), and nothing was measured on the real model, so I don't know whether the
+question is sensible, short or free of invented tasks. An opt-in check exists (`ContentQuestionRealModelTests`, set
+`TEST_RUNNER_KITTY_REAL_MODEL=1`); no `REAL_MODEL_*.md` was written. A real task made only of app-talk and a bare verb ("Make a list")
+is refused too. Nothing was committed or pushed.
+
+# Kitty: intent routing and corrections (flat path)
+
+A plain "I just said add a task to buy bread and milk" was read as an edit of a saved task. Now one tiny call (`FlatEdit.swift`:
+`TaskIntent`: create, change, query, unrelated, plus a `correction` flag) says what the words are for, and Swift routes by that and by
+the real state. The call sees the words and one line of state, never a task. It is skipped when nothing waits and the words do not point
+at a saved task, and when the words answer an open question. A waiting draft always gets the call. create: new tasks, the saved-task
+block is never sent. change: the draft edit when a draft waits, else the saved-task edit. query with no draft: Swift reads the question
+itself (list, today/tomorrow/overdue, done, remaining words) and answers from the saved tasks, with no model call. A correction with a
+draft is a change; with none it is a new request. No answer from the call: a waiting draft uses its edit call as before, otherwise the
+words make tasks. `SavedEditGate` no longer matches "just", "one", "also", "make", "set", "actually" or a saved title.
+
+Refusals, in Swift: an edit is rejected whole, with nothing shown or applied, when it clears `title` or an unknown field, names a ref
+that is not listed, touches more than two tasks (a draft edit that says all, every, each or both is exempt), or touches a task the words
+neither name nor point at. A draft shows the recovery card; saved tasks get "I couldn't apply that, nothing changed." A task whose title
+is the spoken command ("Add a task to buy bread", or the whole sentence) is dropped. The edit schema's `add`, `update`, `remove` and
+`clear` are now optional, because required arrays are a suspected cause of the padded answer (not verified).
+
+Two instruction lines are behind `FlatExperiments` (`correctionLine`, `separateTargets`, both on) and were NOT measured on the real model.
+Set either to `false` to take it out. Nothing else was measured either; the scripted tests were updated to compile and were not run.
+Still unverified or failing: how the real model answers the intent call; the query reading is a keyword parse and can show too much or
+too little; why a saved task was titled as a command (no trace of that turn exists); `unrelated` while a draft waits goes to extraction.
+Nothing was committed or pushed.
+
+# Kitty: conversational task creation and editing (flat path)
+
+On the flat path, words said after a preview go to a small edit call (`FlatEdit.swift`) that returns only what changes: add, update
+or remove tasks of the waiting draft by ref, in the user's words; Swift reads the day, time and repeat. An added task joins the draft's
+only list, and a list named in the words ("to the Blinkit order") joins the one that exists. With no draft, words that could be about
+the last five saved tasks (t1 to t5) get a card that needs a yes before anything changes. The edit sheet now has Repeat, part of the
+day and a timeframe. Not measured on the real model, and the new scripted tests (`Tests/TaskExtractionTests.swift`) were not run to
+completion. Nothing was committed or pushed.
+
+# Kitty: list extraction on the production path
+
+A user-named list now returns `listName` once (`BulkAgentDecision`, between `action` and `items`) with one item per independently
+completable or purchasable thing; the old "a named list is one purchase task by default" wording is removed. `assignee`, `notes` and
+`answer` guidance is stricter. Swift carries `listName` onto the drafts, shows it on the card, and makes or joins the list only when you
+approve. This reduces a known failure mode; it was checked with scripted tests only (`Tests/ListExtractionTests.swift`) and has not been
+measured on the real model. Nothing was committed, pushed or zipped.
+
+# Kitty: flat task extraction (behind a flag, `.full` stays the default)
+
+`PathProfile.flat` (`TaskExtraction.swift`, `TaskResolvers.swift`, `TokenBudgetService.swift`): the model returns only what the user
+said (title, schedule, assignee, dueDate, dueTime, purpose, instructions, plus a list name and an optional question). Swift resolves
+dates, times and repeats, makes the list when the draft is approved, validates, and saves nothing without approval. Labels are removed
+app-wide. Lists show as sections on the review card and as list chips on Home. A question can sit beside the tasks (Save stays enabled).
+Measured on the real model it splits more often (51/120 against 32/120 on the shared matrix, 1.5 s against 3.8 s a turn) but is worse on
+some cases and invents purposes, so it was **not** made the default. Details, deviations and what was not measured:
+`REAL_MODEL_FLAT_EXTRACTION.md`. Nothing was committed, pushed or zipped.
+
+# Kitty: one task per requested action (measured, wording reverted)
+
+The model interprets and splits a request; Swift keeps state, validates shape, handles duplicates, review and saving, and never splits
+or merges a title by meaning. New wording for "one task per requested action or target, shared context on every task" was tried and
+measured on the real model (12 utterances x 10 runs, `Tests/SplitMatrixTests.swift`). It helped a few cases (Cetaphil/Cipcal/Tedibar
+0 to 6 of 10) and made single-request cases worse (plumber 3 to 0, dry cleaning 8 to 0, invented repeats), so it was **reverted**: the
+instructions and schema guides are unchanged. Real-model splitting is still weak (milk and bread from Blinkit: 0 of 10). Details,
+tables and causes: `REAL_MODEL_SPLIT_EXTRACTION.md`.
+
+- Added `Tests/SplitExtractionTests.swift` (11 scripted tests of the Swift side) and the opt-in real-model matrix.
+- Nothing here claims that the safeguards eliminate hallucinations.
+
+# Kitty: quote checks are advisory, review is the save boundary
+
+The model reads the meaning. Swift checks shape, references, parseable fields, versions and exactly-once saving. A generated draft
+is not a saved task. None of this removes hallucinations: it makes them visible and keeps the user in charge of what is saved.
+
+- **A quote that is not in the transcript is a flag, never a removal** (`BulkValidator.flagQuotes`). `DraftItem.quoteUnverified`
+  puts an orange "Quote unverified" tag on the row; the task stays in the draft and in the save proposal. One, several or all
+  failing: same policy. No quote at all makes no claim and is not flagged. A matching quote proves nothing about the task and
+  earns no "verified" mark. A mismatch never retries the model. The old "Not in what you said" list is gone.
+- **The model's quote is never shown as the user's speech.** The edit sheet shows "Model's quote" and "What you said" (the original
+  transcript) separately. The review prompt says "quote unverified" instead of giving the quote back as "from …".
+- **One question per undecided flagged task.** The card asks "Should I include ‘title’?" (`Proposal.flagQuestionItemID`). "Yes" marks
+  it included, "no" removes it; neither saves. Include / Remove buttons do the same. When none is undecided the card asks "Should I
+  save these?". Save always saves every task shown, flagged ones included.
+- **Approval is for one version.** Include, remove and edit all move the draft version, so an earlier card cannot save the changed
+  draft (`Proposal.approves`, also checked in the background apply). A completed answer is applied once per request id and draft
+  version (`commit(ticket)`); streaming snapshots only update the display.
+- **Success is reported only after storing.** `TaskStore.addMany` takes the tasks back out if encoding fails and returns nothing; the
+  reply then says it could not save, keeps the draft, and the same approval can be given again.
+- **Nothing is suppressed because a title matches.** A match with a saved task or routine is a note on the card ("You already have
+  this saved"); an approved routine is saved even if a saved one has the same title and repeat (`allowDuplicate`).
+- **Instructions**: one rule for one item per requested action; `heardAs` asks for the shortest unbroken run of the user's words.
+- Tests: `Tests/ReviewBoundaryTests.swift` (scripted). Not covered: whether the model's interpretation is right.
+
+# Kitty: stabilised creation and single-item correction
+
+Result first: correction by spelling ("it's Cipcal, not sip curl") is **not reliable** on the on-device model (0 to 1 of 10 in the
+replay), though latency, finished answers and invalid-output handling improved a lot. Production uses the full path. The minimal
+path exists only for measurement. Numbers, samples, recommendation and the feature ladder: `REAL_MODEL_CORRECTION_REPLAY.md`.
+
+- **One answer variant per turn** (`DraftReview` in `QuestionComposer.swift`): `answer` (a reply, no changes), `change` (edits by
+  ref, remove, add), `clarify` (one question), `unrelated`. An `answer` carries no mutations by construction.
+- **Invalid output is rejected whole** (`DraftReviewValidator`). Unknown ref, unknown action, empty change, the same item both
+  edited and removed, a clarify that is not a question: nothing is applied, the draft stays as it was, and the card shows a
+  recovery (what went wrong, the items by name, the words to retry) instead of the save prompt. Swift never repairs the model's output.
+- **Review prompt** sends the current draft (ref, title, labels, provenance), the last changes, only the vocabulary the words
+  mention, and the user's latest words. The old `ORIGINAL REQUEST` and `LINES SO FAR` repair history are gone. A recap is never
+  stored as an open question (`ClarificationStateManager.isOneQuestion`).
+- **Stable ids and provenance.** Each `DraftItem` keeps its ref and a `history` of (line, words, what changed).
+- **Grouping.** The default shopping-list grouping in `ItemDraft.title` yields to an explicit grouping the user asks for.
+- **Diagnostic path** (`MinimalPath.swift`, `VoiceTurnManager.profile = .minimal(vocabulary:)`): titles only, rename/remove/add by
+  ref, no recurrence, playbooks, retrieval or metadata. It uses the same validator, apply and recovery code. Not used in production.
+- **Replay harness**: `Tests/CorrectionReplayTests.swift` (opt in, `TEST_RUNNER_KITTY_REAL_MODEL=1`); scripted tests for invalid
+  output in `Tests/InvalidOutputTests.swift`.
+
+# Kitty: state snapshot, token budget and scoped edits
+
+- **State, not conversation.** Swift keeps the whole conversation locally (`ConversationLog`) and sends the model only the state of
+  this turn: `STATE`, the open `QUESTION`, `ITEMS` by ref, the last three `RECENT CHANGES` Swift made and the `USER` words (the
+  `ORIGINAL REQUEST` and `LINES SO FAR` repair history are no longer sent). Empty sections are left out. Swift does not guess intent from the snapshot; the model reads it.
+- **Measured budget** (`ContextAssembler.swift`). The window comes from `SystemLanguageModel.default.contextSize`; instructions,
+  schema and tools are counted once per call kind with `tokenCount(for:)` (iOS 26.4 and later, an estimate before, labelled as one).
+  Input room = window - fixed cost - 1,200 answer reserve - 300 margin. When the prompt does not fit, whole kinds of context drop in
+  order: vocabulary (relevant, then none; "all" is no longer sent), skipped chatter, item detail (all fields, title and category, titles, count only; the
+  last two hand the list to the draft tools). The user's words, the open question, the recent changes and the refs are never cut.
+  The old `prefix(3200)` is gone. The line `... of 8,192 tokens ... counted by the model | estimated` is in the trace and the live view.
+- **Scoped edits.** An edit names `ref`, `refs` or `all`; Swift applies it to each item and records one `Change`
+  ("Cleared tags on 4 items."). `clear` takes `category` as well as `labels`; "tags" means both. `add` is its own action and leaves
+  every existing item alone; `replace` is only for "start over".
+- **Large lists.** `get_draft_items(ids)` and `search_draft(query, limit)` (`TaskTools.swift`, at most 12 items, the same 3-call
+  limit). A turn too long for one call is read in batches ("part 2 of 3" in the live view) into one draft.
+- Details of the real-model scenario run: `REAL_MODEL_RUNS.md`. `ALGORITHMS.md` still describes the older design.
+
+# Kitty: model-first refactor and the live model view
+
+- The model reads the words, extracts, corrects, clarifies and answers. Swift runs audio, timing, state, tools, storage and
+  confirmations, and checks only shape, supported actions, required fields, references and exactly-once saving. It never merges,
+  drops or rewrites what the model proposed; a mismatch with the transcript is a note on the card.
+- `PersistentInstructions.text` in `Agent.swift` is the one instruction block (the OBJECTS / GROUNDING / EVIDENCE / CONVERSATION /
+  OUTPUT text). Each call starts a fresh session.
+- Tools the model fills in and Swift runs: `search_tasks`, `read_task`, `list_facets` (`TaskTools.swift`). At most 3 calls per turn,
+  at most 12 records each. A model call is stopped after 45 s.
+- Typed search is plain matching (title, tag, category, label, stored reason and words). The old concept expansion was removed.
+- Settings menu, "Live model view": shows each step of a turn on screen while the model works. See `REAL_MODEL_RUNS.md` for the real
+  model results, which are not good yet. `ALGORITHMS.md` still describes the older design.
+
+# Kitty v36: LLM-first lean pipeline
+
+The model reads what you said, as you said it, and decides everything. Swift only decodes the answer and keeps the safety net.
+
+- **One schema, one call.** `DecisionProviding.extract(prompt:fresh:)` returns one `BulkDecisionValue` that carries create (tasks, routines,
+  playbook) and view, update, complete, delete, clarify and wait. `decide` and `decideBulk` are kept only as shims for the test engines.
+  The instructions are a short template: 8 rules and exactly 3 examples; formatting limits live in the `@Guide` descriptions; today's
+  date, known people, categories and the pending draft go in the prompt as data.
+- **Raw words in.** No speech cleaner, no brand fixer, no `TranscriptPolicy`. Brands (Blinkit, Swiggy, Zomato, Zepto, Grofers, UPI, Paytm)
+  come first in `KeyTerms` for the Whisper prompt and in Apple Speech's `contextualStrings` (`VocabularyProvider.current`). One tiny
+  `norm()` remains for comparing strings. `PromptBudget` stays only as a fallback: on a `context window full` error the turn is split by sentence.
+- **Decode only.** `BulkValidator.decode` turns ISO dates, `HH:mm`, enums, empty strings and exact duplicates into values. It does not
+  invent, drop, repair or ask. Removed: the pre-checker, `TaskValidator`, the vague-placeholder check, the long-turn analyser, the list
+  detector, the read-back ("Did you say Rani?"), the sound-alike name matcher, `LabelFinder`, `ActionRecovery`, and the question-writing call.
+  The preview, the edit sheet and "nothing saves until Save" are the safety net.
+- **Edit before save stays.** The draft review call (its own short prompt), spoken quick edits (remove, replace, priority, fields,
+  playbook step), `DraftEditSheet`. A new task is never built by a rule from "also add ..."; that goes to the model.
+- **Endpointing.** After silence, if the last word is one of `the, and, a, my, to, for, with, um`, Kitty keeps the mic open and makes
+  no model call (the trace says `NOT SENT TO THE MODEL`). A local 1.5 s timer then says "Anything else?" (a chime when read-aloud is off).
+  `PauseProfile` timing and the "done" finalizer are unchanged.
+- **Utterance.** One `Utterance { id, rawText, createdAt, source }` is written when Save is confirmed (the whole turn's words, including
+  corrections made to the draft) and every task and routine from that turn carries its `utteranceID`. An abandoned draft stores
+  nothing. It is stored as JSON in UserDefaults like the tasks, only while "Save task details" is on, and dropped when no task points to it.
+  The old per-task `said` copy is no longer written; saved data that has it still loads and still shows.
+- **Order.** `TaskSorting`: overdue first, then morning to night, then by time, applied to the lists and the preview. The prompt never mentions order.
+- **Tests.** 399 run, 3 skipped (opt-in), 0 failures. The eval suite (`EVALS.md`) uses a scripted model, so it checks the wiring and
+  the decode, not Apple's model. See `REAL_MODEL_RUNS.md` for what only a phone can show.
+
+Not verified: real microphone and screen behaviour, the real model's output, prompt quality on real speech, and the "Anything else?" timing.
+
+---
+
 # Kitty v35: smaller app, Apple live text, turbo settles each phrase
 
 The app was 3.8 GB on the phone. Most of it was dead weight, so v35 keeps **large-v3-turbo** and drops the rest.
@@ -276,6 +675,15 @@ New in the app: priority, notes and a specific category name (Bathroom, Grocerie
 Where things are (all in Agent.swift): PersistentInstructions, AgentDecision, PromptBuilder, LocalSemanticPrechecker, TaskValidator,
 ConversationStateManager, VoiceTurnManager, DecisionExecutor. Unit tests: Tests/KittyVoiceTurnTests.swift (add to a TEST target only).
 
+Seeing everything (debug builds): run the app from Xcode and type KITTY in the filter box of the debug console. Each turn prints, in
+order: HEARD and CLEANED (what you said), SWIFT (what Swift stripped, found, kept or dropped, before the model and after it), TO MODEL
+(the full prompt, with sizes and an estimated token count), FROM MODEL (the answer and the seconds it took) and RESULT (what you were
+shown). That is the whole story of a turn. For the rest (GATES, STRIP, CHECKS, RULES, ROUTE, SAVED) set the UserDefaults flag
+kitty.traceDetail = true. Switch the trace off with kitty.traceModel = false. It never prints in a release build or in unit tests
+(Trace.swift). The live "Hearing N tasks" chip never traces.
+Apple's own audio lines (`auou/vpio ... render err: -1`, `throwing -1`) are not Kitty's: typing KITTY in the console filter hides them.
+(v36: the lean template replaced both instruction texts; there is no legacy switch any more.)
+
 # Kitty v28: understanding the pause
 
 In Talk to Kitty, a pause doesn't always mean "done". After a short pause (about 1.3 s) Kitty acts only if what you said is a
@@ -301,6 +709,17 @@ who gets what, when to ask instead of guess, never invent tasks) and how she rep
 first three of a long list). Editable, with a field for facts about your home. The guide is added to every on-device model
 call. Answers to questions are worded by the model from facts Kitty works out herself, and are dropped if a number
 isn't in the facts. Repeated chores show once with a count ("Clean dishes +2"): tick finishes one, long-press finishes all.
+
+# Siri that carries your request
+
+Siri phrases always end in the app name, and Siri cannot take free words inside a phrase, so the common requests are ready-made:
+- "Hey Siri, add a task in Kitty" (also: add a task to / on / with / using Kitty, create a new task in Kitty, new task in Kitty,
+  add a reminder in Kitty, I want to add a task in Kitty ...) opens Kitty listening.
+- "Hey Siri, what are my tasks for today in Kitty" (also: what do I have today, show / read my tasks for today, today's tasks in
+  Kitty), the same for tomorrow, and "what is overdue in Kitty" open Kitty, which runs the question itself, speaks the answer and
+  keeps listening. If Kitty is already open, the question runs in that conversation.
+- "Hey Siri, tell Kitty": Siri asks "What should I tell Kitty?", then Kitty opens and does whatever you said.
+The words each phrase runs are in `KittySiriRequest` (Intents.swift). New phrases go in `QuickTasksShortcuts` (at most 10 shortcuts).
 
 # Kitty v25: one way in
 

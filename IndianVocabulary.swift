@@ -4,10 +4,13 @@ import Foundation
 
 /// Brands, apps, foods and household words that are said every day in India and that a recogniser trained mostly on other
 /// English tends to mishear ("Blinkit" as "blink it", "atta" as "alter"). Used two ways: as speech key terms, which bias
-/// the decoder towards them, and by `BrandFixer`, which repairs a near-miss afterwards when there is one clear match.
+/// the decoder towards them (Whisper's `initial_prompt` and Apple Speech's `contextualStrings`), so the words reach the model right.
 ///
 /// Spell and capitalise each exactly as it should appear. No commas: commas separate key terms.
 nonisolated enum IndianVocabulary {
+    /// The brands said most often: always first in the key terms, and always in the model's reference vocabulary.
+    static let brands: [String] = ["Blinkit", "Swiggy", "Zomato", "Zepto", "Grofers", "UPI", "Paytm"]
+
     static let terms: [String] = [
         // Quick commerce, delivery and shopping
         "Blinkit", "Zepto", "Swiggy", "Instamart", "Zomato", "BigBasket", "Flipkart", "Myntra", "Meesho", "Nykaa",
@@ -30,8 +33,8 @@ nonisolated enum IndianVocabulary {
 
 // MARK: - Key terms for the recogniser
 
-/// Builds the list handed to the speech models as key terms: the household's own names first (people, lists, routines), then the
-/// bundled Indian brands and words. A long list costs a little accuracy on everything else, so it is capped.
+/// Builds the list handed to the speech models as key terms: the brand list first, then the household's own names (people,
+/// lists, routines), then the bundled Indian brands and words. A long list costs a little accuracy on everything else, so it is capped.
 nonisolated enum KeyTerms {
     static let limit = 120
     static let householdLimit = 40
@@ -46,6 +49,7 @@ nonisolated enum KeyTerms {
             out.append(term)
             return true
         }
+        for t in IndianVocabulary.brands where out.count < limit { _ = add(t) }
         var fromHousehold = 0
         for t in household where fromHousehold < householdLimit && out.count < limit {
             if add(t) { fromHousehold += 1 }

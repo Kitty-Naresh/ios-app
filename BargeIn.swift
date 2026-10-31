@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Hands-free control while Kitty is speaking.
 ///
@@ -227,9 +230,10 @@ nonisolated enum TurnAccumulator {
     private static let trivial: Set<String> = ["and", "the", "a", "an", "to", "of", "is", "i", "it", "for", "my", "in", "on", "so", "then", "also",
                                                "that", "this", "we", "you", "are", "be", "do", "ok", "okay"]
 
-    /// The turn after a new partial: `carry` holds earlier sessions, `session` the current one.
-    static func absorb(carry: String, session: String, partial: String) -> (carry: String, session: String, reset: Bool) {
-        guard !session.isEmpty, isReset(previous: session, new: partial) else { return (carry, partial, false) }
+    /// The turn after a new partial: `carry` holds earlier sessions, `session` the current one. `replacedBySettle`: the accurate model's
+    /// text replaced live words, which can differ from them in every word and is still the same speech, never a restart.
+    static func absorb(carry: String, session: String, partial: String, replacedBySettle: Bool = false) -> (carry: String, session: String, reset: Bool) {
+        guard !session.isEmpty, !replacedBySettle, isReset(previous: session, new: partial) else { return (carry, partial, false) }
         let joined = [carry, session].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: " ")
         return (joined, partial, true)
     }
@@ -256,5 +260,65 @@ nonisolated enum MicPolicy {
     static func shouldRestart(active: Bool, micWanted: Bool, userMuted: Bool, blocked: Bool, micOn: Bool,
                               isSpeaking: Bool, starting: Bool, thinking: Bool) -> Bool {
         active && micWanted && !userMuted && !blocked && !micOn && !isSpeaking && !starting && !thinking
+    }
+}
+
+// MARK: - The mic button and the line under the thread
+
+/// What a tap on the mic button does. The mic is a listening switch: once you have finished talking it never does anything
+/// else, in any state, and it never cancels work that is under way.
+nonisolated enum MicTap: Equatable {
+    case stopSpeaking       // Kitty is talking: stop her and listen
+    case processNow         // new words and the mic on: "I'm done"
+    case stopListening      // the mic on, nothing new to say (thinking, a preview, a question, words already judged)
+    case startListening     // the mic off
+
+    static func decide(micOn: Bool, isSpeaking: Bool, stage: VoiceConversation.Stage, hasNewWords: Bool) -> MicTap {
+        if isSpeaking { return .stopSpeaking }
+        guard micOn else { return .startListening }
+        if stage == .listening, hasNewWords { return .processNow }
+        return .stopListening
+    }
+}
+
+/// The one line under the thread. It always says whether the mic is listening and whether a task is still being made.
+nonisolated enum ConversationStatus {
+    /// `needsTask`: words were heard but none of them is a task yet ("create a task"). A status label, not a question.
+    static func text(stage: VoiceConversation.Stage, micOn: Bool, isSpeaking: Bool, hasWords: Bool, needsTask: Bool = false) -> String {
+        let speaking = "Kitty is speaking. Tap to stop and talk"
+        switch stage {
+        case .listening:
+            if isSpeaking { return speaking }
+            if !micOn { return "Mic is off · tap to talk" }
+            if needsTask { return "Listening for the task…" }
+            return hasWords ? "Listening… tap the mic when you're done" : "Listening…"
+        case .thinking:
+            return micOn ? "Working on it · tap the mic to stop listening" : "Working on it · mic is off"
+        case .preview:
+            return micOn ? "Tap Save or say “yes” · keep talking or tap a task to change it" : "Tap Save · tap a task to change it"
+        case .question:
+            return micOn ? "Go ahead, I'm listening" : "Mic is off · type your answer or tap the mic"
+        case .idle:
+            if isSpeaking { return speaking }
+            return micOn ? "" : "Mic is off · tap to talk"
+        }
+    }
+}
+
+
+/// When the phone may not auto-lock. Talking is not touching, so iOS would lock the screen in the middle of a sentence.
+/// The idle timer is switched off only while it is needed (the Talk screen is open, the app is in front, and the mic is on,
+/// Kitty is speaking or a model call is running) and is always switched back on, because it costs battery.
+nonisolated enum ScreenAwake {
+    static func wanted(screenOpen: Bool, appInForeground: Bool, micOn: Bool, isSpeaking: Bool, working: Bool) -> Bool {
+        guard screenOpen, appInForeground else { return false }
+        return micOn || isSpeaking || working
+    }
+
+    @MainActor static func apply(_ on: Bool) {
+        #if canImport(UIKit)
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return }     // unit tests never touch the real screen
+        UIApplication.shared.isIdleTimerDisabled = on
+        #endif
     }
 }

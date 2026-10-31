@@ -72,6 +72,13 @@ protocol TurnRecognizer: AnyObject {
     /// The microphone stays open while Kitty talks, listening only for a stop word or real speech. False if it cannot.
     /// `restartRecognition()` brings the normal listening back afterwards.
     @discardableResult func beginSpeakingListen() -> Bool
+    /// The latest change to `transcript` was the accurate model's text replacing live words (not the recogniser starting over). Only
+    /// the hybrid recogniser can say yes. A replacement may share no word with what it replaces; it is the same speech.
+    var lastChangeWasSettle: Bool { get }
+}
+
+extension TurnRecognizer {
+    var lastChangeWasSettle: Bool { false }
 }
 
 // MARK: - Where the microphone goes

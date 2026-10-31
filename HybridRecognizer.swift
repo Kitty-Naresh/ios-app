@@ -12,6 +12,7 @@ import AVFoundation
 final class HybridRecognizer: TurnRecognizer {
     private(set) var transcript = ""
     private(set) var words: [SpokenWord] = []
+    private(set) var lastChangeWasSettle = false
     var onPartial: ((String) -> Void)?
     var onFinished: ((String) -> Void)?
 
@@ -44,7 +45,7 @@ final class HybridRecognizer: TurnRecognizer {
     private var phrases: [SettledPhrase] = []
     private var origin = 0.0                      // the audio clock when Apple's current recognition began
     private var delivered = false
-    private var protectedNames: [String] = []     // the household's own names: never "repaired" into a brand
+    private var protectedNames: [String] = []     // the household's own names, handed to the recogniser as key terms
 
     /// What Apple Speech has heard in its current recognition. Replaced in tests.
     var appleWords: () -> [SpokenWord]
@@ -76,6 +77,8 @@ final class HybridRecognizer: TurnRecognizer {
         transcript = ""
         words = []
         origin = 0
+        timestampsReported = nil
+        lastMergeReport = ""
         protectedNames = vocabulary?() ?? []
         accurate.prepare(keyTerms: KeyTerms.build(household: protectedNames))     // in the background: never waited for
         openSettler()
@@ -126,6 +129,8 @@ final class HybridRecognizer: TurnRecognizer {
     private func newRecognition() {
         generationBox.bump()
         delivered = false
+        timestampsReported = nil
+        lastMergeReport = ""
         phrases = []
         transcript = ""
         words = []
@@ -166,18 +171,16 @@ final class HybridRecognizer: TurnRecognizer {
         guard g == generationBox.value else { return }
         switch event {
         case .phraseEnded(let id, let start, let end):
+            // The same stretch reported twice is one stretch: two phrases over one span would each put their text in.
+            guard !phrases.contains(where: { $0.id == id }) else { return }
             phrases.append(SettledPhrase(id: id, start: start, end: end, appleCountAtEnd: appleWords().count, text: nil))
         case .settled(let id, let text, let accurateWords, let ms):
             guard let i = phrases.firstIndex(where: { $0.id == id }) else { return }
             stats.recordLatency(ms)
-            let repaired = BrandFixer.fix(text, protectedNames: protectedNames)
-            if !repaired.changes.isEmpty {
-                Breadcrumb.log("brand fix: " + repaired.changes.map { "\($0.from) -> \($0.to)" }.joined(separator: ", "))
-            }
-            phrases[i].text = repaired.text
-            phrases[i].words = repaired.changes.isEmpty ? accurateWords : []
+            phrases[i].text = text
+            phrases[i].words = accurateWords
         }
-        recompute()
+        recompute(fromSettle: true)
     }
 
     // MARK: The transcript
@@ -189,12 +192,52 @@ final class HybridRecognizer: TurnRecognizer {
         return HybridTranscript.merge(phrases: phrases, apple: appleWords(), origin: origin)
     }
 
-    func recompute() {
+    func recompute(fromSettle: Bool = false) {
+        lastChangeWasSettle = fromSettle
         let m = merged()
+        report(m)
         words = m.words
         guard m.text != transcript else { return }
         transcript = m.text
         onPartial?(m.text)
+    }
+
+    // MARK: The trace
+
+    private var timestampsReported: Bool?          // whether the last report said Apple's words carry times
+    private var lastMergeReport = ""
+
+    /// What the merge was given and what it did, written when the console trace or "save task details" is on, and only when
+    /// something worth reading happened: Apple's words gain or lose timestamps (once per change), a late word was taken into its
+    /// phrase, the safety net removed words, or the result still says the same run twice. This is how a real device shows whether
+    /// Apple's partial words carry times and where a repeat comes from.
+    private func report(_ m: HybridTranscript.Merged) {
+        guard Trace.enabled || Trace.recording else { return }
+        let apple = appleWords()
+        let timed = apple.filter { $0.timestamp > 0 || $0.duration > 0 }.count
+        if !apple.isEmpty, timestampsReported != (timed > 0) {
+            timestampsReported = timed > 0
+            Trace.note("HEARD", "hybrid: Apple's partial words carrying a timestamp: \(timed) of \(apple.count)"
+                       + (timed == 0 ? " (the merge counts words instead)" : timed < apple.count ? " (mixed: untimed words are placed between timed ones)" : ""))
+        }
+        let repeated = HybridTranscript.repeatedRun(in: m.text)
+        guard !m.removed.isEmpty || !m.claimed.isEmpty || repeated != nil else { return }
+        var lines: [String] = []
+        if !m.claimed.isEmpty { lines.append("late Apple words taken into their phrase: " + m.claimed.map { "“\($0)”" }.joined(separator: ", ")) }
+        if !m.removed.isEmpty { lines.append("safety net removed Apple words that repeated settled text: “" + m.removed.joined(separator: " ") + "”") }
+        if let repeated { lines.append("the merged text still says “" + repeated.joined(separator: " ") + "” twice in a row") }
+        let seen = lines.joined(separator: "\n")
+        guard seen != lastMergeReport else { return }          // one line per distinct situation, not per partial
+        lastMergeReport = seen
+        let phraseLines = phrases.map { p in
+            "  phrase \(p.id) \(String(format: "%.2f", p.start))-\(String(format: "%.2f", p.end)) s, Apple had \(p.appleCountAtEnd) words, text "
+                + (p.text.map { "“\($0)”" } ?? "not settled")
+        }
+        let appleLine = apple.map { w in
+            (timed > 0 ? "\(w.text)@\(String(format: "%.2f", w.timestamp))+\(String(format: "%.2f", w.duration))" : w.text)
+        }.joined(separator: " ")
+        Trace.note("HEARD", "hybrid merge: " + lines.joined(separator: "; ") + "\n  origin \(String(format: "%.2f", origin)) s\n"
+                   + phraseLines.joined(separator: "\n") + "\n  Apple: " + appleLine + "\n  merged: " + m.text)
     }
 
     /// Apple Speech's recognition is over (you stopped it, or it ended by itself): settle what is being said, wait a few seconds at
