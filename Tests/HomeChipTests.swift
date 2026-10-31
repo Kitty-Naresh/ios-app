@@ -347,4 +347,10 @@ final class HomeChipTests: XCTestCase {
         XCTAssertEqual(SpokenText.tail(of: typed, droppingWords: 4), "five")
         XCTAssertEqual(SpokenText.tail(of: typed, droppingWords: 9), "")
     }
+
+    func testAChunkOfWordsKeepsItsBreaks() {
+        let all = SpokenText.pieces("one two\nthree four\nfive")
+        XCTAssertEqual(SpokenText.text(of: all[1..<4]), "two\nthree four")
+        XCTAssertEqual(SpokenText.text(of: all[0..<0]), "")
+    }
 }

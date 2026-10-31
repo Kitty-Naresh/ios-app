@@ -23,6 +23,7 @@
 		D2A5C000000000000000HT01 /* HybridTranscriptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C000000000000000HT01 /* HybridTranscriptTests.swift */; };
 		D2A5C00000000000000000K7 /* ListExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K7 /* ListExtractionTests.swift */; };
 		D2A5C00000000000000000K8 /* HomeChipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K8 /* HomeChipTests.swift */; };
+		D2A5C00000000000000000N2 /* NotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000N2 /* NotesTests.swift */; };
 		D2A5C00000000000000000K5 /* SplitExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000K5 /* SplitExtractionTests.swift */; };
 		C1CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */; };
 		C118D23642BEFFC5D56B72CA /* TurboSettler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C018D23642BEFFC5D56B72CA /* TurboSettler.swift */; };
@@ -41,6 +42,10 @@
 		C1E6E25D2150592B59BB8438 /* Trace.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25D2150592B59BB8438 /* Trace.swift */; };
 		C1E6E25D2150592B59BB843A /* PromptBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25D2150592B59BB843A /* PromptBudget.swift */; };
 		C1E6E25E2150592B59BB843B /* TaskSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB843B /* TaskSearch.swift */; };
+		C1A1A1A1A1A1A1A1A1A1N001 /* Notes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0A1A1A1A1A1A1A1A1A1N001 /* Notes.swift */; };
+		D2A5C00000000000000000S3 /* NoteViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S3 /* NoteViews.swift */; };
+		D2A5C00000000000000000S4 /* NoteUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S4 /* NoteUpdate.swift */; };
+		D2A5C00000000000000000S5 /* Reminders.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A5C00000000000000000S5 /* Reminders.swift */; };
 		C1E6E25E2150592B59BB84AA /* TaskTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB84AA /* TaskTools.swift */; };
 		C1E6E25E2150592B59BB8502 /* TaskFieldsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB8502 /* TaskFieldsForm.swift */; };
 		C1E6E25E2150592B59BB8501 /* TaskDetailLines.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E25E2150592B59BB8501 /* TaskDetailLines.swift */; };
@@ -89,6 +94,7 @@
 		D1A5C000000000000000HT01 /* HybridTranscriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridTranscriptTests.swift; sourceTree = "<group>"; };
 		D1A5C00000000000000000K7 /* ListExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListExtractionTests.swift; sourceTree = "<group>"; };
 		D1A5C00000000000000000K8 /* HomeChipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeChipTests.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000N2 /* NotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotesTests.swift; sourceTree = "<group>"; };
 		D1A5C00000000000000000K5 /* SplitExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitExtractionTests.swift; sourceTree = "<group>"; };
 		C0CD54C005C3D9CB6B5D3832 /* HybridRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HybridRecognizer.swift; sourceTree = "<group>"; };
 		C018D23642BEFFC5D56B72CA /* TurboSettler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurboSettler.swift; sourceTree = "<group>"; };
@@ -106,6 +112,10 @@
 		C0E6E25D2150592B59BB8438 /* Trace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trace.swift; sourceTree = "<group>"; };
 		C0E6E25D2150592B59BB843A /* PromptBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptBudget.swift; sourceTree = "<group>"; };
 		C0E6E25E2150592B59BB843B /* TaskSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSearch.swift; sourceTree = "<group>"; };
+		C0A1A1A1A1A1A1A1A1A1N001 /* Notes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notes.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S3 /* NoteViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteViews.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S4 /* NoteUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteUpdate.swift; sourceTree = "<group>"; };
+		D1A5C00000000000000000S5 /* Reminders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reminders.swift; sourceTree = "<group>"; };
 		C0E6E25E2150592B59BB84AA /* TaskTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTools.swift; sourceTree = "<group>"; };
 		C0E6E25E2150592B59BB8502 /* TaskFieldsForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskFieldsForm.swift; sourceTree = "<group>"; };
 		C0E6E25E2150592B59BB8501 /* TaskDetailLines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailLines.swift; sourceTree = "<group>"; };
@@ -189,6 +199,10 @@
 				C0E6E25D2150592B59BB8438 /* Trace.swift */,
 				C0E6E25D2150592B59BB843A /* PromptBudget.swift */,
 				C0E6E25E2150592B59BB843B /* TaskSearch.swift */,
+				C0A1A1A1A1A1A1A1A1A1N001 /* Notes.swift */,
+				D1A5C00000000000000000S3 /* NoteViews.swift */,
+				D1A5C00000000000000000S4 /* NoteUpdate.swift */,
+				D1A5C00000000000000000S5 /* Reminders.swift */,
 				C0E6E25E2150592B59BB84AA /* TaskTools.swift */,
 				C0E6E25E2150592B59BB8502 /* TaskFieldsForm.swift */,
 				C0E6E25E2150592B59BB8501 /* TaskDetailLines.swift */,
@@ -234,6 +248,7 @@
 				D1A5C000000000000000HT01 /* HybridTranscriptTests.swift */,
 				D1A5C00000000000000000K7 /* ListExtractionTests.swift */,
 				D1A5C00000000000000000K8 /* HomeChipTests.swift */,
+				D1A5C00000000000000000N2 /* NotesTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -355,6 +370,10 @@
 				C1E6E25D2150592B59BB8438 /* Trace.swift in Sources */,
 				C1E6E25D2150592B59BB843A /* PromptBudget.swift in Sources */,
 				C1E6E25E2150592B59BB843B /* TaskSearch.swift in Sources */,
+				C1A1A1A1A1A1A1A1A1A1N001 /* Notes.swift in Sources */,
+				D2A5C00000000000000000S3 /* NoteViews.swift in Sources */,
+				D2A5C00000000000000000S4 /* NoteUpdate.swift in Sources */,
+				D2A5C00000000000000000S5 /* Reminders.swift in Sources */,
 				C1E6E25E2150592B59BB84AA /* TaskTools.swift in Sources */,
 				C1E6E25E2150592B59BB8502 /* TaskFieldsForm.swift in Sources */,
 				C1E6E25E2150592B59BB8501 /* TaskDetailLines.swift in Sources */,
@@ -390,6 +409,7 @@
 				D2A5C000000000000000HT01 /* HybridTranscriptTests.swift in Sources */,
 				D2A5C00000000000000000K7 /* ListExtractionTests.swift in Sources */,
 				D2A5C00000000000000000K8 /* HomeChipTests.swift in Sources */,
+				D2A5C00000000000000000N2 /* NotesTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

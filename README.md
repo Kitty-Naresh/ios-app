@@ -829,3 +829,10 @@ Bulk delete needs a category ("delete all errands").
 Files (6, app target only): QuickTasksApp.swift, Intents.swift, TaskStore.swift, Agent.swift, SpeechRecognizer.swift, ConversationMode.swift
 Info keys required: Microphone + Speech Recognition usage descriptions (missing keys crash the app on mic tap).
 - Eval catalogue: see EVALS.md (regenerate with KITTY_EVAL_CATALOGUE=$PWD/EVALS.md and -only-testing:KittyTests/KittyEvals/testWriteEvalCatalogue).
+
+## Notes persist (milestone A1)
+
+What you write or say to Kitty in a turn that starts while no preview is waiting is saved as a note (`Notes.swift`, `notes.json` in Application Support: written atomically, protected, kept out of backups). Opening Talk to Kitty shows your saved notes above the new ones. Only notes are saved: not Kitty's replies, previews, questions, answers to her questions, or words said to change a preview. A note is saved when Kitty starts working on it and is updated if you speak on; it is final once a preview or a question opens. A question about saved tasks (a lookup reply that created nothing) leaves no note. Long-press a note and choose Delete (with a confirmation) to remove it; tasks already made from it stay. An unreadable entry is skipped; an unreadable file is moved to `notes.corrupt-<time>.json` and never overwritten. Note text is not logged by the new code.
+
+Limits: no link yet between a note and its tasks (A2), no search or date separators (A8), and questions are recognised only by the reply that came back (A6 replaces this).
+

@@ -25,6 +25,9 @@ final class VoiceConversation: ObservableObject {
         var struck: Set<Int> = []           // positions of words you took back ("um", "no wait"...): shown struck through
         var filter: PanelFilter? = nil      // show matching tasks under this reply
         var taskIDs: [UUID] = []            // tasks this reply created: shown as cards you can swipe to delete
+        var noteID: UUID? = nil             // set on your line that is a saved note: it can be deleted, and it is kept across restarts
+        var edited = false                  // the note was changed by hand: the bubble says "Edited"
+        var date = Date()                   // when it was written: the thread starts a new day with a date
     }
 
     // What the screen shows
@@ -39,6 +42,20 @@ final class VoiceConversation: ObservableObject {
     @Published private(set) var proposal: Proposal?
     @Published private(set) var question = ""
     @Published private(set) var lines: [ChatLine] = []
+    var notesStore: NotesStore = .shared
+    var kittyStore: KittyMessagesStore = .shared
+    var chatsStore: ChatsStore = .shared
+    /// The chat this conversation is in: its notes load when the screen opens, and new notes belong to it.
+    var chatID: UUID?
+    /// The note this turn became (see `NoteCapture`): saved when Kitty starts working on it, final once a preview or question opens.
+    private var note = NoteCapture()
+    /// The note of the most recent turn, kept after the turn ends: "See details" on it shows the steps of that turn.
+    private(set) var lastNoteID: UUID?
+    /// The note whose edited text Kitty is reading now: its own bubble shows "working", and no second bubble is made.
+    private var editingNoteID: UUID?
+    /// What an edit of a note would change in the tasks made from it, shown in its own sheet until it is applied or cancelled.
+    @Published private(set) var updateSession: NoteUpdateSession?
+    private var micWasOnForUpdate = false
     /// How many of the words in `turnText` are already in the chat (said before a question). The live bubble shows the rest.
     @Published private(set) var committedWords = 0
     @Published private(set) var isStale = false         // you kept talking: the preview is out of date
@@ -95,7 +112,7 @@ final class VoiceConversation: ObservableObject {
     /// The engine picked in the menu when its model is on the phone; Apple Speech otherwise, or if that engine fails to load.
     private var speech: any TurnRecognizer = VoiceConversation.makeRecognizer()
     /// Decides when speech might be a finished thought, and makes the one model call for it.
-    private let turns: VoiceTurnManager
+    private var turns: VoiceTurnManager      // replaced when the words written so far are read again as one whole
     private var pauseProfile = PauseProfile.current()   // how long this person pauses mid-sentence, learned over time
     private var lastActedRaw = ""      // the speech Kitty last acted on, so the same words are not judged twice
     private var finalTried = ""        // the words already judged as final: silence alone never sends them to the model again
@@ -126,6 +143,15 @@ final class VoiceConversation: ObservableObject {
     private var watcherTask: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
     private var restarts: [Date] = []
+    /// The preview tray is open: what is said or typed now is an instruction for the preview, never a note.
+    @Published private(set) var trayOpen = false
+    func setTray(_ open: Bool) { trayOpen = open }
+    /// The preview was changed by hand or by an instruction. From then on new words are added to it; until then they are read together
+    /// with everything written before (a heading, then its items), so the whole is read as one.
+    private var draftTouched = false
+    private var instructionLog: [String] = []     // what was said to the preview, in order: the summary after a save repeats it
+    private var resumeGroup: UUID?                 // Kitty's last question was about this group and was never answered
+    private var instruction = false     // the words being worked on are an instruction for the preview, not a note
     private var micWanted = true       // false when you typed instead: don't open the mic behind your back
     private var nudgedText = ""        // the words "Anything else?" was already said for, so it is said once per stretch of speech
     /// Quiet after a dangling last word before the nudge. Tests set it short.
@@ -208,7 +234,7 @@ final class VoiceConversation: ObservableObject {
 
     // MARK: Open and close
 
-    /// Opens the conversation. With `seed` (typed on the home screen) it starts working right away; otherwise it listens.
+    /// Opens the conversation. With `seed` (typed on the home screen) it starts working right away; it listens only when `voice` says so.
     /// With `voice` (a request from Siri) the seed runs the same way, but the mic stays wanted: the answer is spoken and Kitty listens on.
     func open(seed: String?, voice: Bool = false) {
         active = true
@@ -222,15 +248,23 @@ final class VoiceConversation: ObservableObject {
             configureSpeech()
         }
         speech.bargeIn = BargeIn.enabled        // one duplex audio setup for the whole conversation
-        lines = []
+        // Your notes, and what Kitty kept in the thread (her questions and her summaries), in the order they happened.
+        let saved = notesStore.load(chat: chatID)
+        let kept = kittyStore.load(chat: chatID)
+        lines = (saved.map { (at: $0.createdAt, line: ChatLine(role: .you, text: $0.text, noteID: $0.id, edited: $0.editedAt != nil, date: $0.createdAt)) }
+                 + kept.map { (at: $0.createdAt, line: ChatLine(role: .kitty, text: $0.text, date: $0.createdAt)) })
+            .sorted { $0.at < $1.at }.map(\.line)
+        // A question Kitty asked before the app closed, with nothing written since: the next answer is read with what it was about.
+        resumeGroup = kept.last.flatMap { q in q.kind == .question && (saved.last?.createdAt ?? .distantPast) < q.createdAt ? q.groupID : nil }
         requestRecords = []
         turns.state.reset()
         resetTurn()
         stage = .idle
         startWatcher()
         let typed = (seed ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        micWanted = typed.isEmpty || voice
+        micWanted = voice                  // a chat opens silent; the mic button, Siri and "Hey Kitty" ask it to listen
         if typed.isEmpty {
+            guard voice else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 400_000_000)   // let the screen finish appearing
                 await startMic()
@@ -394,7 +428,7 @@ final class VoiceConversation: ObservableObject {
         processingTask?.cancel()
         processingTask = nil
         let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+        if !said.isEmpty { appendYou(said) }
         lines.append(ChatLine(role: .kitty, text: "Okay, I didn't change anything."))
         if proposal != nil {
             // A preview waiting to be saved prevails: cancelling the work on a change to it leaves the preview as it was.
@@ -625,12 +659,17 @@ final class VoiceConversation: ObservableObject {
             var fresh = newPart(of: text, after: processedText)
             if fresh.isEmpty { fresh = newPart(of: turnText, after: lastActedRaw) }
             switch ConfirmationManager.interpret(fresh) {
-            case .yes: confirm(); return
-            case .cancel: discard(); return
+            case .yes where trayOpen: confirm(); return
+            case .cancel where trayOpen: discard(); return
+            case .yes, .cancel: askToOpenTray(); return
             case .no, .other: break
             }
         }
+        if trayOpen || instruction { draftTouched = true }
+        let reread = proposal != nil && !draftTouched
 
+        if proposal == nil, answerFromNotes(text) { return }
+        saveWordsAsNote(text, typed: typed)
         lastWaitKind = ""
         Breadcrumb.log("pause: working on “\(text.prefix(60))”")
         if !typed, !speech.words.isEmpty { pauseProfile = PauseProfile.record(words: speech.words) }
@@ -643,29 +682,82 @@ final class VoiceConversation: ObservableObject {
         processingTask?.cancel()
         processingTask = Task { [weak self] in
             guard let self else { return }
-            self.turns.heardWords = typed ? [] : self.speech.words      // per-word confidence, for the "Did you say…?" check
-            let result = await self.turns.decide(utterance: text, final: final || typed)
+            // New words written beside a preview nobody has changed are read together with the ones before them, from a clean start: a
+            // heading and its items become one list, not a task for the heading and one more for each item.
+            let reader = reread ? VoiceTurnManager() : self.turns
+            reader.heardWords = typed ? [] : self.speech.words      // per-word confidence, for the "Did you say…?" check
+            var result = await reader.decide(utterance: text, final: final || typed)
+            if reread { result = self.adoptReading(result, from: reader) }
             guard !Task.isCancelled else { self.adoptLatestPreview(); return }     // the draft may have changed all the same
-            if let record = self.turns.lastRecord { self.requestRecords = Array((self.requestRecords + [record]).suffix(6)) }
+            if let record = reader.lastRecord { self.requestRecords = Array((self.requestRecords + [record]).suffix(6)) }
             if self.backgroundGenerations.remove(g) != nil { await self.finishInBackground(result); return }   // the screen was closed
             guard g == self.generation else { self.adoptLatestPreview(); return }     // you spoke on: the preview still shows the latest draft
             self.finishProcessing(result, typed: typed)
         }
     }
 
+    /// A fresh reading of everything written replaces the preview only if it found tasks; anything else leaves the preview as it was.
+    private func adoptReading(_ result: TurnResult, from reader: VoiceTurnManager) -> TurnResult {
+        switch result {
+        case .proposal: turns = reader; return result
+        case .wait: return result
+        default: return .handled
+        }
+    }
+
+    /// "yes" or "cancel" said in the chat while the preview is closed: nothing is saved or thrown away unseen.
+    private func askToOpenTray() {
+        committedWords = SpokenText.pieces(turnText).count
+        lines.append(ChatLine(role: .kitty, text: "Open the tasks that are ready to review and save them."))
+        stage = .preview
+    }
+
+    /// What you sent is always kept. The words Kitty starts on become a note and a bubble at once, preview or not; the words of an
+    /// instruction (from the preview tray) are not shown or kept. Typed messages are each a note; spoken words that the model has
+    /// not judged finished stay one note that grows (see `NoteCapture`).
+    private func saveWordsAsNote(_ text: String, typed: Bool) {
+        defer { instruction = false }
+        guard !note.adopted else { return }
+        if typed { note.settle() }
+        let all = SpokenText.pieces(text)
+        let base = note.growingBase ?? committedWords
+        guard all.count > base else { return }
+        let piece = SpokenText.text(of: all[base...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        committedWords = all.count
+        if instruction || trayOpen { if !piece.isEmpty { instructionLog.append(piece) }; return }       // said to the preview: kept for the summary only
+        guard !piece.isEmpty, let saved = note.save(piece, from: base, in: notesStore, chatID: chatID) else { return }
+        lastNoteID = saved.id
+        if let chat = chatID { chatsStore.touch(chat, firstLine: piece) }
+        lines.removeAll { $0.noteID == saved.id }                   // a growing note keeps one bubble
+        var line = ChatLine(role: .you, text: piece, struck: liveRemoved)
+        line.noteID = saved.id
+        line.date = saved.createdAt
+        lines.append(line)
+    }
+
+    /// The model said "wait": the words are not a finished message. They go back into the live bubble, still saved, and the next words
+    /// join them in the same note.
+    private func takeBackGrowingBubble() {
+        guard let base = note.growingBase, let id = note.id else { return }
+        lines.removeAll { $0.noteID == id }
+        committedWords = base
+    }
+
     private func finishProcessing(_ result: TurnResult, typed: Bool = false) {
         processingTask = nil
+        if case .wait = result {} else { note.settle() }
         switch result {
         case .wait:
             Breadcrumb.log("decision: wait")
-            stage = .listening                      // the model thinks you are still speaking: say nothing, keep listening
+            takeBackGrowingBubble()
+            stage = micOn ? .listening : .idle                      // the model thinks you are still speaking: say nothing, keep listening
 
         case .handled:
             // The words were used up and there is nothing to show (a question that was shown twice, no question came back, a repeat):
             // the words go into the chat as yours and the turn starts clean, so nothing can run them again.
             Breadcrumb.log("decision: handled")
             let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+            if !said.isEmpty { appendYou(said) }
             isStale = false
             if proposal != nil {
                 stage = .preview                    // the preview is still built from those words: they stay
@@ -679,6 +771,16 @@ final class VoiceConversation: ObservableObject {
             Task { await finishTurn(you: said, reply: reply) }
 
         case .proposal(let p):
+            // An edited note that already made tasks does not get a second preview card: it gets what would change, in its own sheet.
+            if let id = editingNoteID, !createdTaskIDs(for: id).isEmpty {
+                let existing = createdTaskIDs(for: id).compactMap { tid in TaskStore.shared.tasks.first { $0.id == tid } }
+                let plan = NoteUpdate.plan(tasks: existing, drafts: turns.state.drafts.ordered)
+                turns.state.reset()
+                resetTurn()
+                if !plan.isEmpty { presentUpdate(noteID: id, plan: plan) }
+                return
+            }
+            if let id = note.id { notesStore.setReviewPending(groupOf: id, true) }      // until it is saved or discarded, the notes say "Review tasks"
             question = ""
             proposal = p
             isStale = false
@@ -702,6 +804,8 @@ final class VoiceConversation: ObservableObject {
     /// the recogniser is restarted, because it reports cumulative text: without the restart its next partial would bring them back.
     /// A preview's words are not cleared: the preview is still built from them.
     private func consumeTurnWords() {
+        note.reset()
+        editingNoteID = nil
         lastActedRaw = ""
         finalTried = ""
         nudgedText = ""
@@ -731,11 +835,11 @@ final class VoiceConversation: ObservableObject {
     /// The words Kitty has just worked on go into the chat as your line, and the live bubble starts again after them. Words spoken
     /// while Kitty was thinking are not counted: they stay in the bubble as the next line.
     private func commitWordsToChat() {
-        let all = turnText.split(whereSeparator: { $0.isWhitespace })
+        let all = SpokenText.pieces(turnText)
         let handled = min(all.count, processedText.split(whereSeparator: { $0.isWhitespace }).count)
         guard handled > committedWords else { return }
-        let said = all[committedWords..<handled].joined(separator: " ")
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+        let said = SpokenText.text(of: all[committedWords..<handled])       // line breaks you typed stay
+        if !said.isEmpty { appendYou(said) }
         committedWords = handled
     }
 
@@ -779,13 +883,13 @@ final class VoiceConversation: ObservableObject {
     func draftItem(_ id: UUID) -> DraftItem? { turns.state.drafts.item(id: id) }
     var knownPeople: [String] { turns.knownPeople() }
 
-    func saveDraftEdit(_ item: DraftItem) { adopt(turns.editDraft(item)) }
-    func deleteDraftItem(_ id: UUID) { adopt(turns.removeDraftItem(id: id)) }
+    func saveDraftEdit(_ item: DraftItem) { draftTouched = true; adopt(turns.editDraft(item)) }
+    func deleteDraftItem(_ id: UUID) { draftTouched = true; adopt(turns.removeDraftItem(id: id)) }
     /// The user said to include a flagged task: it stays, is marked, and the card is rebuilt for the new draft version.
-    func includeDraftItem(_ id: UUID) { adopt(turns.includeFlaggedItem(id: id)) }
+    func includeDraftItem(_ id: UUID) { draftTouched = true; adopt(turns.includeFlaggedItem(id: id)) }
     /// What was said for the draft that waits, as heard. Shown beside the model's quote.
     var draftSpokenText: String { turns.state.drafts.spokenText }
-    func addDraftItem(_ item: DraftItem) { adopt(turns.addDraftItem(item)) }
+    func addDraftItem(_ item: DraftItem) { draftTouched = true; adopt(turns.addDraftItem(item)) }
 
     /// The preview after a change by hand; with nothing left in it, the draft is thrown away.
     private func adopt(_ p: Proposal?) {
@@ -845,24 +949,37 @@ final class VoiceConversation: ObservableObject {
 
     /// Throw the preview away and start over.
     func discard() {
+        if let id = note.id { notesStore.setReviewPending(groupOf: id, false) }       // the words stay; only the proposed tasks go
         requestRecords = []
         processingTask?.cancel()
         generation += 1
         let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+        if !said.isEmpty { appendYou(said) }
         lines.append(ChatLine(role: .kitty, text: "Okay, I didn't change anything."))
         resetTurn()
         Task { await resumeListening() }
     }
 
     /// Type instead of speaking: counts as part of the same turn and starts working right away.
-    func submitTyped(_ text: String) {
+    /// `asNote` false is an instruction about the preview ("remove the milk", from the tray): it is worked on but never kept as a note.
+    func submitTyped(_ text: String, asNote: Bool = true) {
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty else { return }
+        if proposal != nil, !trayOpen, asNote, [.yes, .cancel].contains(ConfirmationManager.interpret(typed)) { askToOpenTray(); return }
+        instruction = !asNote
+        if asNote, proposal == nil, turnText.isEmpty, let gid = resumeGroup {
+            let before = notesStore.text(ofGroup: gid)
+            if !before.isEmpty {
+                turnText = before
+                committedWords = SpokenText.pieces(before).count
+                note.continueGroup(gid)
+            }
+        }
+        resumeGroup = nil
         stopSpeaking()
         let wasListening = micOn
         interrupt()
-        carry = join(turnText, typed)
+        carry = [turnText, typed].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: "\n")      // each message on its own line
         sessionText = ""
         turnText = carry
         if wasListening { Task { await startMic() } }
@@ -883,10 +1000,25 @@ final class VoiceConversation: ObservableObject {
         keepDetails(for: reply)
         // The screen was closed while this saved: say what happened on the home screen. Never speak or listen from nowhere.
         guard active else { LaunchRouter.shared.post(reply.message); return }
+        // A question about saved tasks is not a note: nothing was written down.
+        note.dropIfQuestion(created: !reply.created.isEmpty || reply.didAdd, answeredFromTasks: reply.spec != nil, in: notesStore)
+        // The tasks made now belong to the note that opened this preview: it shows "N tasks created" and can open them.
+        // Tasks made from this chat belong to it, even when nothing was written in this turn (a task asked for in the tray): with no note of
+        // its own they are remembered on the chat's newest note, so the chat's task views and chips include them.
+        if !reply.created.isEmpty, let id = note.id ?? chatID.flatMap({ notesStore.latest(in: $0)?.id }) {
+            notesStore.attach(groupOf: id, taskIDs: reply.created)
+            notesStore.setReviewPending(groupOf: id, false)
+        }
         let said = you.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
-        lines.append(ChatLine(role: .kitty, text: reply.message, filter: reply.spec.map { PanelFilter(spec: $0) },
-                              taskIDs: reply.created + reply.shown.filter { !reply.created.contains($0) }))
+        if !said.isEmpty { appendYou(said) }
+        if let summary = savedSummary(for: reply) {
+            // A save is told once, in a few plain words, and kept: it shows what was written, what was asked, and what came of it.
+            lines.append(ChatLine(role: .kitty, text: summary))
+            kittyStore.add(summary, kind: .summary, chatID: chatID, groupID: note.groupID)
+        } else {
+            lines.append(ChatLine(role: .kitty, text: reply.message, filter: reply.spec.map { PanelFilter(spec: $0) },
+                                  taskIDs: reply.created + reply.shown.filter { !reply.created.contains($0) }))
+        }
         let made = reply.created.compactMap { id in TaskStore.shared.tasks.first { $0.id == id } }.map { (title: $0.title, id: $0.id) }
         turns.state.noteCreated(made)
         resetTurn()
@@ -897,7 +1029,32 @@ final class VoiceConversation: ObservableObject {
         }
     }
 
+    /// "From what you wrote, I made 4 tasks on your Shopping list: diapers, wipes, lotion and 1 more. You also said: “remove the milk”."
+    /// Written here from what was really saved and what the user really said, never by the model. Nil when nothing was made or changed.
+    private func savedSummary(for reply: AgentReply) -> String? {
+        let tasks = reply.created.compactMap { id in TaskStore.shared.tasks.first { $0.id == id } }
+        let said = instructionLog.prefix(3).map { "“" + ($0.count > 40 ? String($0.prefix(40)) + "…" : $0) + "”" }.joined(separator: ", ")
+        if tasks.isEmpty {
+            guard reply.didChange, !said.isEmpty else { return nil }
+            return "From what you said (\(said)), I updated your tasks."
+        }
+        let n = tasks.count
+        var text = "From what you wrote, I made \(n) \(n == 1 ? "task" : "tasks")"
+        let listIDs = Set(tasks.compactMap(\.profileID))
+        if listIDs.count == 1, tasks.allSatisfy({ $0.profileID != nil }),
+           let list = TaskStore.shared.profiles.first(where: { $0.id == listIDs.first })?.name { text += " on your \(list) list" }
+        text += ": " + tasks.prefix(4).map(\.title).joined(separator: ", ")
+        if n > 4 { text += " and \(n - 4) more" }
+        text += "."
+        if !said.isEmpty { text += " You also said: \(said)." }
+        return text
+    }
+
     private func resetTurn() {
+        note.reset()
+        draftTouched = false
+        instructionLog = []
+        editingNoteID = nil
         lastWaitKind = ""
         finalTried = ""
         turns.state.clearPending()
@@ -1009,12 +1166,160 @@ final class VoiceConversation: ObservableObject {
     /// Kitty asks a question: what you said so far and the question both go into the chat, so the whole exchange stays visible.
     private func showQuestion(_ q: String) {
         let said = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty { lines.append(ChatLine(role: .you, text: said, struck: liveRemoved)) }
+        if !said.isEmpty { appendYou(said) }
         lines.append(ChatLine(role: .kitty, text: q))
+        kittyStore.add(q, kind: .question, chatID: chatID, groupID: note.groupID)
         committedWords = turnText.split(whereSeparator: { $0.isWhitespace }).count
         question = q
         stage = .question
     }
+
+    /// Your words go into the chat. The first line of a turn that became a note carries the note's id, so it can be deleted.
+    private func appendYou(_ text: String) {
+        lines.append(ChatLine(role: .you, text: text, struck: liveRemoved))
+    }
+
+    /// Whether this line is a saved note that may be deleted now (not the note Kitty is still working on).
+    func canDelete(_ line: ChatLine) -> Bool {
+        guard let id = line.noteID else { return false }
+        return !isBeingWorkedOn(id)
+    }
+
+    /// Whether this note is part of what Kitty is working on or showing a preview for.
+    private func isBeingWorkedOn(_ id: UUID) -> Bool {
+        guard stage == .thinking || proposal != nil else { return false }
+        if id == note.id { return true }
+        guard let gid = note.groupID else { return false }
+        return notesStore.note(id)?.groupID == gid
+    }
+
+    func deleteNote(_ id: UUID) {
+        guard !isBeingWorkedOn(id) else { return }
+        notesStore.delete(id: id)
+        lines.removeAll { $0.noteID == id }
+    }
+
+    // MARK: What a note shows
+
+    /// The note being worked on right now, if any.
+    var currentNoteID: UUID? { note.id }
+
+    /// The tasks made from this note that still exist.
+    func createdTaskIDs(for noteID: UUID) -> [UUID] {
+        let ids = notesStore.group(of: noteID).flatMap(\.taskIDs)
+        guard !ids.isEmpty else { return [] }                                                       // most notes made no tasks: nothing to look up
+        let alive = Set(TaskStore.shared.tasks.map(\.id))
+        var seen = Set<UUID>()
+        return ids.filter { alive.contains($0) && seen.insert($0).inserted }
+    }
+
+    func createdCount(for noteID: UUID) -> Int { createdTaskIDs(for: noteID).count }
+
+    /// Every task still saved that was made from the notes of this chat.
+    var chatTaskIDs: Set<UUID> {
+        let ids = notesStore.load(chat: chatID).flatMap(\.taskIDs)
+        guard !ids.isEmpty else { return [] }
+        let alive = Set(TaskStore.shared.tasks.map(\.id))
+        return Set(ids.filter { alive.contains($0) })
+    }
+
+    /// A task made from this note that has details kept (the "Save task details" switch was on), for "See details".
+    func taskWithDetails(for noteID: UUID) -> TaskItem? {
+        createdTaskIDs(for: noteID).lazy.compactMap { id in TaskStore.shared.tasks.first { $0.id == id } }
+            .first { TaskDetailsStore.shared.has($0.id) }
+    }
+
+    /// The status of a note that is already in the chat.
+    func status(of line: ChatLine) -> NoteStatus? {
+        guard let id = line.noteID else { return nil }
+        let group = notesStore.group(of: id)
+        guard group.last?.id == id else { return nil }                         // one status for what was written together: on its last bubble
+        let inTurn = isInCurrentTurn(id)
+        return NoteStatus.of(working: stage == .thinking && (inTurn || id == editingNoteID), previewForThisNote: proposal != nil && inTurn,
+                             reviewPending: group.contains(where: \.reviewPending), createdCount: createdCount(for: id))
+    }
+
+    private func isInCurrentTurn(_ id: UUID) -> Bool {
+        if id == note.id { return true }
+        guard let gid = note.groupID else { return false }
+        return notesStore.note(id)?.groupID == gid
+    }
+
+    /// Whether a note can be edited now: not while Kitty works or a preview or question is open, so two things never compete.
+    var canEditNotes: Bool { proposal == nil && stage != .thinking && stage != .preview && stage != .question }
+
+    /// The user edited a note. The same note and bubble change in place (never a second one), and the new words go through Kitty
+    /// like a fresh note: a preview comes again if there are tasks in them.
+    func editNote(_ id: UUID, to text: String) {
+        let new = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canEditNotes, !new.isEmpty, notesStore.updateText(id: id, text: new) else { return }
+        if let i = lines.firstIndex(where: { $0.noteID == id }) { lines[i].text = new; lines[i].edited = true }
+        readNote(id, text: notesStore.groupText(of: id))
+    }
+
+    /// A question about your notes ("what did I write about the baby?") is answered here from your notes, on the phone. The question is
+    /// in the chat for now, but it is not a note and is not kept; neither is the answer. Returns whether it was one.
+    private func answerFromNotes(_ text: String) -> Bool {
+        guard NoteSearch.looksLikeNotesQuestion(text) else { return false }
+        let found = NoteSearch.matches(query: text, in: notesStore.load())
+        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        lines.append(ChatLine(role: .you, text: said, struck: liveRemoved))
+        lines.append(ChatLine(role: .kitty, text: NoteSearch.answer(for: found)))
+        consumeTurnWords()
+        stage = micOn ? .listening : .idle
+        return true
+    }
+
+    /// "Review tasks": Kitty reads a note again, as it is, and the preview comes back.
+    func reviewNote(_ id: UUID) {
+        guard canEditNotes, notesStore.note(id) != nil else { return }
+        readNote(id, text: notesStore.groupText(of: id))              // everything written together is read again
+    }
+
+    /// The words of a note go through Kitty like a fresh note that is that same note: it keeps its bubble, and its own bubble shows the work.
+    private func readNote(_ id: UUID, text: String) {
+        stopSpeaking()
+        interrupt()
+        resetTurn()
+        turns.state.reset()
+        if let saved = notesStore.note(id) { note.adopt(saved) }
+        lastNoteID = id
+        editingNoteID = id
+        carry = text
+        sessionText = ""
+        turnText = text
+        committedWords = text.split(whereSeparator: { $0.isWhitespace }).count      // the words are already in the chat: no live bubble
+        beginProcessing(text: text, typed: true)
+    }
+
+    private func presentUpdate(noteID: UUID, plan: NoteUpdatePlan) {
+        stopSpeaking()
+        micWasOnForUpdate = micOn
+        pauseListening()                    // nothing said while the sheet is open changes anything
+        updateSession = NoteUpdateSession(noteID: noteID, plan: plan)
+    }
+
+    /// Does what was ticked, and remembers the new tasks on the note.
+    func applyUpdate(_ choice: NoteUpdateChoice) {
+        guard let session = updateSession else { return }
+        let result = NoteUpdate.apply(session.plan, choice: choice, store: TaskStore.shared)
+        notesStore.attach(id: session.noteID, taskIDs: result.added)
+        closeUpdate()
+    }
+
+    func dismissUpdate() { closeUpdate() }
+
+    private func closeUpdate() {
+        updateSession = nil
+        guard micWasOnForUpdate, active else { return }
+        micWasOnForUpdate = false
+        micWanted = true
+        userMuted = false
+        Task { await startMic() }
+    }
+
+    /// The status of the words still being worked on (the bubble at the bottom): only "working", while Kitty is thinking.
+    var liveStatus: NoteStatus? { stage == .thinking ? .working : nil }
 
     private func join(_ a: String, _ b: String) -> String {
         [a, b].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: " ")
@@ -1470,6 +1775,19 @@ struct ConversationView: View {
     /// The thread follows new content only while the user is not scrolling it and is at (or near) the bottom.
     @State private var touching = false
     @State private var nearBottom = true
+    @State private var noteToDelete: VoiceConversation.ChatLine?     // asks "Delete this note?" before anything is removed
+    @State private var noteSheet: NoteSheet?                          // details or tasks of a note
+    @State private var stopAsk = false                                // asks "Stop?" when the working indicator is tapped
+    @State private var previewJump = 0                                // a tap on "Tasks ready" scrolls to the preview
+    @State private var noteEditTarget: NoteEditTarget?                // the note open in the editor
+    @State private var previewOpen = false                            // the full preview, opened from the one-line bar
+    @State private var savedTrayID: UUID?                             // the tray shows the tasks saved from this note, with the same box to change them
+    @ObservedObject private var taskStore = TaskStore.shared
+    @State private var tasksTray = false                              // the tray shows this chat's tasks, narrowed by the chip that was tapped
+    @State private var trayFilter = ChatTaskFilter.open
+    @State private var trayDetent = PresentationDetent.medium
+    @State private var trayTyped = ""
+    @State private var trayFocused = false
 
     var body: some View {
         ZStack {
@@ -1488,14 +1806,17 @@ struct ConversationView: View {
         .onDisappear { convo.close() }
         .onChange(of: scenePhase) { _, phase in convo.appForegroundChanged(phase == .active) }
         .sheet(item: $sheet) { item in TasksView(filter: item.filter) }
-        .sheet(item: $editTarget, onDismiss: { convo.endManualEdit() }) { target in
+        .sheet(isPresented: $previewOpen) { previewSheet }
+        .onChange(of: previewOpen) { _, open in convo.setTray(open); if !open { savedTrayID = nil; tasksTray = false } }
+        .sheet(item: $editTarget, onDismiss: { convo.endManualEdit(); if convo.proposal != nil { previewOpen = true } }) { target in
             DraftEditSheet(convo: convo, target: target)
         }
     }
 
     private func openEditor(_ target: DraftEditTarget) {
         convo.beginManualEdit()
-        editTarget = target
+        previewOpen = false                      // one sheet at a time: the preview comes back when the editor closes
+        Task { try? await Task.sleep(nanoseconds: 450_000_000); editTarget = target }
     }
 
     // MARK: Top bar
@@ -1540,16 +1861,14 @@ struct ConversationView: View {
     private var thread: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 14) {
                     if convo.lines.isEmpty && convo.turnText.isEmpty && convo.stage != .thinking { welcome }
-                    ForEach(convo.lines) { line in lineView(line) }
+                    ForEach(Array(convo.lines.enumerated()), id: \.element.id) { index, line in
+                        if index == 0 || !Calendar.current.isDate(line.date, inSameDayAs: convo.lines[index - 1].date) { DaySeparator(date: line.date) }
+                        lineView(line)
+                    }
                     if !convo.liveText.isEmpty { youBubble }
                     responseArea
-                    if convo.liveView { LiveModelPanel(feed: LiveFeed.shared, working: convo.stage == .thinking) }
-                    else if convo.stage == .thinking || TurnCapture.shared.callCount > 0 {
-                        // The live view is off: the trace of this turn can still be shared, while Kitty thinks and after.
-                        HStack { Spacer(); TraceShareButton(titled: true) }
-                    }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -1563,6 +1882,34 @@ struct ConversationView: View {
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 80
             } action: { _, near in nearBottom = near }
+            .task {
+                // Saved notes load as the screen opens: start at the newest, without animating through them.
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                scrollDown(proxy, animated: false)
+            }
+            .confirmationDialog("Delete this note?", isPresented: Binding(get: { noteToDelete != nil },
+                                                                           set: { if !$0 { noteToDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete note", role: .destructive) {
+                    if let id = noteToDelete?.noteID { convo.deleteNote(id) }
+                    noteToDelete = nil
+                }
+                Button("Cancel", role: .cancel) { noteToDelete = nil }
+            } message: {
+                Text("Tasks already made from it stay.")
+            }
+            .confirmationDialog("Stop working on this?", isPresented: $stopAsk, titleVisibility: .visible) {
+                Button("Stop", role: .destructive) { convo.cancelWork() }
+                Button("Keep going", role: .cancel) {}
+            }
+            .sheet(item: $noteSheet) { noteSheetView($0) }
+            .sheet(item: Binding(get: { convo.updateSession }, set: { if $0 == nil { convo.dismissUpdate() } })) { session in
+                NoteUpdateSheet(plan: session.plan, onApply: { convo.applyUpdate($0) }, onCancel: { convo.dismissUpdate() })
+            }
+            .fullScreenCover(item: $noteEditTarget) { target in
+                NoteEditorView(original: target.text) { convo.editNote(target.id, to: $0) }
+            }
+            .onChange(of: previewJump) { _, _ in withAnimation { proxy.scrollTo("preview", anchor: .top) } }
             .onChange(of: convo.turnText) { _, _ in follow(.words, proxy) }
             .onChange(of: convo.lines.count) { _, _ in follow(.line, proxy) }
             .onChange(of: convo.stage) { _, _ in follow(.line, proxy) }
@@ -1612,20 +1959,78 @@ struct ConversationView: View {
         return out
     }
 
-    private func youBubbleView(_ text: String, struck: Set<Int> = [], live: Bool) -> some View {
+    /// Your words as a bubble. What Kitty is doing with them is one small thing in the bottom-right corner, like the ticks in a chat.
+    private func youBubbleView(_ text: String, struck: Set<Int> = [], live: Bool, edited: Bool = false,
+                               status: NoteStatus? = nil, onStatus: (() -> Void)? = nil, lineLimit: Int? = nil, onMore: (() -> Void)? = nil) -> some View {
         HStack {
             Spacer(minLength: 48)
-            (Text(spoken(text, struck: struck)) + Text(live ? " …" : "").foregroundStyle(.secondary))
-                .font(.body)
-                .multilineTextAlignment(.leading)
-                .padding(12)
-                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            VStack(alignment: .trailing, spacing: 4) {
+                (Text(spoken(text, struck: struck)) + Text(live ? " …" : "").foregroundStyle(.secondary))
+                    .font(.body)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(lineLimit)
+                if lineLimit != nil, let onMore {
+                    Button("Read more", action: onMore).font(.footnote.weight(.semibold)).buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                }
+                if edited || status != nil {
+                    HStack(spacing: 8) {
+                        if edited { Text("Edited").font(.caption2).foregroundStyle(.secondary) }
+                        if let status { NoteStatusChip(status: status, onTap: onStatus) }
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
     }
 
     private var youBubble: some View {
         VStack(alignment: .trailing, spacing: 6) {
-            youBubbleView(convo.liveText, struck: convo.liveRemoved, live: convo.stage == .listening)
+            youBubbleView(convo.liveText, struck: convo.liveRemoved, live: convo.stage == .listening,
+                          status: convo.liveStatus, onStatus: convo.canCancelWork ? { stopAsk = true } : nil)
+                .contextMenu {
+                    Button("See details", systemImage: "doc.text.magnifyingglass") { noteSheet = .details(nil) }
+                    if convo.canCancelWork { Button("Stop", systemImage: "stop.circle", role: .destructive) { convo.cancelWork() } }
+                }
+        }
+    }
+
+    /// What a tap on a note's status does: "Tasks ready" goes to the preview, "N tasks created" opens them.
+    private func noteChipAction(_ line: VoiceConversation.ChatLine) -> (() -> Void)? {
+        guard let status = convo.status(of: line) else { return nil }
+        switch status {
+        case .ready: return { previewOpen = true }
+        case .created: return { if let id = line.noteID { savedTrayID = id; trayDetent = .large; previewOpen = true } }
+        case .review: return convo.canEditNotes ? { if let id = line.noteID { convo.reviewNote(id) } } : nil
+        case .working: return convo.canCancelWork ? { stopAsk = true } : nil
+        }
+    }
+
+    @ViewBuilder
+    private func noteMenu(_ line: VoiceConversation.ChatLine) -> some View {
+        Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = line.text }
+        if let id = line.noteID {
+            Button("Edit", systemImage: "pencil") { noteEditTarget = NoteEditTarget(id: id, text: line.text) }
+                .disabled(!convo.canEditNotes)
+            Button("See details", systemImage: "doc.text.magnifyingglass") { noteSheet = .details(id) }
+            if convo.createdCount(for: id) > 0 { Button("View tasks", systemImage: "checklist") { savedTrayID = id; trayDetent = .large; previewOpen = true } }
+        }
+        if convo.canDelete(line) {
+            Button("Delete", systemImage: "trash", role: .destructive) { noteToDelete = line }
+        }
+    }
+
+    @ViewBuilder
+    private func noteSheetView(_ sheet: NoteSheet) -> some View {
+        switch sheet {
+        case .details(let id):
+            NoteDetailsSheet(task: id.flatMap { convo.taskWithDetails(for: $0) },
+                             showLive: (id == nil || id == convo.lastNoteID) && !LiveFeed.shared.steps.isEmpty,
+                             working: convo.stage == .thinking)
+        case .tasks(let id):
+            NoteTasksSheet(ids: convo.createdTaskIDs(for: id))
+        case .read(let id):
+            NoteReadSheet(text: NotesStore.shared.note(id)?.text ?? "")
         }
     }
 
@@ -1633,7 +2038,18 @@ struct ConversationView: View {
     private func lineView(_ line: VoiceConversation.ChatLine) -> some View {
         switch line.role {
         case .you:
-            youBubbleView(line.text, struck: line.struck, live: false)
+            youBubbleView(line.text, struck: line.struck, live: false, edited: line.edited, status: convo.status(of: line), onStatus: noteChipAction(line),
+                          lineLimit: line.noteID != nil && line.text.count > 600 ? 10 : nil,
+                          onMore: line.noteID.map { id in { noteSheet = .read(id) } })
+                .contextMenu { noteMenu(line) }
+                .accessibilityActions {
+                    if let id = line.noteID {
+                        if convo.canEditNotes { Button("Edit note") { noteEditTarget = NoteEditTarget(id: id, text: line.text) } }
+                        Button("See details") { noteSheet = .details(id) }
+                        if convo.createdCount(for: id) > 0 { Button("View tasks") { noteSheet = .tasks(id) } }
+                    }
+                    if convo.canDelete(line) { Button("Delete note") { noteToDelete = line } }
+                }
         case .kitty:
             VStack(alignment: .leading, spacing: 10) {
                 // The list comes first. The words follow, and the rest of them opens on tap.
@@ -1667,15 +2083,14 @@ struct ConversationView: View {
         switch convo.stage {
         case .thinking:
             // The preview stays on screen (dimmed) while the model works: it is never swapped for a spinner.
-            if let p = convo.proposal { proposalCard(p, dimmed: true) }
-            thinkingCard
+            if let p = convo.proposal { previewBar(p, dimmed: true).id("preview") }
         case .preview:
-            if let p = convo.proposal { proposalCard(p, dimmed: false) }
+            if let p = convo.proposal { previewBar(p, dimmed: false).id("preview") }
         case .question:
             questionCard
         case .listening, .idle:
             if let p = convo.proposal {
-                proposalCard(p, dimmed: convo.isStale)
+                previewBar(p, dimmed: convo.isStale).id("preview")
             } else if !convo.question.isEmpty {
                 questionCard
             } else if let error = convo.errorMessage {
@@ -1695,32 +2110,6 @@ struct ConversationView: View {
                     .padding(.horizontal, 4)
             }
         }
-    }
-
-    private var thinkingCard: some View {
-        let words = convo.liveText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return HStack(spacing: 10) {
-            ProgressView()
-            VStack(alignment: .leading, spacing: 2) {
-                Text(words.isEmpty ? "Working on it…" : "Working on “\(words)”")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                if !convo.micOn {
-                    Text("Mic is off. It still gets done.").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            if convo.canCancelWork {
-                Button("Cancel") { convo.cancelWork() }
-                    .font(.callout.weight(.semibold))
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .tint(.secondary)
-            }
-        }
-        .padding(14)
-        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     /// The question itself is in the chat above, so this is only a quiet hint.
@@ -1826,6 +2215,147 @@ struct ConversationView: View {
         }
     }
 
+    /// What the thread shows of a preview: one quiet line. The full card opens in a sheet when you tap it.
+    private func previewBar(_ p: Proposal, dimmed: Bool) -> some View {
+        let rows = p.sections.isEmpty ? p.rows : p.sections.flatMap(\.rows)
+        let drafts = rows.filter { $0.draftID != nil }.count
+        let needsYou = p.destructive || p.recovery != nil || p.flagQuestionItemID != nil
+        let headline = dimmed ? "Updating…"
+            : drafts > 0 && !needsYou ? "\(drafts) \(drafts == 1 ? "task" : "tasks") ready to review"
+            : p.title
+        let tint: Color = p.destructive ? .red : (p.recovery != nil || p.flagQuestionItemID != nil ? .orange : .accentColor)
+        return Button { trayDetent = .medium; previewOpen = true } label: {
+            HStack(spacing: 10) {
+                if dimmed { ProgressView().controlSize(.small) }
+                else { Image(systemName: needsYou ? "exclamationmark.circle.fill" : "checklist").foregroundStyle(tint) }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(headline).font(.subheadline.weight(.semibold)).foregroundStyle(Color.primary).lineLimit(1)
+                    if !dimmed {
+                        Text(rows.prefix(3).map(\.title).joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                Text("Review").font(.footnote.weight(.semibold)).foregroundStyle(tint)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: .black.opacity(0.05), radius: 5, y: 1)
+            .opacity(dimmed ? 0.7 : 1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the tasks Kitty found so you can save them")
+    }
+
+    /// The full preview, in a tray. Everything about these tasks happens here: look, change by hand, say or type a change, save. What is
+    /// said or typed in the tray is an instruction for the preview and never appears in the chat. It closes by itself on save or discard.
+    private var previewSheet: some View {
+        NavigationStack {
+            Group {
+                if let p = convo.proposal {
+                    ScrollView { proposalCard(p, dimmed: convo.isStale || convo.stage == .thinking).padding(16) }
+                } else if tasksTray || savedTrayID != nil {
+                    trayTaskList
+                }
+            }
+            .background(Color.screenBackground)
+            .navigationTitle(convo.proposal != nil ? "Your tasks" : "Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { previewOpen = false } } }
+            .safeAreaInset(edge: .bottom) { trayInput }
+        }
+        .presentationDetents([.medium, .large], selection: $trayDetent)
+        .presentationDragIndicator(.visible)
+        .onChange(of: convo.proposal == nil) { _, gone in if gone && savedTrayID == nil && !tasksTray { previewOpen = false } }     // a task view stays after a change
+    }
+
+    /// The tray's own box and mic: a change to the tasks, in words.
+    private var trayInput: some View {
+        if convo.proposal == nil { return AnyView(compactTrayInput) }
+        return AnyView(previewTrayInput)
+    }
+
+    /// With only tasks on screen the box is one slim line and the mic a small button, so the tasks keep the room.
+    private var compactTrayInput: some View {
+        HStack(spacing: 10) {
+            TypedInputBox(placeholder: "Change these tasks…", text: $trayTyped, isFocused: $trayFocused, maxLines: 3) { sendTrayInstruction() }
+            Button { convo.micTapped() } label: {
+                Image(systemName: convo.micOn ? "mic.fill" : "mic.slash.fill")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(convo.micOn ? Color.accentColor : Color.gray.opacity(0.55), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(convo.micOn ? "Microphone on. Tap to stop listening" : "Microphone off. Tap to listen")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
+
+    private var previewTrayInput: some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            TypedInputBox(placeholder: convo.proposal == nil ? "Change these tasks, e.g. make it two litres" : "Change something, e.g. remove the milk", text: $trayTyped, isFocused: $trayFocused) { sendTrayInstruction() }
+            MicButton(on: convo.micOn, busy: convo.stage == .thinking, speaking: convo.isSpeaking) { convo.micTapped() }
+                .alignmentGuide(.bottom) { $0.height / 2 + oneLineBoxHeight / 2 }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .background(.bar)
+    }
+
+    /// This chat's tasks, saved and still there.
+    private var chatTasks: [TaskItem] {
+        let ids = convo.chatTaskIDs
+        return ids.isEmpty ? [] : taskStore.tasks.filter { ids.contains($0.id) }
+    }
+
+    /// The chips above the chat's box: only this chat's tasks, and only the views that have tasks in them. Nothing when it has none.
+    private var peekChips: [PeekChip] {
+        let kinds = ChatTaskFilter.available(in: chatTasks)
+        return kinds.filter { $0.filter != .all }.map { kind in
+            PeekChip(id: kind.filter.id, title: kind.filter.title, icon: Self.peekIcon(kind.filter), count: kind.count, late: kind.filter == .overdue)
+        }
+    }
+
+    private static func peekIcon(_ filter: ChatTaskFilter) -> String? {
+        switch filter {
+        case .today: return "sun.max.fill"
+        case .overdue: return "exclamationmark.triangle.fill"
+        case .done: return "checkmark.circle.fill"
+        case .open: return "circle"
+        case .all: return nil
+        }
+    }
+
+    /// A tap on a chip opens the tray on that view; the grip (or a swipe up) opens it on the open tasks.
+    private func openPeek(_ chipID: String?) {
+        let open = chatTasks
+        guard !open.isEmpty else { return }
+        savedTrayID = nil
+        trayFilter = chipID.flatMap { ChatTaskFilter(rawValue: $0) } ?? (ChatTaskFilter.open.matchesAny(in: open) ? .open : .all)
+        tasksTray = true
+        trayDetent = .large
+        previewOpen = true
+    }
+
+    /// The tray's tasks and nothing else, the same list the home screen uses, narrowed to this chat.
+    private var trayTaskList: some View {
+        let saved = savedTrayID.map { Set(convo.createdTaskIDs(for: $0)) } ?? []
+        let tasks = tasksTray ? chatTasks : taskStore.tasks.filter { saved.contains($0.id) }
+        return TaskTrayList(tasks: tasks, lists: taskStore.profiles, filter: tasksTray ? $trayFilter : .constant(.all))
+    }
+
+    private func sendTrayInstruction() {
+        let text = trayTyped.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        trayTyped = ""
+        convo.submitTyped(text, asNote: false)
+    }
+
     private func proposalCard(_ p: Proposal, dimmed: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
@@ -1866,7 +2396,7 @@ struct ConversationView: View {
                 DisclosureGroup("Skipped (\(p.skipped.count))") {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(p.skipped, id: \.self) { text in
-                            Button { convo.submitTyped("also add \(text)") } label: {
+                            Button { convo.submitTyped("also add \(text)", asNote: false) } label: {
                                 Label(text.prefix(1).uppercased() + text.dropFirst(), systemImage: "plus.circle")
                                     .font(.footnote)
                                     .multilineTextAlignment(.leading)
@@ -1913,7 +2443,7 @@ struct ConversationView: View {
             // The last words could not be applied: the list above is as it was. Try the same words again, or fix an item by hand.
             if let r = p.recovery, !dimmed {
                 FlowLayout(spacing: 8) {
-                    Button { convo.submitTyped(r.retryWords) } label: {
+                    Button { convo.submitTyped(r.retryWords, asNote: false) } label: {
                         Label("Try again", systemImage: "arrow.clockwise").font(.footnote.weight(.semibold)).lineLimit(1)
                     }
                     .buttonStyle(.bordered)
@@ -1986,6 +2516,10 @@ struct ConversationView: View {
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
                 .frame(minHeight: 16)
+            if !peekChips.isEmpty {
+                TaskPeekBar(chips: peekChips) { openPeek($0) }
+                    .padding(.horizontal, -16)          // the bar runs edge to edge; its first chip lines up with the box
+            }
             HStack(alignment: .bottom, spacing: 12) {
                 // The same box as the home screen (`TypedInputBox`).
                 TypedInputBox(placeholder: "Type a message", text: $typed, isFocused: $typedFocused) { sendTyped() }
@@ -2099,13 +2633,18 @@ struct ResultsBlock: View {
 
 /// The full task list with filters (collapsed until you ask for them).
 struct TasksView: View {
-    @State var filter: PanelFilter
+    let filter: PanelFilter
+    @ObservedObject private var store = TaskStore.shared
     @Environment(\.dismiss) private var dismiss
+    @State private var view = ChatTaskFilter.all
+
+    init(filter: PanelFilter) { self.filter = filter }
 
     var body: some View {
+        // The tasks a question or a view asked for, in the same slim list as everywhere else.
+        let data = store.panel(filter)
         NavigationStack {
-            TaskPanel(filter: $filter)
-                .padding(.horizontal, 16)
+            TaskTrayList(tasks: data.overdue + data.due, lists: store.profiles, filter: $view)
                 .background(Color.screenBackground.ignoresSafeArea())
                 .navigationTitle("Tasks")
                 .inlineNavTitle()
@@ -4131,6 +4670,11 @@ enum SpokenText {
         }
         flush()
         return out
+    }
+
+    /// The words of a run of pieces as written; the gap in front of the first one is dropped.
+    static func text(of run: ArraySlice<Piece>) -> String {
+        run.enumerated().map { $0.offset == 0 ? $0.element.word : $0.element.separator + $0.element.word }.joined()
     }
 
     /// Everything after the first `n` words, as written (line breaks kept), without the gap in front of the first word kept.

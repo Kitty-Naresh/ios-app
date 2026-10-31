@@ -57,6 +57,7 @@ enum TaskExtractionInstructions {
         if FlatExperiments.separateTargets { parts.append(FlatExperiments.separateTargetsText) }
         if FlatExperiments.scopeLine { parts.append(FlatExperiments.scopeText) }
         if FlatExperiments.draftLine { parts.append(FlatExperiments.draftText) }
+        if FlatExperiments.actionsOnly { parts.append(FlatExperiments.actionsOnlyText) }
         return parts.joined(separator: "\n\n")
     }
 
@@ -82,6 +83,11 @@ enum TaskExtractionInstructions {
     Use listName only when the user says the tasks go on, in or to a list,
     order or cart, or names one. Write the name the way the user said it.
     Leave it empty for standalone tasks. A list does not imply sequence.
+
+    Use assignee for the one who will do the task: a name or role the user said
+    for it, or Me when the user says they will do it themselves (I want to, I need
+    to, I have to, I will, remind me to). Not someone the task is only about.
+    Never write user. If the user did not say who does it, leave it out.
 
     Fill a field only with words the user said for that task. If the user did
     not say it, leave the field out. Never guess a person, day, time, list,

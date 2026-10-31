@@ -64,6 +64,7 @@ struct QuickTasksApp: App {
                     KittyQuickAction.install()
                     #endif
                     store.refreshRoutines()
+                    Reminders.shared.start(with: store)         // saved tasks with a day remind you; the system asks once, when there is one
                     // The accurate speech model takes a while to load, so start it now rather than when the mic opens.
                     if SpeechEngineChoice.effective() == .whisperTurbo {
                         WhisperAccurate.shared.prepare(keyTerms: KeyTerms.build(household: VocabularyProvider.current()))
@@ -78,26 +79,45 @@ struct ContentView: View {
     @EnvironmentObject var store: TaskStore
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var convo = VoiceConversation()
+    @ObservedObject private var chats = ChatsStore.shared
     @ObservedObject private var router = LaunchRouter.shared
     @StateObject private var wake = WakeWordListener()
     @AppStorage("kitty.heyKittyInApp") private var heyKitty = false
     @State private var showConversation = false
     @State private var seedText: String?
     @State private var seedIsVoice = false
-    @State private var route: TasksRoute?
-    @State private var chips: [HomeChip] = []       // set when the screen appears, so they never move while you look
+    @State private var homeTray: HomeTrayChoice?    // the task tray, open on a view of every task or on one list
     @State private var showLibrary = false
+    @State private var showSearch = false
     @State private var query = ""
     @State private var queryFocused = false
 
-    private func refreshChips() {
-        chips = HomeLabels.row(index: store.tagIndex, tasks: store.tasks, profiles: store.profiles,
-                               recentTaps: RecentLabels.list(), tapDates: RecentLabels.dates())
+    /// The chips above the box: every task, what is due today, what is late, then your newest lists. Nothing while there are no open tasks.
+    private var homePeekChips: [PeekChip] {
+        let open = store.tasks.filter { !$0.isDone }
+        guard !open.isEmpty else { return [] }
+        var out = [PeekChip(id: "all", title: "All tasks", count: open.count)]
+        let today = open.filter(ChatTaskFilter.today.matches).count
+        let late = open.filter(ChatTaskFilter.overdue.matches).count
+        if today > 0 { out.append(PeekChip(id: "today", title: "Today", icon: "sun.max.fill", count: today)) }
+        if late > 0 { out.append(PeekChip(id: "overdue", title: "Overdue", icon: "exclamationmark.triangle.fill", count: late, late: true)) }
+        let lists = store.profiles.compactMap { list -> (PeekChip, Date)? in
+            let items = open.filter { $0.profileID == list.id }
+            guard !items.isEmpty else { return nil }
+            return (PeekChip(id: "list:" + list.id.uuidString, title: list.name, icon: "tray.full.fill", count: items.count),
+                    items.compactMap(\.createdAt).max() ?? list.createdAt)
+        }
+        return out + lists.sorted { $0.1 > $1.1 }.prefix(5).map(\.0)
     }
 
-    private func open(_ chip: HomeChip) {
-        if chip.kind == .label { RecentLabels.note(chip.name) }      // only labels are "labels you use"; the smart views are always there
-        route = TasksRoute(chip)
+    private func openHomeTray(_ id: String?) {
+        switch id {
+        case "today": homeTray = HomeTrayChoice(filter: .today)
+        case "overdue": homeTray = HomeTrayChoice(filter: .overdue)
+        case .some(let id) where id.hasPrefix("list:"):
+            homeTray = HomeTrayChoice(filter: .open, listID: UUID(uuidString: String(id.dropFirst(5))))
+        default: homeTray = HomeTrayChoice(filter: .open)
+        }
     }
 
     var body: some View {
@@ -116,37 +136,39 @@ struct ContentView: View {
                         VStack(spacing: typing ? 10 : 30) {
                             VStack(spacing: 6) {
                                 Text("Kitty")
-                                    .font(.system(size: typing ? 30 : 54, weight: .bold, design: .rounded))
+                                    .font(.system(size: typing ? 30 : 38, weight: .bold, design: .rounded))
                                 Text("What can I do for you?")
                                     .font(typing ? .subheadline : .title3)
                                     .foregroundStyle(.secondary)
                                 wakeStatus
                             }
-                            talkButton
-                                .scaleEffect(typing ? 0.3 : 1)
+                            // The home screen is your chats. While you type a note the list steps aside, like the big mic used to.
+                            ChatListSection(chats: chats,
+                                            open: { startConversation(seed: nil, chatID: $0) },
+                                            startFirst: { startConversation(seed: nil, chatID: chats.startNew()) })
+                                .frame(maxHeight: typing ? 0 : .infinity)
                                 .opacity(typing ? 0 : 1)
-                                .frame(height: typing ? 0 : nil)
                                 .clipped()
                                 .allowsHitTesting(!typing)
                                 .accessibilityHidden(typing)
+                            if !homePeekChips.isEmpty {
+                                TaskPeekBar(chips: homePeekChips) { openHomeTray($0) }
+                                    .padding(.horizontal, -24)          // the bar runs edge to edge; its first chip lines up with the box
+                                    .frame(maxHeight: typing ? 0 : nil)
+                                    .opacity(typing ? 0 : 1)
+                                    .clipped()
+                                    .allowsHitTesting(!typing)
+                                    .accessibilityHidden(typing)
+                            }
                             HStack(alignment: .bottom, spacing: 0) {
                                 searchBar(maxLines: typing && geo.size.height < 650 ? 4 : 6)
                                     .layoutPriority(1)
                                 smallMic
-                                    .scaleEffect(typing ? 1 : 0.3)
-                                    .opacity(typing ? 1 : 0)
-                                    .frame(width: typing ? 60 : 0, alignment: .trailing)
-                                    .clipped()
-                                    .allowsHitTesting(typing)
-                                    .accessibilityHidden(!typing)
+                                    .frame(width: 60, alignment: .trailing)
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: typing ? .top : .center)
                         .padding(.top, typing ? 8 : 0)
-                        taskLabels
-                            .opacity(typing ? 0 : 1)
-                            .allowsHitTesting(!typing)
-                            .accessibilityHidden(typing)
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 16)
@@ -157,6 +179,14 @@ struct ContentView: View {
             .ignoresSafeArea(.keyboard, edges: .bottom)
             .overlay(alignment: .top) { noticeBanner }
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }
+                        .accessibilityLabel("Search your notes")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { startConversation(seed: nil, chatID: chats.startNew()) } label: { Image(systemName: "square.and.pencil") }
+                        .accessibilityLabel("New chat")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button { showLibrary = true } label: {
@@ -175,40 +205,40 @@ struct ContentView: View {
             }
             .onAppear {
                 store.refreshRoutines()
-                refreshChips()
                 wake.onWake = { openFromWake() }
                 openIfRequested()
+                // The very first launch has no chat to choose from: go straight into a new empty one.
+                if chats.sorted.isEmpty, !showConversation, !UserDefaults.standard.bool(forKey: "kitty.firstChatShown") {
+                    UserDefaults.standard.set(true, forKey: "kitty.firstChatShown")
+                    startConversation(seed: nil, chatID: chats.startNew())
+                }
                 updateWake()
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     store.refreshRoutines()
-                    refreshChips()
-                    openIfRequested()
+                        openIfRequested()
                 }
                 updateWake()
             }
             // Siri ("Hey Siri, talk to Kitty"), the Action Button or Back Tap asked for the conversation.
             .onChange(of: router.conversationRequested) { _, _ in openIfRequested() }
             .onChange(of: heyKitty) { _, _ in updateWake() }
-            .onChange(of: showConversation) { _, open in updateWake(); if !open { refreshChips() } }
-            .onChange(of: route) { _, now in updateWake(); if now == nil { refreshChips() } }
-            .sensoryFeedback(.impact(weight: .light), trigger: route)
+            .onChange(of: showConversation) { _, _ in updateWake() }
+            .onChange(of: homeTray?.id) { _, _ in updateWake() }
             .animation(.easeInOut(duration: 0.25), value: router.notice)
             .onChange(of: showLibrary) { _, _ in updateWake() }
             .fullScreenCover(isPresented: $showConversation, onDismiss: { seedText = nil; seedIsVoice = false }) {
                 ConversationView(convo: convo, seed: seedText, seedIsVoice: seedIsVoice)
             }
-            .sheet(item: $route) { route in
-                switch route {
-                case .all: TasksView(filter: PanelFilter(who: .all, category: nil, day: .all, status: .all))
-                case .overdue: TasksView(filter: PanelFilter(who: .all, category: nil, day: .all, status: .overdue))
-                case .today: TasksView(filter: PanelFilter(who: .all, category: nil, day: .today, status: .open))
-                case .new: NewTasksView()
-                case .label(let name): LabelTasksView(label: name)
+            .sheet(item: $homeTray) { choice in TaskTraySheet(filter: choice.filter, listID: choice.listID) }
+            .sheet(isPresented: $showLibrary) { LibraryView() }
+            .sheet(isPresented: $showSearch) {
+                NotesSearchSheet(chats: chats) { id in
+                    // The sheet is closing: open the chat once it is gone.
+                    Task { try? await Task.sleep(nanoseconds: 450_000_000); startConversation(seed: nil, chatID: id) }
                 }
             }
-            .sheet(isPresented: $showLibrary) { LibraryView() }
         }
     }
 
@@ -245,7 +275,7 @@ struct ContentView: View {
     // MARK: The one big thing: talk to Kitty
 
     private var talkButton: some View {
-        Button { startConversation(seed: nil) } label: {
+        Button { startConversation(seed: nil, voice: true, chatID: chats.startNew()) } label: {
             VStack(spacing: 14) {
                 Image(systemName: "mic.fill")
                     .font(.system(size: 40, weight: .semibold))
@@ -262,7 +292,7 @@ struct ContentView: View {
 
     /// The small microphone beside the box while typing: the same as the big one, so you can still talk instead.
     private var smallMic: some View {
-        Button { startConversation(seed: nil) } label: {
+        Button { startConversation(seed: nil, voice: true, chatID: chats.startNew()) } label: {
             Image(systemName: "mic.fill")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.white)
@@ -276,7 +306,7 @@ struct ContentView: View {
     // MARK: Type a task or a question
 
     private func searchBar(maxLines: Int = 6) -> some View {
-        TypedInputBox(placeholder: "Type a task or ask Kitty", text: $query, isFocused: $queryFocused,
+        TypedInputBox(placeholder: "Write a note or ask Kitty", text: $query, isFocused: $queryFocused,
                       leadingIcon: "magnifyingglass", maxLines: maxLines) { submitQuery() }
     }
 
@@ -284,13 +314,16 @@ struct ContentView: View {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         query = ""
-        startConversation(seed: text)
+        startConversation(seed: text, chatID: chats.startNew())      // each typed note opens its own chat
     }
 
-    private func startConversation(seed: String?, voice: Bool = false) {
+    /// Opens a chat. With none named it is the chat you used last, or a new one if you have none.
+    /// `voice` means listen from the start (the mic, Siri, "Hey Kitty"); every other way in opens silent.
+    private func startConversation(seed: String?, voice: Bool = false, chatID: UUID? = nil) {
+        convo.chatID = chatID ?? chats.lastUsed?.id ?? chats.startNew()
         queryFocused = false
         seedText = seed
-        seedIsVoice = voice && seed != nil
+        seedIsVoice = voice
         showConversation = true
     }
 
@@ -303,9 +336,9 @@ struct ContentView: View {
             if let request { convo.submitTyped(request) }       // already open: run it in the conversation that is on screen
             return
         }
-        if route != nil || showLibrary {
+        if homeTray != nil || showLibrary {
             // A sheet is open: close it first, then open the conversation once it is gone.
-            route = nil
+            homeTray = nil
             showLibrary = false
             Task {
                 try? await Task.sleep(nanoseconds: 600_000_000)
@@ -318,12 +351,12 @@ struct ContentView: View {
 
     private func openFromWake() {
         guard !showConversation else { return }
-        startConversation(seed: nil)
+        startConversation(seed: nil, voice: true)
     }
 
     /// "Hey Kitty" listens only when it is turned on, the app is in front, and nothing else is open.
     private func updateWake() {
-        let shouldListen = heyKitty && scenePhase == .active && !showConversation && route == nil && !showLibrary
+        let shouldListen = heyKitty && scenePhase == .active && !showConversation && homeTray == nil && !showLibrary
         if shouldListen { wake.start() } else { wake.stop() }
     }
 
@@ -348,195 +381,6 @@ struct ContentView: View {
             .transition(.move(edge: .top).combined(with: .opacity))
             .accessibilityAddTraits(.updatesFrequently)
         }
-    }
-
-    // MARK: One tap to a label's tasks
-
-    /// Where your tasks are one tap away: the chip tray.
-    private var taskLabels: some View {
-        ChipTray(chips: chips.filter { $0.kind != .all }, onOpen: { open($0) }, onAll: { route = .all })
-            .padding(.horizontal, -24)          // the tray runs edge to edge; its chips line up with the screen's margin
-    }
-}
-
-/// Chips dealt into a fixed number of rows, each chip into the shortest row so far. The layout is as wide as its longest row, so a
-/// scroll view around it scrolls sideways when the rows are longer than the screen.
-struct PackedRowsLayout: Layout {
-    var rows: Int
-    var spacing: CGFloat = ChipTrayLevels.gap
-
-    private func widths(_ subviews: Subviews) -> [CGFloat] { subviews.map { $0.sizeThatFits(.unspecified).width } }
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let w = widths(subviews)
-        let packed = ChipTrayLevels.pack(widths: w, rows: rows, spacing: spacing)
-        let used = packed.filter { !$0.isEmpty }.count
-        let width = packed.map { ChipTrayLevels.rowWidth($0, widths: w, spacing: spacing) }.max() ?? 0
-        let height = used == 0 ? 0 : CGFloat(used) * ChipTrayLevels.rowHeight + CGFloat(used - 1) * spacing
-        return CGSize(width: width, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let w = widths(subviews)
-        var y = bounds.minY
-        for row in ChipTrayLevels.pack(widths: w, rows: rows, spacing: spacing) where !row.isEmpty {
-            var x = bounds.minX
-            for i in row {
-                subviews[i].place(at: CGPoint(x: x, y: y), proposal: .unspecified)
-                x += w[i] + spacing
-            }
-            y += ChipTrayLevels.rowHeight + spacing
-        }
-    }
-}
-
-private struct ChipWidthsKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) { value.merge(nextValue()) { $1 } }
-}
-
-/// The home screen's chips. Two rows to start, scrolling sideways. A small dash above them is a handle: drag it up and the chips
-/// re-pack into more rows (the tray follows your finger and settles on whole rows), drag it down for fewer. When every chip fits, the
-/// sideways scroll goes away. Tapping the dash opens it all the way and back. The height you leave it at is kept. "All tasks" sits on
-/// the dash line. What is late, today and new come first, then the labels you open most.
-struct ChipTray: View {
-    let chips: [HomeChip]
-    var onOpen: (HomeChip) -> Void
-    var onAll: () -> Void
-
-    @AppStorage("kitty.chipRows") private var storedRows = ChipTrayLevels.startRows
-    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
-    @State private var widths: [String: CGFloat] = [:]
-    @State private var trayWidth: CGFloat = 0
-    @State private var drag: CGFloat = 0            // how far the finger has moved; up is negative
-    @State private var dragging = false
-    @State private var dragStartRows: Int?          // the rows it rested at when the finger came down: the drag is measured from here
-    @State private var liveRows = ChipTrayLevels.startRows     // the rows shown while dragging; changes only well past a boundary
-
-    private let dashHeight: CGFloat = 40
-    private let margin: CGFloat = 24
-
-    private var chipWidths: [CGFloat] { chips.map { widths[$0.id] ?? 90 } }
-    private var maxRows: Int {
-        ChipTrayLevels.rowsToFit(widths: chipWidths, available: max(trayWidth - 2 * margin, 0))
-    }
-    /// The rows it rests at: what you left it at, never more than fit. VoiceOver gets everything.
-    private var rows: Int { voiceOver ? maxRows : min(max(storedRows, 1), maxRows) }
-    /// The height while a finger is on the dash, for a finger that has moved `drag` from where it came down.
-    private func height(forDrag drag: CGFloat) -> CGFloat {
-        let start = dragStartRows ?? rows
-        return min(max(ChipTrayLevels.height(rows: start) - drag, ChipTrayLevels.height(rows: min(1, maxRows))), ChipTrayLevels.height(rows: maxRows))
-    }
-    private var liveHeight: CGFloat { height(forDrag: drag) }
-    private var shownRows: Int { dragging ? liveRows : rows }
-    private var shownHeight: CGFloat { dragging ? liveHeight : ChipTrayLevels.height(rows: rows) }
-
-    var body: some View {
-        // The screen keeps room for the tray at rest. While you drag, it can pass over the space above for a moment.
-        Color.clear
-            .frame(height: dashHeight + ChipTrayLevels.height(rows: rows))
-            .overlay(alignment: .bottom) { tray }
-    }
-
-    private var tray: some View {
-        VStack(spacing: 0) {
-            dashRow
-            ScrollView(.horizontal) {
-                PackedRowsLayout(rows: max(shownRows, 1)) {
-                    ForEach(chips) { chip in
-                        LabelChip(chip: chip) { onOpen(chip) }
-                            .background(GeometryReader { Color.clear.preference(key: ChipWidthsKey.self, value: [chip.id: $0.size.width]) })
-                    }
-                }
-                .padding(.horizontal, margin)
-                .padding(.top, 2)
-                .padding(.bottom, 4)
-            }
-            .scrollIndicators(.hidden)
-            .frame(height: shownHeight, alignment: .top)
-            .mask(fade)
-        }
-        .background {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
-                .padding(.horizontal, 10)
-                .opacity(shownRows > ChipTrayLevels.startRows ? 1 : 0)
-        }
-        .onPreferenceChange(ChipWidthsKey.self) { widths = $0 }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trayWidth = $0 }
-        // The tray follows the finger exactly while it is down; only a release (or a tap) settles with an animation.
-        .animation(dragging ? nil : .snappy(duration: 0.28), value: shownRows)
-        .animation(dragging ? nil : .snappy(duration: 0.28), value: rows)
-        .sensoryFeedback(.selection, trigger: shownRows)
-    }
-
-    /// A soft edge on both sides, so a chip that runs off the screen reads as "more this way".
-    private var fade: some View {
-        HStack(spacing: 0) {
-            LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: 14)
-            Rectangle()
-            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 14)
-        }
-    }
-
-    /// The dash (the handle) in the middle, "All tasks" at the right.
-    private var dashRow: some View {
-        ZStack {
-            Capsule()
-                .fill(Color.secondary.opacity(dragging ? 0.7 : 0.4))
-                .frame(width: 36, height: 5)
-                .frame(width: 120, height: dashHeight)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.snappy(duration: 0.28)) { storedRows = ChipTrayLevels.tapped(rows: rows, maxRows: maxRows) }
-                }
-                .gesture(
-                    // Measured on the screen, not in the handle: the handle moves up with the tray, and a measure that moves with it
-                    // feeds back into itself (the tray bounces under a fast finger).
-                    DragGesture(minimumDistance: 2, coordinateSpace: .global)
-                        .onChanged { v in
-                            if dragStartRows == nil { dragStartRows = rows; liveRows = rows }
-                            dragging = true
-                            drag = v.translation.height
-                            liveRows = ChipTrayLevels.snap(height: height(forDrag: v.translation.height), from: liveRows, maxRows: maxRows)
-                        }
-                        .onEnded { v in
-                            // A quick flick carries on a little: settle where it was heading.
-                            let start = dragStartRows ?? rows
-                            let heading = ChipTrayLevels.height(rows: start) - (v.translation.height + v.predictedEndTranslation.height) / 2
-                            let target = ChipTrayLevels.snap(height: heading, maxRows: maxRows)
-                            dragStartRows = nil
-                            withAnimation(.snappy(duration: 0.28)) {
-                                if target > 0 { storedRows = target }
-                                dragging = false
-                                drag = 0
-                            }
-                        }
-                )
-                .accessibilityElement()
-                .accessibilityLabel("Chip tray height")
-                .accessibilityValue("\(rows) rows")
-                .accessibilityAdjustableAction { direction in
-                    storedRows = ChipTrayLevels.adjusted(rows: rows, by: direction == .increment ? 1 : -1, maxRows: maxRows)
-                }
-            HStack {
-                Spacer()
-                Button(action: onAll) {
-                    HStack(spacing: 4) {
-                        Text("All tasks")
-                        Image(systemName: "chevron.right").font(.caption.weight(.bold))
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(minHeight: dashHeight)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, margin)
-        }
-        .frame(height: dashHeight)
     }
 }
 

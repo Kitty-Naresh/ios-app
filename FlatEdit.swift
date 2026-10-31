@@ -114,6 +114,13 @@ enum FlatExperiments {
 
     static let correctionText = "If the user corrects themselves or says \"not X, do Y\", the latest words win: only the final version is a task, and X is removed or renamed to Y."
     static let separateTargetsText = "\"A and B\" as separate targets are separate tasks."
+    /// A note is not a command: a fact, a memory or a feeling makes no task, and words with nothing to do return "wait". Measured on
+    /// the notes scoreboard (notes_v1.json): switch it off if it makes real tasks disappear.
+    static let actionsOnly = true
+    static let actionsOnlyText = """
+    Make a task only for something the user says they will do, need to do, or want done. A fact, a memory, a feeling, or information
+    to remember (a password, a number, something that happened) is not a task. If nothing in the words is something to do, return wait.
+    """
     static let draftText = "When the request starts with STATE, the app has already accepted some tasks (DRAFT). Return only the tasks in the Request. Never repeat a DRAFT task."
     /// Not sent while `scopeLine` is off. Kept so the measurement can be repeated.
     static let scopeText = """

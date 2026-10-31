@@ -116,14 +116,6 @@ enum EvidenceGate {
             }
         }
 
-        // The speaker's own task: "I want to", "I need to", "remind me to". Saying it of themselves is the evidence ("I" is a person), so
-        // the task is Me. Nothing is guessed: with no first-person cue in this task's clause, or when the clause names someone else as the
-        // one who does it ("I want Rani to…", "I'll ask the maid to…"), the assignee stays empty.
-        if item.assignee == nil, let clause = own, let phrase = speakerCue(in: clause, knownPeople: knownPeople) {
-            item.assignee = Assignee.me
-            item.evidence["assignee"] = phrase
-        }
-
         // The category: only when its name is in the words.
         if let name = item.categoryName {
             let low = name.lowercased()
@@ -263,49 +255,6 @@ enum EvidenceGate {
         add("category", category)
         add("repeat", repeatText)
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
-    // MARK: The speaker
-
-    private static let speakerSubjects: Set<String> = ["i", "i'll", "ill", "i'm", "im"]
-    /// Small words between "I" and the cue that change nothing: "I also need to", "I really want to".
-    private static let speakerAdverbs: Set<String> = ["also", "really", "just", "still", "now", "actually", "only", "definitely"]
-    private static let speakerWantVerbs: Set<String> = ["want", "need", "have", "has", "had", "plan", "planning", "got"]
-    private static let speakerModals: Set<String> = ["should", "must", "will", "shall", "ought", "gotta", "wanna"]
-
-    /// The words in which the speaker says they will do the task themselves, or nil. Needs a clear cue: "I want to", "I need to",
-    /// "I have to", "I should", "I will", "I'll", "I'm going to", "I would like to", "remind me", "let me", "mujhe". "I want Rani to" is not
-    /// one (the next word must be "to"), and a clause that names someone else as the doer gives none.
-    static func speakerCue(in clause: String, knownPeople: [String]) -> String? {
-        let ws = words(clause)
-        let keys = ws.map(\.key)
-        guard !keys.isEmpty else { return nil }
-        // Someone else does it: a role in the clause, or a known person with a doer cue.
-        if let role = Assignee.detect(in: clause), !role.isEmpty { return nil }
-        for name in knownPeople where Assignee.normalize(name).lowercased() != Assignee.me.lowercased()
-            && assigneeEvidence(name, in: clause, knownPeople: knownPeople) != nil { return nil }
-
-        func at(_ i: Int) -> String? { i < keys.count ? keys[i] : nil }
-        for i in keys.indices {
-            let k = keys[i]
-            if (k == "remind" || k == "let"), at(i + 1) == "me" { return ws[i...(i + 1)].map(\.raw).joined(separator: " ") }
-            if k == "mujhe" { return ws[i].raw }
-            guard speakerSubjects.contains(k) else { continue }
-            var j = i + 1
-            while let w = at(j), speakerAdverbs.contains(w) { j += 1 }
-            guard let first = at(j) else { continue }
-            func phrase(through end: Int) -> String { ws[i...min(end, ws.count - 1)].map(\.raw).joined(separator: " ") }
-            if k == "i'll" || k == "ill" { return ws[i].raw }
-            if speakerWantVerbs.contains(first), at(j + 1) == "to" { return phrase(through: j + 1) }
-            if speakerModals.contains(first) { return phrase(through: j) }
-            if first == "would", at(j + 1) == "like", at(j + 2) == "to" { return phrase(through: j + 2) }
-            if k == "i'm" || k == "im" {
-                if first == "going", at(j + 1) == "to" { return phrase(through: j + 1) }
-            } else if first == "am", at(j + 1) == "going", at(j + 2) == "to" {
-                return phrase(through: j + 2)
-            }
-        }
-        return nil
     }
 
     // MARK: The person

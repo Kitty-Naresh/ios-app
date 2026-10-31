@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 // MARK: - What Swift works out from the user's words
 //
@@ -252,10 +253,11 @@ enum RecurrenceParser {
             case "biweekly", "fortnightly", "fortnight": sawWeek = true; sawOther = true; plainRepeatWord = true
             case "month", "months": sawMonth = true
             case "monthly": sawMonth = true; plainRepeatWord = true
-            case "morning", "mornings": slot = .morning; plainRepeatWord = true
-            case "afternoon", "afternoons": slot = .afternoon; plainRepeatWord = true
-            case "evening", "evenings": slot = .evening; plainRepeatWord = true
-            case "night", "nights": slot = .night; plainRepeatWord = true
+            // A part of the day says WHEN ("Saturday morning"), not how often: only the plural ("mornings"), or one beside "every", repeats.
+            case "morning", "mornings": slot = .morning; if w.hasSuffix("s") { plainRepeatWord = true }
+            case "afternoon", "afternoons": slot = .afternoon; if w.hasSuffix("s") { plainRepeatWord = true }
+            case "evening", "evenings": slot = .evening; if w.hasSuffix("s") { plainRepeatWord = true }
+            case "night", "nights": slot = .night; if w.hasSuffix("s") { plainRepeatWord = true }
             default: if !known.contains(w) { return .unsupported }
             }
         }
@@ -409,6 +411,20 @@ enum TaskDraftMapper {
                 } else {
                     item.unparsed["repeat"] = raw
                 }
+            }
+        }
+        // The model sometimes leaves the repeat out ("clean the baby mat every day" comes back as a one-time task). If this task's own words
+        // say how often, in words the parser reads, it is a routine: the repeat is what the user said, cut out of the title if it was left there.
+        if item.kind != .routine, clean(t.schedule) == nil, let transcript {
+            let own = wordsAreThisTasks ? transcript : EvidenceGate.clause(for: item.title, in: transcript)
+            if let own, let said = RepeatReader.phrase(in: own), case .spec(let spec, let s, let minutes) = RecurrenceParser.read(said) {
+                Trace.step("SWIFT", "the model left the repeat out; the words say \"\(said)\", so this is a routine")
+                item.kind = .routine
+                item.recurrence = spec
+                item.schedule = said
+                if item.timeMinutes == nil, item.slot == nil { item.slot = s }
+                if item.timeMinutes == nil, let minutes { item.timeMinutes = minutes; item.slot = nil }
+                if let cut = RepeatReader.removing(said, from: item.title) { item.title = cut }
             }
         }
         // A when-phrase the model left in a field it does not belong to, or could not give as a value, is read here: it fills only what
@@ -923,5 +939,221 @@ enum Coverage {
             if !out.contains(w) { out.append(w) }
         }
         return out
+    }
+}
+
+
+// MARK: - A repeat the model left out
+
+/// Finds how often a task repeats in the words the user said for it ("every morning", "every Monday and Thursday", "every three months",
+/// "daily"), only where the repeat parser reads them. It reads nothing the words do not say.
+enum RepeatReader {
+    private static let cues: Set<String> = [
+        "every", "each", "daily", "everyday", "weekly", "monthly", "yearly", "fortnightly", "alternate", "weekdays", "weekends"]
+    /// Words that can continue a repeat once it has started: days, periods, numbers, times.
+    private static let continues: Set<String> = [
+        "and", "or", "other", "day", "days", "week", "weeks", "month", "months", "year", "years", "morning", "afternoon", "evening", "night",
+        "at", "am", "pm", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "mondays", "tuesdays", "wednesdays",
+        "thursdays", "fridays", "saturdays", "sundays", "weekday", "weekend", "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "twelve", "first", "second", "third", "last", "of", "the", "on", "weekdays", "weekends", "alternate", "days"]
+    private static let glue: Set<String> = ["and", "or", "of", "the", "on", "at"]
+
+    private static func key(_ w: String) -> String { w.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ",.;:!?\"()")) }
+
+    static func phrase(in text: String) -> String? {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        for (i, w) in words.enumerated() where cues.contains(key(w)) {
+            var end = i + 1
+            while end < words.count, end - i < 9, continues.contains(key(words[end])) || key(words[end]).first?.isNumber == true { end += 1 }
+            var n = end - i
+            while n > 0 {
+                let said = words[i..<(i + n)].map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ",.;:!?")) }.joined(separator: " ")
+                let alone = n == 1 && ["every", "each", "alternate"].contains(key(words[i]))        // "every" on its own is not a repeat
+                if !alone, !glue.contains(key(words[i + n - 1])), case .spec = RecurrenceParser.read(said) { return said }
+                n -= 1
+            }
+        }
+        return nil
+    }
+
+    /// The title without the repeat phrase, when the model left it there; nil when it is not in the title or nothing would be left.
+    static func removing(_ phrase: String, from title: String) -> String? {
+        guard let r = title.range(of: phrase, options: .caseInsensitive) else { return nil }
+        var cut = title
+        cut.removeSubrange(r)
+        cut = cut.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,;-"))
+        return cut.isEmpty ? nil : cut
+    }
+}
+
+
+// MARK: - Notes that hold no task
+
+/// Whether a note says anything to DO. A note is often a memory ("she said bye bye papa today") or something to remember ("the wifi
+/// password is on the router"). The model turns those into tasks anyway ("Find the wifi password"), so Swift checks first: a note of
+/// more than a few words in which no sentence says something to do, and that is not a list, is only a note. It is kept, and nothing is
+/// made from it. Short words are never judged here: "milk and bread" is a command, and Kitty reads it.
+///
+/// A sentence says something to do when it starts with a verb ("send the quote"), or holds an intent ("I need to", "remind me",
+/// "don't forget", "should", "must", "will"). The verb is found by the system's language tagger and a short list of common task verbs.
+/// Mistakes here only let a note through to the model (the old behaviour); they never drop a note that has a clear task.
+enum NoteIntent {
+    private static let cues = [
+        "need to", "needs to", "have to", "has to", "want to", "wanna", "would like to", "should", "must", "will ", "i'll", "going to",
+        "gonna", "remind me", "don't forget", "dont forget", "do not forget", "let's", "lets ", "plan to", "planning to", "ask ", "tell ",
+        "make sure", "todo", "to do", "to-do", "mujhe", "karna hai", "please "]
+    private static let verbs: Set<String> = [
+        "call", "buy", "pay", "send", "book", "pick", "get", "make", "clean", "wash", "order", "take", "bring", "check", "fix", "renew",
+        "submit", "email", "remind", "ask", "tell", "cancel", "schedule", "pack", "cook", "drop", "return", "print", "repair", "change",
+        "find", "collect", "arrange", "plan", "prepare", "finish", "complete", "write", "read", "visit", "meet", "set", "fill", "refill",
+        "water", "iron", "sweep", "mop", "dust", "install", "replace", "organise", "organize", "sort", "donate", "wrap", "register",
+        "apply", "update", "confirm", "follow", "deposit", "withdraw", "recharge", "charge", "feed", "walk", "give", "put", "add", "remove",
+        "create", "build", "open", "throw", "reply", "message", "text", "share", "upload", "download", "attend", "join", "start", "stop", "turn", "lock", "unlock"]
+
+    private static func sentences(_ text: String) -> [String] {
+        text.split(whereSeparator: { ".?!;\n".contains($0) }).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    private static func wordCount(_ s: String) -> Int { s.split(whereSeparator: { $0.isWhitespace }).count }
+
+    static func isTaskVerb(_ word: String) -> Bool { verbs.contains(word) }
+
+    static func startsWithVerb(_ sentence: String) -> Bool {
+        guard let first = sentence.split(whereSeparator: { !($0.isLetter || $0 == "'") }).first else { return false }
+        if verbs.contains(first.lowercased()) { return true }
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = sentence
+        var verb = false
+        tagger.enumerateTags(in: sentence.startIndex..<sentence.endIndex, unit: .word, scheme: .lexicalClass,
+                             options: [.omitWhitespace, .omitPunctuation]) { tag, _ in
+            verb = (tag == .verb)
+            return false                                                  // only the first word
+        }
+        return verb
+    }
+
+    private static let timeWords: Set<String> = [
+        "today", "tomorrow", "tonight", "morning", "mornings", "afternoon", "evening", "night", "week", "weekend", "month", "daily",
+        "every", "each", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "before", "by", "until", "till",
+        "weekly", "monthly", "yearly", "noon", "midnight"]
+
+    /// A day, a time or a repeat word: the words ask for something at a time, so the model reads them.
+    static func hasTimeWord(_ text: String, forNote: Bool = false) -> Bool {
+        // A memory is full of "today" and "this morning"; only a day ahead or a repeat means a task for a plain note.
+        let loose: Set<String> = ["today", "morning", "mornings", "afternoon", "evening", "night", "by", "each", "week", "weekend", "month"]
+        let timeWords = forNote ? Self.timeWords.subtracting(loose) : Self.timeWords
+        let words = text.lowercased().split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
+        return words.contains(where: { timeWords.contains($0) }) || words.contains(where: { $0.first?.isNumber == true && $0.count <= 2 && words.contains("at") })
+    }
+
+    /// At least one sentence says something to do.
+    static func hasAction(_ text: String) -> Bool {
+        let low = " " + text.lowercased() + " "
+        if cues.contains(where: { low.contains($0) }) { return true }
+        return sentences(text).contains { startsWithVerb($0) }
+    }
+
+    /// True when the words are only a note: long enough to judge, not a list, and nothing in them to do.
+    static func isPlainNote(_ text: String) -> Bool {
+        guard wordCount(text) >= 8, sentences(text).count >= 2, !hasTimeWord(text, forNote: true) else { return false }      // one sentence is a command, not a note
+        if text.contains(":") || text.lowercased().split(whereSeparator: { !$0.isLetter }).contains("list") { return false }      // "Pharmacy list: …"
+        let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if lines.contains(where: { NoteLists.itemText($0) != nil }) { return false }          // marked lines are items
+        if lines.count >= 3, lines.allSatisfy({ wordCount($0) <= 4 }) { return false }          // short lines one under another are a list
+        return !hasAction(text)
+    }
+}
+
+// MARK: - List notes
+
+/// A note that is only a list, read by Swift with no model call: the model collapses "- milk / - bread / - eggs" into one task and puts a
+/// heading into every title. Two shapes count, and only these:
+///  - an optional heading line, then lines that each start with a dash, a bullet or a number, and nothing else;
+///  - one line "Heading: a, b, c" with a short heading and two or more short items.
+/// Anything else is not a list note and goes to the model as before. The heading names a list only if the words say so (the list-name
+/// check decides), and never becomes a task.
+enum NoteLists {
+    struct Reading: Equatable {
+        var heading: String?
+        var items: [String]
+    }
+
+    private static let marker = try? NSRegularExpression(pattern: "^\\s*(?:[-\u{2022}*\u{2013}\u{2014}]|\\d{1,2}[.)])\\s+(.+)$")
+
+    /// The text of a list line, without its dash, bullet or number; nil if the line has none of them.
+    static func itemText(_ line: String) -> String? {
+        guard let marker else { return nil }
+        let ns = line as NSString
+        guard let m = marker.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)), m.numberOfRanges > 1 else { return nil }
+        return ns.substring(with: m.range(at: 1)).trimmingCharacters(in: CharacterSet(charactersIn: " ,;.").union(.whitespacesAndNewlines))
+    }
+
+    private static func words(_ s: String) -> Int { s.split(whereSeparator: { $0.isWhitespace }).count }
+
+    private static let listWords: Set<String> = ["list", "checklist", "order", "cart", "basket"]
+
+    private static func hasListWord(_ line: String) -> Bool {
+        line.lowercased().split(whereSeparator: { !$0.isLetter }).contains { listWords.contains(String($0)) }
+    }
+
+    /// A list heading on its own ("shopping list for my kid"): the user will add the items next, so there is nothing to make yet. A line
+    /// that starts with a verb ("create a shopping list") is a request and goes to Kitty as before.
+    static func isBareHeading(_ text: String) -> Bool {
+        let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard lines.count == 1, let line = lines.first, (2...7).contains(words(line)), hasListWord(line),
+              !line.contains(where: { ".?!:".contains($0) }), !NoteIntent.hasTimeWord(line) else { return false }
+        let all = line.lowercased().split(whereSeparator: { !($0.isLetter || $0 == "'") }).map(String.init)
+        guard let at = all.firstIndex(where: { listWords.contains($0) }), all.count - at - 1 <= 3,         // "shopping list for my kid", not "a long list of things to do"
+              !all.contains("do"), let first = all.first else { return false }
+        return !NoteIntent.isTaskVerb(first)
+    }
+
+    static func read(_ text: String) -> Reading? {
+        let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return nil }
+        // A list with days or repeats in its items goes to the model. A heading may say "for the week".
+        let body = lines.enumerated().filter { $0.offset > 0 || lines.count == 1 || itemText($0.element) != nil }.map(\.element)
+        guard !NoteIntent.hasTimeWord(body.joined(separator: " ")) else { return nil }
+
+        // Marked lines under an optional heading.
+        let marked = lines.map { itemText($0) }
+        if marked.compactMap({ $0 }).count >= 2 {
+            var heading: String?
+            var items: [String] = []
+            for (i, line) in lines.enumerated() {
+                if let item = marked[i] { items.append(item) }
+                else if i == 0, words(line) <= 10 { heading = line.trimmingCharacters(in: CharacterSet(charactersIn: ": ")) }
+                else { return nil }                                            // something that is not an item: not a pure list
+            }
+            guard items.allSatisfy({ !$0.isEmpty && words($0) <= 8 }) else { return nil }
+            return Reading(heading: heading, items: items)
+        }
+
+        // A heading and then one short item on each line, as typed one message at a time: "groceries for the week / milk / bread / eggs".
+        // A first line that starts with a verb is a task like the rest, not a heading.
+        // A first line with a list word in it ("shopping list for my kid") is a heading even with one item under it.
+        if lines.count >= 2, lines.allSatisfy({ words($0) <= 5 || $0 == lines[0] && words($0) <= 7 }),
+           lines.allSatisfy({ !$0.contains(where: { ".?!".contains($0) }) }) {
+            let cue = hasListWord(lines[0])
+            let first = lines[0].split(whereSeparator: { !($0.isLetter || $0 == "'") }).first.map { $0.lowercased() } ?? ""
+            let verbFirst = NoteIntent.startsWithVerb(lines[0]) && !first.hasSuffix("ing")      // "shopping list" is a noun phrase, "buy milk" is a task
+            let hasHeading = !lines[0].contains(":") && (cue || !verbFirst) && (cue || lines.count >= 3)
+            let items = (hasHeading ? Array(lines.dropFirst()) : lines).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " ,;")) }
+            if (items.count >= 2 && (hasHeading || lines.count >= 3)) || (hasHeading && cue && items.count >= 1) { return Reading(heading: hasHeading ? lines[0] : nil, items: items) }
+        }
+
+        // "Blinkit order: milk, curd, paneer, coriander"
+        guard lines.count == 1, let colon = lines[0].firstIndex(of: ":") else { return nil }
+        let head = String(lines[0][..<colon]).trimmingCharacters(in: .whitespaces)
+        let tail = String(lines[0][lines[0].index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        guard (1...4).contains(words(head)), !head.lowercased().split(separator: " ").contains("list"), !NoteIntent.hasAction(tail), !tail.isEmpty, !tail.contains(where: { ".?!".contains($0) }) else { return nil }
+        var parts = tail.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        if let last = parts.last, let r = last.range(of: " and ") {                 // "bread and eggs": the last two are separate
+            parts[parts.count - 1] = String(last[..<r.lowerBound])
+            parts.append(String(last[r.upperBound...]))
+        }
+        parts = parts.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " ,;.")) }.filter { !$0.isEmpty }
+        guard (2...12).contains(parts.count), parts.allSatisfy({ words($0) <= 5 }) else { return nil }
+        return Reading(heading: head, items: parts)
     }
 }

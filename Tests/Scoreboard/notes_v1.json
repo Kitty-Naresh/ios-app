@@ -1,0 +1,461 @@
+{
+  "title": "[AI-DRAFT] Kitty notes scoreboard v1: realistic notes with expected tasks",
+  "status": "Draft for review. Same format as scoreboard_v1.json, so ScoreboardRunTests can run it (TEST_RUNNER_KITTY_SCOREBOARD_FILE). These are notes, not voice commands: multi-line lists, mixed text, longer thoughts. Expected values are the author's judgement. Notes with no task must make none.",
+  "reference_now": "2026-10-28T12:00:00+05:30 (Wednesday, Asia/Kolkata)",
+  "date_key": {
+    "today": "2026-10-28",
+    "tomorrow": "2026-10-29",
+    "Friday": "2026-10-30",
+    "Saturday": "2026-10-31",
+    "Sunday": "2026-11-01"
+  },
+  "scoring": {
+    "per_case": "A case passes when the outcome is right, every required task is matched (all title_has words present), there are no extra tasks, every expected field matches, and no must_not item is violated.",
+    "headline": "Wrongly made tasks (junk from non-task lines) and missing tasks, per note."
+  },
+  "cases": [
+    {
+      "id": "N01",
+      "group": "Shopping list",
+      "persona": "working mom",
+      "voice_input": "I want to shop for my baby\n1. diapers\n2. baby wipes\n3. cotton onesies\n4. baby lotion\n5. bottle sterilizer\n6. rattle toys",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "diaper"
+            ]
+          },
+          {
+            "title_has": [
+              "wipe"
+            ]
+          },
+          {
+            "title_has": [
+              "onesie"
+            ]
+          },
+          {
+            "title_has": [
+              "lotion"
+            ]
+          },
+          {
+            "title_has": [
+              "sterilizer"
+            ]
+          },
+          {
+            "title_has": [
+              "rattle"
+            ]
+          }
+        ],
+        "must_not": [
+          "a task for the heading 'shop for my baby' as well as the items"
+        ]
+      },
+      "tests": "A numbered list under a heading: one task per item, and the heading is not a seventh task."
+    },
+    {
+      "id": "N02",
+      "group": "Shopping list",
+      "persona": "working dad",
+      "voice_input": "groceries\n- milk\n- bread\n- eggs",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "milk"
+            ]
+          },
+          {
+            "title_has": [
+              "bread"
+            ]
+          },
+          {
+            "title_has": [
+              "egg"
+            ]
+          }
+        ],
+        "must_not": [
+          "a task named 'groceries'",
+          "a list the words did not name"
+        ]
+      },
+      "tests": "Dashes. A bare 'groceries' heading has no list cue, so no list is made."
+    },
+    {
+      "id": "N03",
+      "group": "Shopping list",
+      "persona": "working mom",
+      "voice_input": "Blinkit order: milk, curd, paneer, coriander",
+      "expected": {
+        "outcome": "create",
+        "list": "Blinkit order",
+        "tasks": [
+          {
+            "title_has": [
+              "milk"
+            ]
+          },
+          {
+            "title_has": [
+              "curd"
+            ]
+          },
+          {
+            "title_has": [
+              "paneer"
+            ]
+          },
+          {
+            "title_has": [
+              "coriander"
+            ]
+          }
+        ]
+      },
+      "tests": "A named list with a colon and commas."
+    },
+    {
+      "id": "N04",
+      "group": "Mixed note",
+      "persona": "working mom",
+      "voice_input": "Aarav's school trip is next month, he is so excited!\nneed to pack his bag the night before\nsubmit the permission slip by Friday\nthe teacher said it will be fun",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "pack",
+              "bag"
+            ]
+          },
+          {
+            "title_has": [
+              "submit",
+              "permission"
+            ],
+            "due": "2026-10-30"
+          }
+        ],
+        "must_not": [
+          "a task from 'so excited'",
+          "a task from 'the teacher said it will be fun'"
+        ]
+      },
+      "tests": "Some lines are tasks, some are just thoughts. Thoughts make no task."
+    },
+    {
+      "id": "N05",
+      "group": "Mixed note",
+      "persona": "working dad",
+      "voice_input": "Meeting with Sharma sir went well. He wants the revised quote.\nsend the revised quote tomorrow\nthe client is based in Pune",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "send",
+              "quote"
+            ],
+            "due": "2026-10-29"
+          }
+        ],
+        "must_not": [
+          "a task from 'meeting went well'",
+          "a task from 'the client is based in Pune'"
+        ]
+      },
+      "tests": "A work note with one real task among facts."
+    },
+    {
+      "id": "N06",
+      "group": "No tasks",
+      "persona": "working mom",
+      "voice_input": "Anaya said her first full sentence today. She said bye bye papa. Best day ever.",
+      "expected": {
+        "outcome": "none",
+        "tasks": [],
+        "must_not": [
+          "any task",
+          "a card"
+        ]
+      },
+      "tests": "A memory, not a task: nothing is made."
+    },
+    {
+      "id": "N07",
+      "group": "No tasks",
+      "persona": "working dad",
+      "voice_input": "Wifi password is on the router. Society office number is on the notice board.",
+      "expected": {
+        "outcome": "none",
+        "tasks": [],
+        "must_not": [
+          "any task",
+          "a card"
+        ]
+      },
+      "tests": "Information to keep, no task."
+    },
+    {
+      "id": "N08",
+      "group": "Dates in notes",
+      "persona": "working mom",
+      "voice_input": "This week:\n- call the pediatrician tomorrow morning\n- pick up the cake on Saturday at 5\n- book the cab to the airport on Friday",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "call",
+              "pediatrician"
+            ],
+            "due": "2026-10-29"
+          },
+          {
+            "title_has": [
+              "cake"
+            ],
+            "due": "2026-10-31"
+          },
+          {
+            "title_has": [
+              "cab"
+            ],
+            "due": "2026-10-30"
+          }
+        ],
+        "must_not": [
+          "'This week' given to every task as a timeframe"
+        ]
+      },
+      "tests": "A heading with a loose timeframe, and tasks that each say their own day."
+    },
+    {
+      "id": "N09",
+      "group": "Dates in notes",
+      "persona": "working dad",
+      "voice_input": "pay society maintenance, LIC premium, credit card bill, school bus fees - all before the 5th",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "society",
+              "maintenance"
+            ]
+          },
+          {
+            "title_has": [
+              "lic"
+            ]
+          },
+          {
+            "title_has": [
+              "credit",
+              "card"
+            ]
+          },
+          {
+            "title_has": [
+              "school",
+              "bus"
+            ]
+          }
+        ],
+        "must_not": [
+          "an invented date other than what was said",
+          "a task named 'all before the 5th'"
+        ]
+      },
+      "tests": "One deadline phrase at the end of a list."
+    },
+    {
+      "id": "N10",
+      "group": "People in notes",
+      "persona": "working mom",
+      "voice_input": "ask Rani to clean the baby mat and wash clothes tomorrow\nI need to buy diapers\nRohan will pick up Aarav",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "clean",
+              "mat"
+            ],
+            "assignee": "Rani",
+            "due": "2026-10-29"
+          },
+          {
+            "title_has": [
+              "wash",
+              "clothes"
+            ],
+            "assignee": "Rani",
+            "due": "2026-10-29"
+          },
+          {
+            "title_has": [
+              "buy",
+              "diaper"
+            ]
+          },
+          {
+            "title_has": [
+              "pick",
+              "aarav"
+            ],
+            "assignee": "Rohan"
+          }
+        ],
+        "must_not": [
+          "Rani on the diapers or the pickup",
+          "Rohan on the diapers"
+        ]
+      },
+      "tests": "Three people in three lines: each belongs only to their own line."
+    },
+    {
+      "id": "N11",
+      "group": "Long note",
+      "persona": "working mom",
+      "voice_input": "Weekend plan. Saturday morning is the farmers market, I want to get seasonal fruit and some flowers for the house. After that we will go to Anaya's swimming class at 11. In the afternoon I should finally sort out the old clothes for donation, and call my mother. Sunday is the birthday party at 4, we need to buy a gift and wrap it before that.",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "fruit"
+            ]
+          },
+          {
+            "title_has": [
+              "flower"
+            ]
+          },
+          {
+            "title_has": [
+              "clothes"
+            ]
+          },
+          {
+            "title_has": [
+              "call",
+              "mother"
+            ]
+          },
+          {
+            "title_has": [
+              "gift"
+            ]
+          }
+        ],
+        "optional_tasks": [
+          {
+            "title_has": [
+              "swimming"
+            ]
+          },
+          {
+            "title_has": [
+              "wrap"
+            ]
+          }
+        ],
+        "must_not": [
+          "a task named 'weekend plan'",
+          "invented people"
+        ]
+      },
+      "tests": "A long paragraph with tasks buried in sentences."
+    },
+    {
+      "id": "N12",
+      "group": "Heading only",
+      "persona": "any",
+      "voice_input": "To do",
+      "expected": {
+        "outcome": "none",
+        "tasks": [],
+        "must_not": [
+          "a task named 'To do'",
+          "a card"
+        ]
+      },
+      "tests": "A heading with nothing under it."
+    },
+    {
+      "id": "N13",
+      "group": "Drip list",
+      "persona": "working mom",
+      "voice_input": "shopping list for my kid\ndiapers\nwipes\nbaby lotion\nrattle",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "diaper"
+            ]
+          },
+          {
+            "title_has": [
+              "wipe"
+            ]
+          },
+          {
+            "title_has": [
+              "lotion"
+            ]
+          },
+          {
+            "title_has": [
+              "rattle"
+            ]
+          }
+        ],
+        "must_not": [
+          "a task named 'shopping list for my kid'"
+        ]
+      },
+      "tests": "What the user typed one message at a time, read together: a heading and its items, no task for the heading."
+    },
+    {
+      "id": "N14",
+      "group": "Drip list",
+      "persona": "working dad",
+      "voice_input": "groceries for the week\nmilk\nbread\neggs",
+      "expected": {
+        "outcome": "create",
+        "tasks": [
+          {
+            "title_has": [
+              "milk"
+            ]
+          },
+          {
+            "title_has": [
+              "bread"
+            ]
+          },
+          {
+            "title_has": [
+              "eggs"
+            ]
+          }
+        ],
+        "must_not": [
+          "a task named 'groceries for the week'"
+        ]
+      },
+      "tests": "The same, with a heading that has no list cue."
+    }
+  ]
+}

@@ -442,6 +442,39 @@ final class TaskExtractionTests: XCTestCase {
         XCTAssertTrue(sink.tasks.allSatisfy { $0.profile == "Pharmacy" && $0.recurrence == nil })
     }
 
+    func testARepeatTheModelLeftOutIsReadFromTheWords() async {
+        let engine = FlatEngine()
+        engine.answers = [create([task("Water the plants")])]
+        let turns = make(engine, sink: InMemorySaveSink())
+        _ = proposal(await turns.decide(utterance: "water the plants every morning", now: now, final: true))
+        XCTAssertEqual(turns.state.drafts.items.first?.kind, .routine)
+        XCTAssertEqual(turns.state.drafts.items.first?.title, "Water the plants")
+    }
+
+    func testARepeatLeftInTheTitleIsCutOutOfIt() async {
+        let engine = FlatEngine()
+        engine.answers = [create([task("Water the plants every day")])]
+        let turns = make(engine, sink: InMemorySaveSink())
+        _ = proposal(await turns.decide(utterance: "Water the plants every day", now: now, final: true))
+        XCTAssertEqual(turns.state.drafts.items.first?.kind, .routine)
+        XCTAssertEqual(turns.state.drafts.items.first?.title, "Water the plants")
+
+        let unreadable = FlatEngine()
+        unreadable.answers = [create([task("RO service every three months")])]
+        let other = make(unreadable, sink: InMemorySaveSink())
+        _ = proposal(await other.decide(utterance: "RO service every three months", now: now, final: true))
+        XCTAssertNotEqual(other.state.drafts.items.first?.kind, .routine, "a repeat the parser cannot read is never turned into a daily one")
+    }
+
+    func testOnlyTheTaskWhoseWordsSayHowOftenBecomesARoutine() async {
+        let engine = FlatEngine()
+        engine.answers = [create([task("Clean the baby mat"), task("Wash clothes"), task("Buy diapers")])]
+        let turns = make(engine, sink: InMemorySaveSink())
+        _ = proposal(await turns.decide(utterance: "household list clean the baby mat every day, wash clothes, buy diapers", now: now, final: true))
+        let items = turns.state.drafts.items
+        XCTAssertEqual(items.map(\.kind), [.routine, .task, .task])
+    }
+
     func testExampleRecurringTask() async {
         let engine = FlatEngine(), sink = InMemorySaveSink()
         engine.answers = [create([task("Water balcony plants", schedule: "every morning", assignee: "Househelp")])]
@@ -873,27 +906,19 @@ final class TaskExtractionTests: XCTestCase {
         XCTAssertNotNil(ListNameGate.rejection("my pharmacy list", words: "pay the electricity bill", known: ["Pharmacy list"]))
     }
 
-    func testTheSpeakersOwnTaskIsMeBecauseTheySaidSo() {
-        // "I want to order food from Swiggy today." The model wrote no person; "I want to" is the evidence that it is the speaker's task.
-        let made = decodeSaid(create([task("order food from Swiggy")]), said: "I want to order food from Swiggy today.")
-        XCTAssertEqual(made.first?.assignee, "Me")
-        XCTAssertEqual(made.first?.evidence["assignee"], "I want to")
-        XCTAssertEqual(made.first?.due, day(2026, 10, 28), "and today is still its day")
-        XCTAssertEqual(decodeSaid(create([task("call mom")]), said: "remind me to call mom").first?.assignee, "Me")
-        XCTAssertNotEqual(decodeSaid(create([task("clean the fridge", assignee: "Rani")]), said: "I want Rani to clean the fridge").first?.assignee, "Me",
-                          "someone else does it")
-        XCTAssertNil(decodeSaid(create([task("buy a gift for my daughter")]), said: "buy a gift for my daughter").first?.assignee, "\"my\" is not a cue")
-
-        XCTAssertEqual(EvidenceGate.speakerCue(in: "I want to order food", knownPeople: []), "I want to")
-        XCTAssertEqual(EvidenceGate.speakerCue(in: "I also need to buy milk", knownPeople: []), "I also need to")
-        XCTAssertEqual(EvidenceGate.speakerCue(in: "I'll call the plumber", knownPeople: []), "I'll")
-        XCTAssertEqual(EvidenceGate.speakerCue(in: "I should pay the bill", knownPeople: []), "I should")
-        XCTAssertEqual(EvidenceGate.speakerCue(in: "I would like to book a cab", knownPeople: []), "I would like to")
-        XCTAssertEqual(EvidenceGate.speakerCue(in: "I'm going to call the school", knownPeople: []), "I'm going to")
-        XCTAssertNil(EvidenceGate.speakerCue(in: "I want Rani to clean the fridge", knownPeople: ["Rani"]))
-        XCTAssertNil(EvidenceGate.speakerCue(in: "I need to ask the maid to clean", knownPeople: []), "the maid does it")
-        XCTAssertNil(EvidenceGate.speakerCue(in: "I have a meeting at eleven", knownPeople: []), "\"have\" with no \"to\" is not a cue")
-        XCTAssertNil(EvidenceGate.speakerCue(in: "buy my daughter a gift", knownPeople: []))
+    func testMeIsTheModelsAnswerAndSwiftOnlyChecksIt() {
+        let said = "I want to order food from Swiggy today."
+        // The model writes Me, and "I" is in the words: kept, with the words as evidence.
+        let kept = decodeSaid(create([task("order food from Swiggy", assignee: "Me")]), said: said)
+        XCTAssertEqual(kept.first?.assignee, "Me")
+        XCTAssertEqual(kept.first?.evidence["assignee"], "I")
+        XCTAssertEqual(kept.first?.due, day(2026, 10, 28))
+        // The model writes Me for a sentence that says nothing about the speaker: dropped.
+        XCTAssertNil(decodeSaid(create([task("order food from Swiggy", assignee: "Me")]), said: "order food from Swiggy today").first?.assignee)
+        // A placeholder is not a person.
+        XCTAssertNil(decodeSaid(create([task("order food from Swiggy", assignee: "user")]), said: said).first?.assignee)
+        // Swift does not fill a person: the model left it empty, so it stays empty.
+        XCTAssertNil(decodeSaid(create([task("order food from Swiggy")]), said: said).first?.assignee)
     }
 
     func testPiecesOfOneSentenceAreNotTasks() {

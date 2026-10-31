@@ -295,7 +295,7 @@ nonisolated enum ConversationStatus {
         case .thinking:
             return micOn ? "Working on it · tap the mic to stop listening" : "Working on it · mic is off"
         case .preview:
-            return micOn ? "Tap Save or say “yes” · keep talking or tap a task to change it" : "Tap Save · tap a task to change it"
+            return "Your tasks are ready · tap them to review and save"
         case .question:
             return micOn ? "Go ahead, I'm listening" : "Mic is off · type your answer or tap the mic"
         case .idle:

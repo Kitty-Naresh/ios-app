@@ -1881,6 +1881,30 @@ final class VoiceTurnManager {
             Trace.step("SWIFT", "the words only set " + Words.list(reading.parts) + ": no task is made and the model is not asked")
             return applyHeader(reading, said: said, ctx: ctx, ticket: mine)
         }
+        // A new note (no preview waits). A note with nothing to do in it is only a note: it was saved when Kitty began reading, and no
+        // model call is made and nothing pops up. A note that is only a list is read here, without the model.
+        if !waiting, state.clarify.dossier.hasRounds == false {
+            if NoteLists.isBareHeading(said) {
+                lastTrace.route = "list-heading"
+                Trace.step("SWIFT", "a list heading on its own: nothing is made yet, the items come next")
+                return .wait
+            }
+            if NoteIntent.isPlainNote(said) {
+                lastTrace.route = "plain-note"
+                Trace.step("SWIFT", "no sentence in the note says something to do: it stays a note, and the model is not asked")
+                return .handled
+            }
+            if let listed = NoteLists.read(said) {
+                lastTrace.route = "list-note"
+                Trace.step("SWIFT", "the note is only a list of \(listed.items.count) items: read here, and the model is not asked")
+                let value = ExtractionValue(outcome: "create", listName: listed.heading.flatMap { h in
+                                                h.split(separator: " ").count <= 4 && h.lowercased().split(whereSeparator: { !$0.isLetter })
+                                                    .contains(where: { ["list", "order", "cart", "basket"].contains($0) }) ? h : nil },
+                                            question: nil, tasks: listed.items.map { ExtractionTaskValue(title: $0) }, mayHaveMore: false)
+                let answered = BulkDecisionValue(wait: false, action: "create", clarifyingQuestion: "", extraction: value)
+                return await finishExtraction(answered, said: said, ctx: ctx, ticket: mine, final: final)
+            }
+        }
         let made: FlatAnswer
         if let answer, answer.said == said { made = answer } else { made = await flatAnswer(said: said, ctx: ctx) }
         if let early = made.early { return early }
@@ -2300,15 +2324,13 @@ final class VoiceTurnManager {
         return any ? merged : nil
     }
 
-    /// The model only said "wait". While the user may still be speaking the turn waits; once they have stopped, Kitty asks what the
-    /// task is.
+    /// The model only said "wait". While the user may still be speaking the turn waits. Once they have stopped, the model found nothing
+    /// to do in the words: a note with no task is still a note (it was saved when Kitty began reading it), so nothing pops up and
+    /// nothing is asked. Words that ask for a task but name none ("add a task") never come here: they have their own question.
     private func modelWaited(final: Bool) -> TurnResult {
         guard final else { return .wait }
-        lastTrace.route = "model-waited-asked"
-        if case .ask(let asked) = state.clarify.register(question: ClarificationStateManager.fallbackQuestion(for: .action), field: .action) {
-            return .question(asked)
-        }
-        return .reply(AgentReply(message: "I couldn't tell what to add, so I didn't add anything.", didAdd: false))
+        lastTrace.route = "model-waited-nothing"
+        return .handled
     }
 
     /// "Tomorrow" and "Tonight" read naturally in lower case in the middle of a sentence; weekday names keep their capital.
